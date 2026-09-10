@@ -1,0 +1,44 @@
+# relay-x gateway configuration (Phase 1)
+#
+# Static immutable snapshot, parsed once at startup.
+
+snapshot_version = 1
+
+[server]
+listen = "127.0.0.1:8080"
+admin_listen = "127.0.0.1:9090"
+total_timeout_ms = 120000
+graceful_shutdown_ms = 5000
+
+# ── Routes ────────────────────────────────────────────────────────────────
+# Route a client path prefix to a lane.
+
+[[routes]]
+id = "mock-chat"
+path_prefix = "/v1/chat/completions"
+methods = ["POST"]
+lane = "mock-lane"
+
+[[routes]]
+id = "mock-echo"
+path_prefix = "/v1/echo"
+methods = ["POST", "GET"]
+lane = "mock-lane"
+
+[[routes]]
+id = "mock-health"
+path_prefix = "/health"
+methods = ["GET"]
+lane = "mock-lane"
+
+# ── Lanes ─────────────────────────────────────────────────────────────────
+# Each lane names an upstream base URL + connection pool behavior.
+
+[[lanes]]
+id = "mock-lane"
+base_url = "http://127.0.0.1:8101"
+connect_timeout_ms = 2000
+idle_timeout_ms = 90000
+frame_timeout_ms = 60000
+max_concurrent = 128
+max_idle = 64

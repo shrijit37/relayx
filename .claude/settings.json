@@ -1,0 +1,59 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git show:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(tree:*)",
+      "Bash(wc:*)",
+      "Bash(cargo fmt --check:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(prettier --check:*)",
+      "Bash(gh:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(cat:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '⚡ Verify CLAUDE.md architectural rules (12 non-negotiable constraints) before finalizing.'"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/check-rust-policy.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit.*(Cargo\\.lock|pnpm-lock\\.yaml|pnpm-lock\\.yml|bun\\.lockb|yarn\\.lock)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '⚠️  Blocked: lock files must not be manually edited. They are managed by the package manager.' && exit 1"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit.*\\.env",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '🔒 Blocked: .env files must be edited manually, not by Claude.' && exit 1"
+          }
+        ]
+      }
+    ]
+  }
+}

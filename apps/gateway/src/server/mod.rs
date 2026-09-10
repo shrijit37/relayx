@@ -1,0 +1,167 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::Body;
+use axum::routing::any;
+use tokio::net::TcpListener;
+
+use crate::config::ConfigSnapshot;
+use crate::proxy::proxy_handler;
+
+/// Shared gateway state, immutable after startup.
+pub struct AppState {
+    pub config: Arc<ConfigSnapshot>,
+    pub client: hyper_util::client::legacy::Client<
+        hyper_util::client::legacy::connect::HttpConnector,
+        Body,
+    >,
+    /// Per-request overall timeout deadline.
+    pub timeout: Duration,
+    /// Maximum time between body frames. If no frame arrives within this
+    /// duration, the streaming response is terminated.
+    pub frame_timeout: Duration,
+}
+
+/// The gateway server — binds listeners and serves traffic.
+pub struct GatewayServer {
+    config: Arc<ConfigSnapshot>,
+    server_config: crate::config::ServerConfig,
+    metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
+}
+
+impl GatewayServer {
+    /// Create a new server from a parsed config.
+    pub fn new(raw_config: crate::config::GatewayConfig) -> Result<Self, anyhow::Error> {
+        let server_config = raw_config.server.clone();
+        let config = raw_config.compile()?;
+
+        // Install the metrics recorder early so all `metrics::` macros resolve.
+        let metrics_handle = crate::observability::install_metrics()?;
+
+        Ok(Self {
+            config: Arc::new(config),
+            server_config,
+            metrics_handle,
+        })
+    }
+
+    /// Run the gateway until shutdown signal.
+    pub async fn run(self) -> anyhow::Result<()> {
+        // ── Proxy client (connection pool) ─────────────────────────────────
+        let client = crate::upstream::build_http_client(
+            Duration::from_secs(90),
+            64,
+        );
+
+        let state = Arc::new(AppState {
+            config: self.config.clone(),
+            client,
+            timeout: Duration::from_millis(self.server_config.total_timeout_ms),
+            frame_timeout: Duration::from_secs(60), // Default; per-lane override in Phase 3
+        });
+
+        // ── Proxy listener ────────────────────────────────────────────────
+        let proxy_router = Router::new()
+            .fallback(any(proxy_handler))
+            .with_state(state);
+
+        let proxy_listener = TcpListener::bind(self.server_config.listen).await?;
+        tracing::info!(addr = %self.server_config.listen, "proxy listener started");
+
+        // ── Admin listener ────────────────────────────────────────────────
+        let admin_router = crate::observability::admin_router(self.metrics_handle.clone());
+
+        let admin_listener = TcpListener::bind(self.server_config.admin_listen).await?;
+        tracing::info!(addr = %self.server_config.admin_listen, "admin listener started");
+
+        // ── Serve both listeners until shutdown ────────────────────────────
+        let shutdown_duration = Duration::from_millis(self.server_config.graceful_shutdown_ms);
+
+        // Serve proxy until ctrl-c.
+        let proxy_future = axum::serve(proxy_listener, proxy_router.into_make_service());
+
+        let admin_future = axum::serve(admin_listener, admin_router.into_make_service());
+
+        // `axum::serve` returns a `Serve` which implements `IntoFuture`,
+        // not `Future` directly — wrap it before spawning.
+        let admin_handle = tokio::spawn(admin_future.into_future());
+
+        tracing::info!("relay-gateway ready");
+
+        tokio::select! {
+            result = proxy_future => {
+                if let Err(e) = result {
+                    tracing::error!(error = %e, "proxy server error");
+                    return Err(anyhow::anyhow!(e));
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("shutdown signal received");
+            }
+        }
+
+        // Graceful shutdown: stop accepting, let in-flight requests drain.
+        admin_handle.abort();
+        tokio::time::sleep(shutdown_duration).await;
+        tracing::info!("relay-gateway stopped");
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use http::Request;
+    use std::sync::{Once, OnceLock};
+    use tower::ServiceExt;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// Create a test admin router with a test-installed metrics recorder.
+    fn test_admin_router() -> anyhow::Result<axum::Router> {
+        static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+        static INIT: Once = Once::new();
+        static INIT_ERR: OnceLock<String> = OnceLock::new();
+
+        INIT.call_once(|| {
+            match metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder() {
+                Ok(handle) => {
+                    let _ = HANDLE.set(handle);
+                }
+                Err(e) => {
+                    let _ = INIT_ERR.set(e.to_string());
+                }
+            }
+        });
+
+        if let Some(err) = INIT_ERR.get() {
+            return Err(anyhow::anyhow!("install metrics recorder: {err}"));
+        }
+
+        let handle = HANDLE
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("metrics recorder handle unavailable"))?
+            .clone();
+        Ok(crate::observability::admin_router(handle))
+    }
+
+    #[tokio::test]
+    async fn test_healthz_returns_200() -> TestResult {
+        let router = test_admin_router()?;
+        let req = Request::builder().uri("/healthz").body(Body::empty())?;
+        let response = router.oneshot(req).await?;
+        assert_eq!(response.status(), http::StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ready_returns_200() -> TestResult {
+        let router = test_admin_router()?;
+        let req = Request::builder().uri("/ready").body(Body::empty())?;
+        let response = router.oneshot(req).await?;
+        assert_eq!(response.status(), http::StatusCode::OK);
+        Ok(())
+    }
+}

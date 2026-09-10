@@ -1,0 +1,19 @@
+[package]
+name = "test-harness"
+edition.workspace = true
+version.workspace = true
+description = "In-process mock + gateway harness for integration tests and benchmarks"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio.workspace = true
+hyper-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+axum.workspace = true
+bytes.workspace = true
+anyhow.workspace = true
+mock-upstream = { path = "../../crates/mock-upstream" }
+relay-gateway = { path = "../../apps/gateway" }

@@ -1,0 +1,28 @@
+[package]
+name = "mock-upstream"
+edition.workspace = true
+version.workspace = true
+description = "Reusable mock LLM upstream for tests and benchmarks"
+
+[dependencies]
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "mock-upstream"
+path = "src/bin/mock-upstream.rs"

@@ -1,0 +1,48 @@
+# Build artifacts
+/target
+**/*.rs.bk
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmark artifacts
+benchmarks/last_run.json
+
+# AI agent tooling — imported/third-party skills (not project-specific)
+.codex/
+.agents/
+skills-lock.json
+.claude/skills/code-review
+.claude/skills/codebase-design
+.claude/skills/diagnosing-bugs
+.claude/skills/domain-modeling
+.claude/skills/grill-me
+.claude/skills/grill-with-docs
+.claude/skills/grilling
+.claude/skills/handoff
+.claude/skills/implement
+.claude/skills/improve-codebase-architecture
+.claude/skills/research
+.claude/skills/resolving-merge-conflicts
+.claude/skills/setup-matt-pocock-skills
+.claude/skills/tdd
+.claude/skills/teach
+.claude/skills/to-questionnaire
+.claude/skills/to-spec
+.claude/skills/to-tickets
+.claude/skills/triage
+.claude/skills/wait-what
+.claude/skills/wayfinder
