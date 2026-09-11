@@ -7,6 +7,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use crate::context::ExecutionContext;
 use crate::error::{NodeError, WorkflowError};
 use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
@@ -54,6 +57,34 @@ impl EdgeCondition {
 
 // ─── Execution IR types ─────────────────────────────────────────────────────
 
+/// Version of the Execution IR format. Bump on any structural change to the
+/// plan that would invalidate previously compiled plans.
+pub const PLAN_VERSION: u64 = 1;
+
+/// Classification of a compiled plan for execution-path selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanClassification {
+    /// Trivial pipeline: input → single LLM → output. Bypasses the interpreter.
+    FastPathSimple,
+    /// Linear pipeline that requires protocol translation.
+    FastPathTranslated,
+    /// Non-trivial graph (conditions, routers, multiple LLMs, fallback, retry).
+    WorkflowExecution,
+}
+
+/// Pre-resolved metadata for fast-path plans, computed at compile time.
+#[derive(Debug, Clone)]
+pub struct FastPathMetadata {
+    /// Node id of the single LLM node.
+    pub llm_node_id: String,
+    /// Lane carrying network egress for the provider.
+    pub lane_id: String,
+    /// Wire protocol of the provider.
+    pub protocol: protocol_core::canonical::Protocol,
+    /// Default model.
+    pub model: String,
+}
+
 /// A compiled execution node — the runtime representation of a workflow node.
 #[derive(Debug, Clone)]
 pub struct ExecNode {
@@ -85,16 +116,26 @@ pub struct ExecEdge {
 }
 
 /// A compiled execution plan — the runtime model of a validated workflow.
+///
+/// Immutable after compilation. Plans carry a version, a deterministic
+/// content hash, and an execution classification so the runtime can select
+/// the correct path without re-interpreting the workflow.
 #[derive(Debug, Clone)]
 pub struct ExecutionPlan {
-    /// All nodes in topological execution order.
-    pub nodes: Vec<ExecNode>,
-    /// All edges in the graph.
-    pub edges: Vec<ExecEdge>,
+    nodes: Vec<ExecNode>,
+    edges: Vec<ExecEdge>,
     /// Topological order indices: node_id → position in `nodes`.
     order: HashMap<NodeId, usize>,
     /// Edges indexed by source node.
     edges_from: HashMap<NodeId, Vec<usize>>,
+    /// IR format version.
+    plan_version: u64,
+    /// Deterministic content hash of the compiled plan.
+    plan_hash: String,
+    /// Execution-path classification.
+    classification: PlanClassification,
+    /// Fast-path pre-resolved metadata (present only when classified fast path).
+    fast_path: Option<FastPathMetadata>,
 }
 
 impl ExecutionPlan {
@@ -172,12 +213,49 @@ impl ExecutionPlan {
         let mut nodes: Vec<ExecNode> = node_map.into_values().collect();
         nodes.sort_by_key(|n| order.get(&n.id).copied().unwrap_or(usize::MAX));
 
+        let (classification, fast_path) = classify_plan(&nodes);
+        let plan_hash = compute_plan_hash(&nodes, &edges);
+
         Ok(Self {
             nodes,
             edges,
             order,
             edges_from,
+            plan_version: PLAN_VERSION,
+            plan_hash,
+            classification,
+            fast_path,
         })
+    }
+
+    /// Return the execution nodes in topological order.
+    pub fn nodes(&self) -> &[ExecNode] {
+        &self.nodes
+    }
+
+    /// Return the compiled edges.
+    pub fn edges(&self) -> &[ExecEdge] {
+        &self.edges
+    }
+
+    /// IR format version.
+    pub fn plan_version(&self) -> u64 {
+        self.plan_version
+    }
+
+    /// Deterministic content hash of the plan.
+    pub fn plan_hash(&self) -> &str {
+        &self.plan_hash
+    }
+
+    /// Execution-path classification for this plan.
+    pub fn classification(&self) -> PlanClassification {
+        self.classification
+    }
+
+    /// Pre-resolved fast-path metadata, if this plan is classified fast path.
+    pub fn fast_path(&self) -> Option<&FastPathMetadata> {
+        self.fast_path.as_ref()
     }
 
     /// Get the topological index for a node.
@@ -194,6 +272,67 @@ impl ExecutionPlan {
     fn edges_from(&self, source: &NodeId) -> &[usize] {
         self.edges_from.get(source).map_or(&[], |v| v.as_slice())
     }
+}
+
+/// Classify a compiled plan into its execution-path category and pre-resolve
+/// fast-path metadata when the graph reduces to input → one LLM → output.
+fn classify_plan(nodes: &[ExecNode]) -> (PlanClassification, Option<FastPathMetadata>) {
+    let llm_nodes: Vec<&ExecNode> = nodes.iter().filter(|n| n.kind == NodeKind::Llm).collect();
+
+    if llm_nodes.len() == 1 {
+        let llm = llm_nodes[0];
+        // A fast path must not branch (conditions/routers) nor involve
+        // external capabilities (MCP/Skill nodes).
+        let has_branching = nodes
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Condition | NodeKind::Router));
+        let has_external = nodes
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Skill | NodeKind::Mcp));
+
+        if !has_branching
+            && !has_external
+            && let NodeConfig::Llm(cfg) = &llm.config
+        {
+            let meta = FastPathMetadata {
+                llm_node_id: llm.id.clone(),
+                lane_id: cfg.lane_id.clone().unwrap_or_else(|| "default".into()),
+                protocol: protocol_core::canonical::Protocol::OpenAiChatCompletions,
+                model: cfg.model.clone().unwrap_or_else(|| "default".into()),
+            };
+            return (PlanClassification::FastPathSimple, Some(meta));
+        }
+    }
+
+    (PlanClassification::WorkflowExecution, None)
+}
+
+/// Compute a deterministic content hash over the compiled nodes and edges.
+fn compute_plan_hash(nodes: &[ExecNode], edges: &[ExecEdge]) -> String {
+    let mut hasher = Sha256::new();
+    for node in nodes {
+        hasher.update(node.id.as_bytes());
+        if let Ok(kind_json) = serde_json::to_vec(&node.kind) {
+            hasher.update(kind_json);
+        }
+        if let Ok(config_json) = serde_json::to_vec(&node.config) {
+            hasher.update(config_json);
+        }
+    }
+    for edge in edges {
+        hasher.update(edge.source.as_bytes());
+        hasher.update(edge.source_port.as_bytes());
+        hasher.update(edge.target.as_bytes());
+        hasher.update(edge.target_port.as_bytes());
+    }
+    let digest = hasher.finalize();
+    // Hex-encode for readability.
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// Topological sort via Kahn's algorithm. Returns node IDs in execution order.
@@ -498,5 +637,7 @@ async fn execute_node(
         }
         NodeConfig::Mcp(config) => crate::nodes::mcp::execute(config, ctx, input).await,
         NodeConfig::Skill(config) => crate::nodes::skill::execute(config, ctx, input).await,
+        NodeConfig::Fallback(config) => crate::nodes::fallback::execute(config, ctx, input).await,
+        NodeConfig::Retry(config) => crate::nodes::retry::execute(config, ctx, input).await,
     }
 }

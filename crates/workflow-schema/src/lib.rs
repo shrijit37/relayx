@@ -60,6 +60,10 @@ pub enum NodeKind {
     Mcp,
     /// Loads and applies a Skill.
     Skill,
+    /// Tries a sequence of providers until one succeeds.
+    Fallback,
+    /// Retries a downstream node's execution with configurable policy.
+    Retry,
 }
 
 /// Configuration for a node. Variants correspond to `NodeKind`.
@@ -74,6 +78,8 @@ pub enum NodeConfig {
     Condition(ConditionConfig),
     Mcp(McpConfig),
     Skill(SkillConfig),
+    Fallback(FallbackConfig),
+    Retry(RetryConfig),
 }
 
 /// Configuration for an Input node.
@@ -210,6 +216,49 @@ pub struct SkillConfig {
     /// Whether to use progressive loading (metadata → content).
     #[serde(default = "default_true")]
     pub progressive: bool,
+}
+
+/// Configuration for a Fallback node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FallbackConfig {
+    /// Ordered list of provider lane ids to try.
+    pub providers: Vec<FallbackProvider>,
+    /// Stop retrying after this many consecutive failures (per provider).
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+}
+
+/// A single provider entry in a fallback chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FallbackProvider {
+    /// Lane id.
+    pub lane_id: String,
+    /// Model override.
+    pub model: String,
+}
+
+fn default_max_retries() -> u32 {
+    1
+}
+
+/// Configuration for a Retry node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts (including the initial one).
+    pub max_attempts: u32,
+    /// Delay between retries in milliseconds.
+    #[serde(default = "default_retry_delay_ms")]
+    pub delay_ms: u64,
+    /// Retry on timeout errors.
+    #[serde(default = "default_true")]
+    pub on_timeout: bool,
+    /// Retry on provider errors (5xx / connection).
+    #[serde(default = "default_true")]
+    pub on_provider_error: bool,
+}
+
+fn default_retry_delay_ms() -> u64 {
+    1000
 }
 
 // ─── Port model ─────────────────────────────────────────────────────────────

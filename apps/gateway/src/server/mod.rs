@@ -21,6 +21,9 @@ pub struct AppState {
     /// Maximum time between body frames. If no frame arrives within this
     /// duration, the streaming response is terminated.
     pub frame_timeout: Duration,
+    /// Immutable runtime snapshot: compiled workflow plans, lanes, providers.
+    /// None for pure proxy deployments that don't execute workflows.
+    pub snapshot: Option<Arc<workflow_runtime::RuntimeSnapshot>>,
 }
 
 /// The gateway server — binds listeners and serves traffic.
@@ -56,6 +59,7 @@ impl GatewayServer {
             client,
             timeout: Duration::from_millis(self.server_config.total_timeout_ms),
             frame_timeout: Duration::from_secs(60), // Default; per-lane override in Phase 3
+            snapshot: None, // Workflow snapshots are published by the control plane
         });
 
         // ── Proxy listener ────────────────────────────────────────────────

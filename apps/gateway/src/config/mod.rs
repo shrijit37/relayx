@@ -105,6 +105,11 @@ pub struct RouteConfig {
     /// Must be set together with `source_protocol` (or neither).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_protocol: Option<String>,
+
+    /// When set, this route executes a compiled workflow instead of proxying
+    /// to a lane. The `lane` field is ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +190,8 @@ pub struct CompiledRoute {
     /// and `target_protocol` (upstream side). Absence means pure passthrough.
     pub source_protocol: Option<protocol_core::canonical::Protocol>,
     pub target_protocol: Option<protocol_core::canonical::Protocol>,
+    /// When set, this route executes a compiled workflow instead of proxying.
+    pub workflow_id: Option<String>,
 }
 
 /// A fully parsed lane with pre-cased headers ready for forwarding.
@@ -318,6 +325,7 @@ impl GatewayConfig {
                     .as_deref()
                     .map(parse_protocol)
                     .transpose()?,
+                workflow_id: route_cfg.workflow_id.clone(),
             });
         }
 

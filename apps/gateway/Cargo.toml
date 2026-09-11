@@ -30,6 +30,8 @@ url.workspace = true
 anyhow.workspace = true
 futures-util.workspace = true
 protocol-core = { path = "../../crates/protocol-core" }
+workflow-schema = { path = "../../crates/workflow-schema" }
+workflow-runtime = { path = "../../crates/workflow-runtime" }
 
 [dev-dependencies]
 criterion.workspace = true

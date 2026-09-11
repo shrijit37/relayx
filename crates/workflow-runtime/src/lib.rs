@@ -8,12 +8,23 @@
 //! Workflow Definition → Validation → Compilation → Execution IR → Runtime
 //! ```
 
+pub mod capability;
+pub mod compiler;
 pub mod context;
 pub mod error;
 pub mod execution;
+pub mod fast_path;
 pub mod nodes;
+pub mod provider;
+pub mod snapshot;
 
+pub use capability::Capabilities;
+pub use compiler::{CompileContext, CompileError, compile_workflow};
 pub use context::ExecutionContext;
 pub use error::{NodeError, WorkflowError};
-pub use execution::{EdgeCondition, ExecEdge, ExecNode, ExecutionPlan, NodeRuntime};
-pub use nodes::{NodeInput, NodeKind, NodeOutput, RuntimeValue};
+pub use execution::{
+    EdgeCondition, ExecEdge, ExecNode, ExecutionPlan, NodeRuntime, PlanClassification,
+};
+pub use nodes::{NodeExecutor, NodeInput, NodeKind, NodeOutput, NodeRegistry, RuntimeValue};
+pub use provider::{ProviderEntry, ProviderRegistry};
+pub use snapshot::{RuntimeSnapshot, RuntimeSnapshotBuilder};
