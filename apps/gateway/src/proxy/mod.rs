@@ -30,7 +30,11 @@ impl<S: Unpin> Unpin for FrameTimeoutStream<S> {}
 impl<S> FrameTimeoutStream<S> {
     fn new(inner: S, timeout: Duration) -> Self {
         let sleep = Box::pin(tokio::time::sleep(timeout));
-        Self { inner, timeout, sleep }
+        Self {
+            inner,
+            timeout,
+            sleep,
+        }
     }
 }
 
@@ -142,26 +146,198 @@ async fn proxy_handler_inner(
 
     let _active_guard = crate::observability::track_active_request(lane_id);
 
-    // ── 2. Build upstream request ────────────────────────────────────────────
+    // If the route declares protocol translation, route the request through
+    // the protocol engine; otherwise use the Phase 1 passthrough path.
+    // Copy needed route data before passing `state` to sub-functions.
+    let src_proto = route.source_protocol;
+    let tgt_proto = route.target_protocol;
+    let route_id = route_id.to_owned();
+    let lane_id = lane_id.to_owned();
+
+    match (src_proto, tgt_proto) {
+        (Some(src), Some(tgt)) => {
+            let engine = crate::protocol::ProtocolEngine::from_pair(src, tgt)?;
+            translate_proxy_request(state, &engine, req, &lane_id, &route_id, &request_id, start)
+                .await
+        }
+        _ => passthrough_proxy_request(state, req, &lane_id, &route_id, &request_id, start).await,
+    }
+}
+
+/// Phase 1 fast-path passthrough: forward the request body verbatim and
+/// stream the upstream response back without translation.
+async fn passthrough_proxy_request(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    lane_id: &str,
+    route_id: &str,
+    request_id: &str,
+    start: Instant,
+) -> Result<axum::response::Response<Body>, GatewayError> {
+    let path = req.uri().path().to_string();
+    let lane = state
+        .config
+        .lookup_lane(lane_id)
+        .ok_or_else(|| GatewayError::Internal(format!("unknown lane: {lane_id}")))?;
+
     let upstream_req = build_upstream_request(&lane.base_url, req, &path)?;
 
-    // ── 3. Forward to upstream ──────────────────────────────────────────────
+    forward_upstream(
+        state,
+        upstream_req,
+        lane_id,
+        route_id,
+        request_id,
+        start,
+        None,
+    )
+    .await
+}
+
+/// Translation path: decode the client request, translate through the
+/// canonical model, forward the translated request upstream, then translate
+/// the upstream response back to the client's protocol.
+///
+/// Streaming responses are translated event-by-event via the SSE parser.
+async fn translate_proxy_request(
+    state: Arc<AppState>,
+    engine: &crate::protocol::ProtocolEngine,
+    req: Request<Body>,
+    lane_id: &str,
+    _route_id: &str,
+    request_id: &str,
+    start: Instant,
+) -> Result<axum::response::Response<Body>, GatewayError> {
+    let _path = req.uri().path().to_string();
+    let lane = state
+        .config
+        .lookup_lane(lane_id)
+        .ok_or_else(|| GatewayError::Internal(format!("unknown lane: {lane_id}")))?;
+
+    // ── Buffer client request body and decode ────────────────────────────────
+    let (_parts, body) = req.into_parts();
+    let body_bytes = http_body_util::BodyExt::collect(body)
+        .await
+        .map_err(|e| GatewayError::Internal(format!("failed to buffer request body: {e}")))?
+        .to_bytes();
+
+    let canonical_request = engine.decode_request(&body_bytes)?;
+
+    // ── Encode for the target protocol ───────────────────────────────────────
+    let target_body = engine.encode_request(&canonical_request)?;
+    let is_stream = canonical_request.stream;
+
+    // ── Forward translated request ───────────────────────────────────────────
+    let lane_url = &lane.base_url;
+    let method = http::Method::POST; // all LLM protocol routes are POST
+    let upstream_url = {
+        let mut u = lane_url.clone();
+        // Use the target protocol's canonical upstream path, not the
+        // client's original path (which is specific to the source protocol).
+        let target_path = crate::config::protocol_upstream_path(engine.target_protocol());
+        u.set_path(target_path);
+        u
+    };
+
+    let mut upstream_req = http::Request::builder()
+        .method(method)
+        .uri(upstream_url.as_str())
+        .header(http::header::CONTENT_TYPE, "application/json");
+
+    // Copy Host.
+    let host_value = transport::build_host_header(
+        lane_url.scheme(),
+        lane_url.host_str().unwrap_or("localhost"),
+        lane_url.port(),
+    );
+    upstream_req = upstream_req.header(http::header::HOST, host_value);
+
+    let upstream_req = upstream_req
+        .body(Body::from(target_body))
+        .map_err(|e| GatewayError::Internal(format!("failed to build upstream request: {e}")))?;
+
     let connect_start = Instant::now();
     let upstream_response = state.client.request(upstream_req).await.map_err(|e| {
         tracing::warn!(error = %e, request_id = %request_id, "upstream request failed");
         GatewayError::UpstreamConnection {
-            upstream: lane_id.clone(),
+            upstream: lane_id.to_owned(),
             reason: e.to_string(),
         }
     })?;
     let connect_duration = connect_start.elapsed();
     crate::observability::record_upstream_connect_duration(lane_id, connect_duration);
 
-    // ── 4. Stream response back to client ────────────────────────────────────
+    let status = upstream_response.status();
+    let status_str = status.as_str().to_string();
+    let ttfb = start.elapsed();
+    crate::observability::record_upstream_ttfb(lane_id, ttfb);
+    crate::observability::record_request_duration(&status_str, lane_id, ttfb);
+    crate::observability::increment_request_count(&status_str, lane_id);
+
+    tracing::debug!(
+        status = %status,
+        upstream_ttfb_ms = ttfb.as_millis(),
+        request_id = %request_id,
+        "translated upstream responded"
+    );
+
+    // ── Translate response ───────────────────────────────────────────────────
+    if is_stream {
+        let response_body = engine.stream_response(
+            Body::new(upstream_response.into_body()),
+            state.frame_timeout,
+        )?;
+
+        axum::response::Response::builder()
+            .status(status)
+            .header(http::header::CONTENT_TYPE, "text/event-stream")
+            .body(response_body)
+            .map_err(|e| GatewayError::Internal(format!("failed to build response: {e}")))
+    } else {
+        // Non-streaming: buffer, decode upstream response, encode for client.
+        let upstream_bytes = http_body_util::BodyExt::collect(upstream_response.into_body())
+            .await
+            .map_err(|e| {
+                GatewayError::Internal(format!("failed to buffer upstream response: {e}"))
+            })?
+            .to_bytes();
+
+        let canonical_response = engine.decode_response(&upstream_bytes)?;
+        let client_body = engine.encode_response(&canonical_response)?;
+
+        axum::response::Response::builder()
+            .status(status)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(client_body))
+            .map_err(|e| GatewayError::Internal(format!("failed to build response: {e}")))
+    }
+}
+
+/// Forward an upstream request and stream the response back.
+/// When `override_body` is Some, that body replaces the upstream response.
+async fn forward_upstream(
+    state: Arc<AppState>,
+    upstream_req: HttpRequest<Body>,
+    lane_id: &str,
+    _route_id: &str,
+    request_id: &str,
+    start: Instant,
+    override_body: Option<Body>,
+) -> Result<axum::response::Response<Body>, GatewayError> {
+    let connect_start = Instant::now();
+    let upstream_response = state.client.request(upstream_req).await.map_err(|e| {
+        tracing::warn!(error = %e, request_id = %request_id, "upstream request failed");
+        GatewayError::UpstreamConnection {
+            upstream: lane_id.to_owned(),
+            reason: e.to_string(),
+        }
+    })?;
+    let connect_duration = connect_start.elapsed();
+    crate::observability::record_upstream_connect_duration(lane_id, connect_duration);
+
     let status = upstream_response.status();
     let status_str = status.as_str().to_string();
 
-    // Record TTFB (time from request start to receiving response headers).
     let ttfb = start.elapsed();
     crate::observability::record_upstream_ttfb(lane_id, ttfb);
     crate::observability::record_request_duration(&status_str, lane_id, ttfb);
@@ -174,21 +350,21 @@ async fn proxy_handler_inner(
         "upstream responded"
     );
 
-    // Forward the streaming body directly (no buffering) with bytes_out tracking.
-    let request_id_for_stream = request_id.clone();
-    let upstream_body = upstream_response.into_body();
-    let mapped_body = upstream_body.into_data_stream().map_err(move |e| {
-        tracing::error!(
-            error = %e,
-            request_id = %request_id_for_stream,
-            "upstream body read error during streaming"
-        );
-        std::io::Error::other(e.to_string())
-    });
-    let response_body = Body::from_stream(FrameTimeoutStream::new(
-        mapped_body,
-        state.frame_timeout,
-    ));
+    let response_body = if let Some(body) = override_body {
+        body
+    } else {
+        let request_id_for_stream = request_id.to_owned();
+        let upstream_body = upstream_response.into_body();
+        let mapped_body = upstream_body.into_data_stream().map_err(move |e| {
+            tracing::error!(
+                error = %e,
+                request_id = %request_id_for_stream,
+                "upstream body read error during streaming"
+            );
+            std::io::Error::other(e.to_string())
+        });
+        Body::from_stream(FrameTimeoutStream::new(mapped_body, state.frame_timeout))
+    };
 
     axum::response::Response::builder()
         .status(status)

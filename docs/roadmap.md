@@ -22,13 +22,16 @@
 
 ## Phase 2 — Protocol layer
 
-- [ ] canonical request/event model
-- [ ] Anthropic adapter
-- [ ] OpenAI Chat Completions adapter
-- [ ] OpenAI Responses adapter
-- [ ] protocol conformance fixtures
-- [ ] streaming correctness
-- [ ] capability matrix
+- [x] canonical request/event model
+- [x] Anthropic adapter
+- [x] OpenAI Chat Completions adapter
+- [x] OpenAI Responses adapter
+- [x] protocol conformance fixtures
+- [x] streaming correctness (SSE parser + boundary tests)
+- [x] capability matrix
+- [x] performance benchmarks for translation
+- [x] gateway integration (protocol translation via `ProtocolEngine`)
+- [x] property tests (SSE parser + canonical roundtrip)
 
 ## Phase 3 — Lanes and routing
 

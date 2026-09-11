@@ -66,10 +66,7 @@ async fn main() -> anyhow::Result<()> {
     let mock = spawn_mock_on(config, listen).await?;
     let addr = mock.addr;
 
-    println!(
-        "mock-upstream listening on {} (mode={})",
-        addr, cli.mode
-    );
+    println!("mock-upstream listening on {} (mode={})", addr, cli.mode);
     println!("  /v1/echo          POST echo server");
     println!("  /v1/chat/completions  POST (SSE or JSON)");
     println!("  /health          GET health");

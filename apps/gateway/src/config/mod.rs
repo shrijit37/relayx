@@ -3,8 +3,35 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
+use protocol_core::canonical::Protocol;
 use serde::Deserialize;
 use thiserror::Error;
+
+// ─── Protocol parsing ────────────────────────────────────────────────────────
+
+/// Parse a protocol name from config into a canonical protocol identifier.
+///
+/// Accepts the short names used in route configs (`anthropic` for shorthand)
+/// as well as the canonical display names.
+pub fn parse_protocol(name: &str) -> Result<Protocol, ConfigError> {
+    match name {
+        "openai_chat" | "openai_chat_completions" => Ok(Protocol::OpenAiChatCompletions),
+        "anthropic" | "anthropic_messages" => Ok(Protocol::AnthropicMessages),
+        "openai_responses" => Ok(Protocol::OpenAiResponses),
+        other => Err(ConfigError::Validation(format!(
+            "unknown protocol '{other}' (expected 'openai_chat', 'anthropic', or 'openai_responses')"
+        ))),
+    }
+}
+
+/// Default path for each protocol on the upstream.
+pub fn protocol_upstream_path(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::OpenAiChatCompletions => "/v1/chat/completions",
+        Protocol::AnthropicMessages => "/v1/messages",
+        Protocol::OpenAiResponses => "/v1/responses",
+    }
+}
 
 // ─── Config errors ──────────────────────────────────────────────────────────
 
@@ -67,6 +94,17 @@ pub struct RouteConfig {
 
     /// Lane this route forwards to.
     pub lane: String,
+
+    /// Client-facing wire protocol, when the route translates protocols.
+    /// Values: "openai_chat", "anthropic", "openai_responses".
+    /// Must be set together with `target_protocol` (or neither).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_protocol: Option<String>,
+
+    /// Upstream wire protocol, when the route translates protocols.
+    /// Must be set together with `source_protocol` (or neither).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +181,10 @@ pub struct CompiledRoute {
     pub path_prefix: String,
     pub methods: Vec<http::Method>,
     pub lane_id: String,
+    /// When set, this route translates between `source_protocol` (client side)
+    /// and `target_protocol` (upstream side). Absence means pure passthrough.
+    pub source_protocol: Option<protocol_core::canonical::Protocol>,
+    pub target_protocol: Option<protocol_core::canonical::Protocol>,
 }
 
 /// A fully parsed lane with pre-cased headers ready for forwarding.
@@ -266,6 +308,16 @@ impl GatewayConfig {
                 path_prefix: route_cfg.path_prefix.clone(),
                 methods,
                 lane_id: route_cfg.lane.clone(),
+                source_protocol: route_cfg
+                    .source_protocol
+                    .as_deref()
+                    .map(parse_protocol)
+                    .transpose()?,
+                target_protocol: route_cfg
+                    .target_protocol
+                    .as_deref()
+                    .map(parse_protocol)
+                    .transpose()?,
             });
         }
 
@@ -323,6 +375,27 @@ impl GatewayConfig {
                     "route '{}': path_prefix must start with '/'",
                     route.id
                 )));
+            }
+            // Protocol translation fields must be set together.
+            match (&route.source_protocol, &route.target_protocol) {
+                (Some(_), None) => {
+                    return Err(ConfigError::Validation(format!(
+                        "route '{}': source_protocol set without target_protocol",
+                        route.id
+                    )));
+                }
+                (None, Some(_)) => {
+                    return Err(ConfigError::Validation(format!(
+                        "route '{}': target_protocol set without source_protocol",
+                        route.id
+                    )));
+                }
+                (Some(src), Some(tgt)) => {
+                    // Validate both names parse.
+                    parse_protocol(src)?;
+                    parse_protocol(tgt)?;
+                }
+                (None, None) => {}
             }
         }
         // Check for duplicate lane IDs.

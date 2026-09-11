@@ -75,6 +75,12 @@ methods = ["POST"]
 lane = "mock"
 
 [[routes]]
+id = "mock-messages"
+path_prefix = "/v1/messages"
+methods = ["POST"]
+lane = "mock"
+
+[[routes]]
 id = "mock-echo"
 path_prefix = "/v1/echo"
 methods = ["POST", "GET"]
@@ -155,6 +161,82 @@ pub async fn spawn_sse_stack(chunks: usize, chunk_size: usize) -> Result<TestSta
     Ok(TestStack { gateway, mock })
 }
 
+/// Spawn a gateway with a protocol-translation route.
+///
+/// `path_prefix` selects which upstream path the client-facing route uses
+/// (e.g. `/v1/chat/completions`); the translated request is forwarded to
+/// `upstream_path` (e.g. `/v1/messages`). `source_protocol` and
+/// `target_protocol` are the protocol names for route config.
+pub async fn spawn_translation_gateway(
+    upstream_addr: std::net::SocketAddr,
+    path_prefix: &str,
+    source_protocol: &str,
+    target_protocol: &str,
+) -> Result<GatewayAddrs, SpawnError> {
+    let port = free_port();
+    let admin_port = free_port();
+    let listen = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let admin_listen = std::net::SocketAddr::from(([127, 0, 0, 1], admin_port));
+
+    let config = GatewayConfig::from_toml_str(&format!(
+        r#"
+snapshot_version = 1
+
+[server]
+listen = "{listen}"
+admin_listen = "{admin_listen}"
+total_timeout_ms = 10000
+graceful_shutdown_ms = 500
+
+[[routes]]
+id = "translated"
+path_prefix = "{path_prefix}"
+methods = ["POST"]
+lane = "mock"
+source_protocol = "{source_protocol}"
+target_protocol = "{target_protocol}"
+
+[[lanes]]
+id = "mock"
+base_url = "http://{upstream_addr}"
+connect_timeout_ms = 1000
+idle_timeout_ms = 60000
+frame_timeout_ms = 5000
+max_concurrent = 32
+max_idle = 16
+"#
+    ))
+    .map_err(|e| SpawnError(format!("gateway config parse: {e}")))?;
+
+    tokio::spawn(async move {
+        match GatewayServer::new(config) {
+            Ok(server) => {
+                if let Err(e) = server.run().await {
+                    eprintln!("gateway server exited: {e:#}");
+                }
+            }
+            Err(e) => eprintln!("gateway server failed to start: {e:#}"),
+        }
+    });
+
+    let addrs = GatewayAddrs {
+        proxy: listen,
+        admin: admin_listen,
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if tokio::net::TcpStream::connect(addrs.proxy).await.is_ok() {
+            return Ok(addrs);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    Err(SpawnError(format!(
+        "gateway did not become ready on {}",
+        addrs.proxy
+    )))
+}
+
 /// Bind a listener, note its port, then close it. Race-prone but adequate
 /// for pointing the gateway at a dead upstream in connection-refused tests.
 pub fn dead_upstream_addr() -> Result<SocketAddr, SpawnError> {
@@ -173,9 +255,7 @@ pub async fn post_hyper(
     let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
         .build_http();
 
-    let mut builder = http::Request::builder()
-        .method(http::Method::POST)
-        .uri(url);
+    let mut builder = http::Request::builder().method(http::Method::POST).uri(url);
     let mut has_content_type = false;
     for (name, value) in headers {
         builder = builder.header(*name, *value);

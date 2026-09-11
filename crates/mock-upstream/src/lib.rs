@@ -35,9 +35,9 @@ pub enum MockMode {
 #[derive(Debug, Clone)]
 pub struct MockConfig {
     pub mode: MockMode,
-    /// Number of SSE chunks to emit (SSE mode only).
+    /// Number of SSE chunks to emit (SSE mode only, when `raw_sse` is None).
     pub chunks: usize,
-    /// Bytes per chunk (SSE mode only).
+    /// Bytes per chunk (SSE mode only, when `raw_sse` is None).
     pub chunk_size: usize,
     /// Artificial delay before the response headers (TTFB).
     pub ttfb: std::time::Duration,
@@ -45,6 +45,10 @@ pub struct MockConfig {
     pub chunk_delay: std::time::Duration,
     /// JSON response body for non-streaming mode.
     pub json_body: String,
+    /// Raw SSE wire body for streaming mode (takes precedence over `chunks`).
+    /// Each entry is one SSE data line (e.g. `{"type":"..."}`); the mock emits
+    /// them in order as `data: <line>\n\n`.
+    pub raw_sse: Option<Vec<String>>,
 }
 
 impl Default for MockConfig {
@@ -56,6 +60,7 @@ impl Default for MockConfig {
             ttfb: std::time::Duration::ZERO,
             chunk_delay: std::time::Duration::ZERO,
             json_body: r#"{"ok":true,"result":"hello"}"#.into(),
+            raw_sse: None,
         }
     }
 }
@@ -63,12 +68,16 @@ impl Default for MockConfig {
 /// Observable state of the mock server.
 ///
 /// Counters allow tests and benchmarks to assert behavior
-/// (e.g., "connections were reused").
+/// (e.g., "connections were reused"). `last_request_body` captures the
+/// most recently received request body so protocol-translation tests can
+/// verify that the gateway emitted the correct wire format.
 #[derive(Debug, Default)]
 pub struct MockState {
     pub requests_served: std::sync::atomic::AtomicU64,
     pub connections_accepted: std::sync::atomic::AtomicU64,
     pub bytes_sent: std::sync::atomic::AtomicU64,
+    /// Body of the most recently received LLM request, for test assertions.
+    pub last_request_body: std::sync::Mutex<Option<String>>,
 }
 
 impl MockState {
