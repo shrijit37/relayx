@@ -578,6 +578,190 @@ fn decode_tool_choice(tc: ChatToolChoice) -> ToolChoice {
     }
 }
 
+// ─── Adapter: Request encoding ──────────────────────────────────────────────
+
+/// Encode a canonical request into an OpenAI Chat Completions wire request.
+pub fn encode_request(
+    req: &CanonicalRequest,
+) -> Result<ChatCompletionRequest, ProtocolEngineError> {
+    let mut messages = Vec::new();
+
+    // System instruction → system message.
+    if let Some(sys) = &req.system {
+        let text = match sys {
+            crate::canonical::SystemInstruction::Text(t) => t.clone(),
+            crate::canonical::SystemInstruction::Blocks(blocks) => {
+                let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
+                texts.join("\n")
+            }
+        };
+        messages.push(ChatMessage {
+            role: "system".into(),
+            content: Some(serde_json::Value::String(text)),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+
+    for msg in &req.messages {
+        let (role_str, content, tool_calls) = encode_message(msg)?;
+        messages.push(ChatMessage {
+            role: role_str,
+            content,
+            name: None,
+            tool_calls,
+            tool_call_id: None,
+        });
+    }
+
+    // Tool results: OpenAI uses separate `tool` role messages.
+    for msg in &req.messages {
+        if msg.role == crate::canonical::Role::Tool {
+            let blocks = msg.content.clone().into_blocks();
+            for block in blocks {
+                if let crate::canonical::ContentBlock::ToolResult(tr) = block {
+                    let content = match &tr.content {
+                        crate::canonical::ToolResultContent::Text(s) => {
+                            Some(serde_json::Value::String(s.clone()))
+                        }
+                        crate::canonical::ToolResultContent::Blocks(blocks) => {
+                            let texts: Vec<String> = blocks
+                                .iter()
+                                .filter_map(|b| b.as_text().map(|s| s.to_owned()))
+                                .collect();
+                            Some(serde_json::Value::String(texts.join("\n")))
+                        }
+                    };
+                    messages.push(ChatMessage {
+                        role: "tool".into(),
+                        content,
+                        name: None,
+                        tool_calls: None,
+                        tool_call_id: Some(tr.tool_use_id),
+                    });
+                }
+            }
+        }
+    }
+
+    let tools: Vec<ChatToolDefinition> = req
+        .tools
+        .iter()
+        .map(|t| ChatToolDefinition {
+            tool_type: "function".into(),
+            function: ChatFunctionDefinition {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.input_schema.clone(),
+                strict: t.extra.get("strict").and_then(|v| v.as_bool()),
+            },
+        })
+        .collect();
+
+    let tool_choice = encode_tool_choice(&req.tool_choice);
+
+    let response_format = req.response_format.as_ref().map(|rf| ChatResponseFormat {
+        format_type: rf.format_type.clone(),
+        json_schema: rf.json_schema.clone(),
+    });
+
+    Ok(ChatCompletionRequest {
+        model: req.model.clone(),
+        messages,
+        temperature: req.temperature,
+        top_p: req.top_p,
+        max_tokens: req.max_tokens,
+        stream: req.stream,
+        stop: if req.stop.is_empty() {
+            None
+        } else {
+            Some(req.stop.clone())
+        },
+        tools: if tools.is_empty() { None } else { Some(tools) },
+        tool_choice,
+        response_format,
+        metadata: req.metadata.clone(),
+        extra: Default::default(),
+    })
+}
+
+/// Encoded chat message fields: (role, content, tool_calls).
+type EncodedChatMessage = (String, Option<serde_json::Value>, Option<Vec<ChatToolCall>>);
+
+/// Encode a single canonical message into OpenAI Chat fields.
+fn encode_message(
+    msg: &crate::canonical::Message,
+) -> Result<EncodedChatMessage, ProtocolEngineError> {
+    let role_str = match msg.role {
+        crate::canonical::Role::User => "user",
+        crate::canonical::Role::Assistant => "assistant",
+        crate::canonical::Role::Tool => "tool",
+        crate::canonical::Role::System => "system",
+    };
+
+    let blocks = msg.content.clone().into_blocks();
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut tool_calls: Vec<ChatToolCall> = Vec::new();
+
+    for block in blocks {
+        match block {
+            crate::canonical::ContentBlock::Text(t) => text_parts.push(t.text),
+            crate::canonical::ContentBlock::ToolUse(tu) => {
+                let arguments = serde_json::to_string(&tu.input).map_err(|e| {
+                    ProtocolEngineError::TranslationFailure {
+                        message: format!("failed to serialize tool arguments: {e}"),
+                    }
+                })?;
+                tool_calls.push(ChatToolCall {
+                    id: tu.id,
+                    call_type: "function".into(),
+                    function: ChatFunctionCall {
+                        name: tu.name,
+                        arguments,
+                    },
+                });
+            }
+            crate::canonical::ContentBlock::ToolResult(_)
+            | crate::canonical::ContentBlock::Image(_)
+            | crate::canonical::ContentBlock::Audio(_)
+            | crate::canonical::ContentBlock::Reasoning(_)
+            | crate::canonical::ContentBlock::ToolReference(_) => {}
+        }
+    }
+
+    let content: Option<serde_json::Value> = if text_parts.is_empty() && tool_calls.is_empty() {
+        None
+    } else if text_parts.is_empty() {
+        Some(serde_json::Value::Null)
+    } else {
+        Some(serde_json::Value::String(text_parts.join("\n")))
+    };
+
+    let tool_calls_opt = if tool_calls.is_empty() {
+        None
+    } else {
+        Some(tool_calls)
+    };
+
+    Ok((role_str.into(), content, tool_calls_opt))
+}
+
+/// Encode a canonical ToolChoice into OpenAI Chat tool_choice.
+fn encode_tool_choice(tc: &Option<crate::canonical::ToolChoice>) -> Option<ChatToolChoice> {
+    tc.as_ref().map(|tc| match tc {
+        crate::canonical::ToolChoice::Auto => ChatToolChoice::String("auto".into()),
+        crate::canonical::ToolChoice::Required => ChatToolChoice::String("required".into()),
+        crate::canonical::ToolChoice::None => ChatToolChoice::String("none".into()),
+        crate::canonical::ToolChoice::Named { name } => {
+            ChatToolChoice::Object(ChatToolChoiceObject {
+                choice_type: "function".into(),
+                function: ChatToolChoiceFunction { name: name.clone() },
+            })
+        }
+    })
+}
+
 // ─── Adapter: Response encoding ──────────────────────────────────────────────
 
 /// Encode a canonical response into an OpenAI Chat Completions response.
@@ -664,6 +848,61 @@ pub fn encode_response(
             finish_reason: finish_reason_str.map(|s| s.into()),
         }],
         usage,
+    })
+}
+
+// ─── Adapter: Response decoding ──────────────────────────────────────────────
+
+/// Decode an OpenAI Chat Completions response into a canonical response.
+pub fn decode_response(
+    resp: &ChatCompletionResponse,
+) -> Result<CanonicalResponse, ProtocolEngineError> {
+    let mut content = Vec::new();
+
+    for choice in &resp.choices {
+        if let Some(text) = &choice.message.content
+            && !text.is_empty()
+        {
+            content.push(ContentBlock::Text(TextContent { text: text.clone() }));
+        }
+        if let Some(tcs) = &choice.message.tool_calls {
+            for tc in tcs {
+                let input = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+                content.push(ContentBlock::ToolUse(ToolUseBlock {
+                    id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    input,
+                }));
+            }
+        }
+    }
+
+    let finish_reason = resp.choices.first().and_then(|c| {
+        c.finish_reason.as_ref().map(|r| match r.as_str() {
+            "stop" => FinishReason::Stop,
+            "length" => FinishReason::Length,
+            "tool_calls" => FinishReason::ToolCalls,
+            "content_filter" => FinishReason::ContentFilter,
+            other => FinishReason::Other(other.to_owned()),
+        })
+    });
+
+    let usage = resp.usage.as_ref().map(|u| Usage {
+        input_tokens: Some(u.prompt_tokens),
+        output_tokens: Some(u.completion_tokens),
+        total_tokens: Some(u.total_tokens),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+
+    Ok(CanonicalResponse {
+        id: resp.id.clone(),
+        model: resp.model.clone(),
+        content,
+        finish_reason,
+        usage,
+        extensions: ProviderExtensions::default(),
     })
 }
 

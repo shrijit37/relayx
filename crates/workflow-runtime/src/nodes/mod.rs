@@ -7,48 +7,147 @@ pub mod router;
 pub mod skill;
 pub mod transform;
 
-/// Input to a node — a JSON value.
-#[derive(Debug, Clone)]
-pub enum NodeInput {
-    /// A single JSON value.
-    Message(serde_json::Value),
-    /// A stream of JSON values (for streaming nodes).
-    Stream(Vec<serde_json::Value>),
+use serde::{Deserialize, Serialize};
+
+// ─── Runtime values ─────────────────────────────────────────────────────────
+
+/// A typed runtime value flowing between nodes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum RuntimeValue {
+    #[default]
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(String),
+    Json(serde_json::Value),
+    Message {
+        role: String,
+        content: String,
+    },
 }
 
-impl NodeInput {
-    /// Convert to a JSON value.
-    pub fn to_json(&self) -> serde_json::Value {
-        match self {
-            NodeInput::Message(v) => v.clone(),
-            NodeInput::Stream(items) => serde_json::Value::Array(items.clone()),
+impl RuntimeValue {
+    /// Create from a JSON value, mapping JSON types to RuntimeValue.
+    pub fn from_json(v: serde_json::Value) -> Self {
+        match v {
+            serde_json::Value::Null => RuntimeValue::Null,
+            serde_json::Value::Bool(b) => RuntimeValue::Bool(b),
+            serde_json::Value::Number(n) => RuntimeValue::Number(n.as_f64().unwrap_or(0.0)),
+            serde_json::Value::String(s) => RuntimeValue::String(s),
+            other => RuntimeValue::Json(other),
         }
     }
 
-    /// Extract as a string if it's a simple text value.
+    /// Convert to JSON.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            RuntimeValue::Null => serde_json::Value::Null,
+            RuntimeValue::Bool(b) => serde_json::json!(b),
+            RuntimeValue::Number(n) => serde_json::json!(n),
+            RuntimeValue::String(s) => serde_json::json!(s),
+            RuntimeValue::Json(v) => v.clone(),
+            RuntimeValue::Message { role, content } => {
+                serde_json::json!({"role": role, "content": content})
+            }
+        }
+    }
+
+    /// Extract as a string if it's a string or text JSON.
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            NodeInput::Message(serde_json::Value::String(s)) => Some(s),
+            RuntimeValue::String(s) => Some(s),
+            RuntimeValue::Json(serde_json::Value::String(s)) => Some(s),
             _ => None,
         }
     }
+
+    /// Extract as a bool.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            RuntimeValue::Bool(b) => Some(*b),
+            RuntimeValue::Number(n) => Some(*n != 0.0),
+            RuntimeValue::String(s) => match s.as_str() {
+                "true" | "1" | "yes" => Some(true),
+                "false" | "0" | "no" | "" => Some(false),
+                _ => None,
+            },
+            RuntimeValue::Null => Some(false),
+            RuntimeValue::Json(v) => v.as_bool(),
+            RuntimeValue::Message { .. } => None,
+        }
+    }
+
+    /// Read a field from a JSON value (for Extract operations and conditions).
+    pub fn get_field(&self, field: &str) -> Option<RuntimeValue> {
+        let v = self.to_json();
+        let parts: Vec<&str> = field.split('.').collect();
+        let mut current = &v;
+        for part in &parts {
+            current = current.get(part)?;
+        }
+        Some(RuntimeValue::from_json(current.clone()))
+    }
 }
 
-/// Output from a node — a JSON value.
+impl From<serde_json::Value> for RuntimeValue {
+    fn from(v: serde_json::Value) -> Self {
+        Self::from_json(v)
+    }
+}
+
+impl From<RuntimeValue> for serde_json::Value {
+    fn from(v: RuntimeValue) -> Self {
+        v.to_json()
+    }
+}
+
+// ─── Node input/output ──────────────────────────────────────────────────────
+
+/// Input to a node — a runtime value with an optional port name.
 #[derive(Debug, Clone)]
-pub enum NodeOutput {
-    /// A single JSON value.
-    Message(serde_json::Value),
-    /// A streaming response.
-    Stream(Vec<serde_json::Value>),
+pub struct NodeInput {
+    /// The port this input arrived on (if specified by an edge).
+    pub port: Option<String>,
+    /// The runtime value.
+    pub value: RuntimeValue,
+}
+
+impl NodeInput {
+    /// Create a simple message input.
+    pub fn message(value: RuntimeValue) -> Self {
+        Self { port: None, value }
+    }
+
+    /// Create a message input on a specific port.
+    pub fn on_port(port: impl Into<String>, value: RuntimeValue) -> Self {
+        Self {
+            port: Some(port.into()),
+            value,
+        }
+    }
+}
+
+/// Output from a node — a runtime value with an optional port name.
+#[derive(Debug, Clone)]
+pub struct NodeOutput {
+    /// The port this output is on.
+    pub port: Option<String>,
+    /// The runtime value.
+    pub value: RuntimeValue,
 }
 
 impl NodeOutput {
-    /// Convert to a JSON value.
-    pub fn to_json(&self) -> serde_json::Value {
-        match self {
-            NodeOutput::Message(v) => v.clone(),
-            NodeOutput::Stream(items) => serde_json::Value::Array(items.clone()),
+    /// Create a simple message output.
+    pub fn message(value: RuntimeValue) -> Self {
+        Self { port: None, value }
+    }
+
+    /// Create a message output on a specific port.
+    pub fn on_port(port: impl Into<String>, value: RuntimeValue) -> Self {
+        Self {
+            port: Some(port.into()),
+            value,
         }
     }
 }
