@@ -46,24 +46,25 @@
 
 ## Phase 4 — Workflow compiler
 
-- [ ] workflow schema
-- [ ] semantic validator
-- [ ] compiler
-- [ ] execution IR
+- [x] workflow schema (types + validation — `crates/workflow-schema`)
+- [x] semantic validator (`Workflow::validate()`: cycles, reachability, dead-end detection)
+- [ ] compiler (React Flow graph → execution IR)
+- [x] execution IR (`ExecutionPlan` via `workflow-runtime`)
 - [ ] fast-path classification
-- [ ] runtime executor
+- [x] runtime executor (`NodeRuntime::execute` — node handlers are stubs)
 
 ## Phase 5 — Visual editor
 
-- [ ] React Flow canvas
-- [ ] node library
-- [ ] lane node
-- [ ] provider node
-- [ ] route node
-- [ ] fallback node
-- [ ] MCP node
-- [ ] Skill node
-- [ ] publish/version workflow
+- [x] React Flow canvas (drag-drop, edges, selection, minimap, zoom)
+- [x] node library (16 node kind variants)
+- [x] lane node
+- [x] provider node
+- [x] route node
+- [x] fallback node
+- [x] MCP node
+- [x] Skill node
+- [ ] publish/version workflow (buttons exist, no handler)
+- [ ] backend wiring (all 15 pages use mock data, zero API calls)
 
 ## Phase 6 — MCP and Skills
 

@@ -12,7 +12,7 @@ relay-x sits between LLM clients and providers, providing:
 - **Connection pooling and streaming** — zero-buffer streaming passthrough
 - **MCP server/tool discovery** — dynamic capability resolution
 - **Agent Skills discovery/progressive loading** — load skills on demand
-- **Visual workflow authoring** — React Flow editor (Phase 5)
+- **Visual workflow authoring** — React Flow editor (Phase 5, UI complete, mock data only)
 - **Compiled workflow IR/execution plan** — fast-path proxy, full workflow execution
 - **Observability, policy, fallback, retries** — production-grade reliability
 
@@ -32,13 +32,13 @@ Client → Gateway (Rust) → Providers (Anthropic, OpenAI, …)
 
 ## Status
 
-**Phase 1 complete** — high-performance HTTP proxy with streaming, timeouts, connection pooling, and observability.
+**Phase 1 complete** — high-performance HTTP proxy with streaming, timeouts, connection pooling, and observability. **Phase 2 complete** — protocol translation engine (OpenAI Chat, Anthropic Messages, OpenAI Responses). **Frontend present** — React Flow workflow editor (mock data, no backend). See [`docs/state.md`](docs/state.md) and [`CURRENT_STATE.md`](CURRENT_STATE.md).
 
 | Metric | Target | Actual |
 |--------|--------|--------|
 | Simple proxy p50 overhead | < 1 ms | ~0.105 ms |
 | SSE streaming overhead | low-ms | ~0.022 ms |
-| Tests | — | 38 passing |
+| Tests | — | 197 passing |
 
 ## Quick start
 
@@ -62,9 +62,13 @@ cargo bench --bench proxy_latency -p relay-gateway
 ```text
 apps/
   gateway/              Rust data plane
+  web/                  React/React Flow visual editor (TanStack Start)
 crates/
   mock-upstream/        Configurable mock LLM for tests
   test-harness/         In-process test spawn helpers
+  protocol-core/        Canonical protocol model + 3 adapters
+  workflow-schema/      Workflow definition types + validation
+  workflow-runtime/     Node-based execution engine
 docs/                   Architecture, ADRs, specs
 ```
 

@@ -1,0 +1,565 @@
+{
+  "meta": {
+    "name": "Flow Weaver",
+    "package": "@ws-hqmzuejrswrxy3onbrwn/477de595-58d4-4385-bcd3-fc6528aad873",
+    "version": "1.0.0",
+    "framework": "react",
+    "css_framework": "tailwind",
+    "starter_template": "custom_design_system_tailwind",
+    "theme_files": [
+      "src/styles.css"
+    ],
+    "source_type": "local",
+    "source_manifest": {
+      "#enrichment": "14ced04e4a8b592a5143fa8eaff13cf78ec59c058e9ddf820bc64b2a36658406",
+      ".gitignore": "6d9e901a692b46a83707c245fb03bc91",
+      ".lovable/project.json": "0d13739ea141bcde251eb54ed872cb3e",
+      ".prettierignore": "7279a476f196a2da5f7edd18db568dc6",
+      ".prettierrc": "185ef0234746ab738ac1ab6cec5e2bd9",
+      "AGENTS.md": "3da3c4cd15b686e79a248c25735d6aaf",
+      "README.md": "15ccc2c959c0bff2136261ce044c418f",
+      "bunfig.toml": "89115995d9de72fdfc894e16b1e75297",
+      "components.json": "30d3d035361ce807021f5c54620962e9",
+      "eslint.config.js": "345bdd57e188e0e4525edcd00e5003f5",
+      "package.json": "cde8efd144d3aa62daa615b16ddbc862",
+      "public/favicon.ico": "9f504444f85a5af2eef9264b02ae40be",
+      "public/robots.txt": "f9dff89adf98833e676de2205921996a",
+      "src/components/relay/AppShell.tsx": "b8d821976a879a0519c9f3f7e9639376",
+      "src/components/relay/CommandPalette.tsx": "5c077de8c134c9b9d81d49af75e2297b",
+      "src/components/relay/primitives.tsx": "4f60587986c4566a124cf0e0d2b1f44a",
+      "src/components/relay/workflow/Inspector.tsx": "6c142d6b178763e9f219d914737c8611",
+      "src/components/relay/workflow/NodeLibrary.tsx": "76522d353e9eb77ad9949dbcb90e6fb7",
+      "src/components/relay/workflow/WorkflowBuilder.tsx": "2dbb0e72cb6ebdd3a24981fbfd7f861e",
+      "src/components/relay/workflow/graph.ts": "86482204e7a92367e512a9a373beb7da",
+      "src/components/relay/workflow/nodes.tsx": "9fd2cbed001303a01584dcb5e4c0c924",
+      "src/components/ui/accordion.tsx": "55f9dda62b4e3913c9b23e5015a86aef",
+      "src/components/ui/alert-dialog.tsx": "96350e949e9b7b674545430a410ab89c",
+      "src/components/ui/alert.tsx": "f993d7e96b1e25ce50e68ed97e11d2a8",
+      "src/components/ui/aspect-ratio.tsx": "c5c364545e1b25a94e9e752cd67ad048",
+      "src/components/ui/avatar.tsx": "72989cd32f72c4122802540ef32525a5",
+      "src/components/ui/badge.tsx": "81cade001fc4260f9943e18dcd79449b",
+      "src/components/ui/breadcrumb.tsx": "bb9ac254f12662b20d5d50b84308bf3a",
+      "src/components/ui/button.tsx": "7d07d520f486b12bd47373d694ecd2ee",
+      "src/components/ui/calendar.tsx": "d849cc610e2683271f3f1c47d093cf30",
+      "src/components/ui/card.tsx": "d6c48ea36221b9cdc3576d305d12d5d5",
+      "src/components/ui/carousel.tsx": "e324c68ae00cd5aed49317638abd429a",
+      "src/components/ui/chart.tsx": "6a3baf94f2e89f1f97d4d7a28f3622d2",
+      "src/components/ui/checkbox.tsx": "f78aac270ca482c8c2cb907ef6260462",
+      "src/components/ui/collapsible.tsx": "767631bbc344945c236f185f4078d71d",
+      "src/components/ui/command.tsx": "014782599cc838b021ec68b07ad4ea02",
+      "src/components/ui/context-menu.tsx": "3ba8244ea23df34a1dba92f3a1230dad",
+      "src/components/ui/dialog.tsx": "ef4fe8e7de8675730afe3d633b260e09",
+      "src/components/ui/drawer.tsx": "8be333e8fd8e42576b1b5f72f07f4337",
+      "src/components/ui/dropdown-menu.tsx": "28d6e98d3c7811fc0514bfa69416f087",
+      "src/components/ui/form.tsx": "1b0aa6302b9017ea2a1307c22a1d2983",
+      "src/components/ui/hover-card.tsx": "1442794c5ca2a78d69e4e613b315ed3d",
+      "src/components/ui/input-otp.tsx": "65625f2f1c4d731a760aeed7b54459d1",
+      "src/components/ui/input.tsx": "1d4cc52a4cd8afb3e18e45bda942bb8a",
+      "src/components/ui/label.tsx": "7e35df4ca8edd0835efd97ca7937ef92",
+      "src/components/ui/menubar.tsx": "3c4121a1e78d3f424a7295381a8997d3",
+      "src/components/ui/navigation-menu.tsx": "e85351147a02b29577ff83d188b63c24",
+      "src/components/ui/pagination.tsx": "fac6cdbb4bbf78b273d85cd36d6cbb49",
+      "src/components/ui/popover.tsx": "f18aa1da2144f25ee60795c539c51bcd",
+      "src/components/ui/progress.tsx": "55c462e5c9dd678dcf2c0c510b014ac4",
+      "src/components/ui/radio-group.tsx": "0e1ace237a5da3197e3eb1e6683faba9",
+      "src/components/ui/resizable.tsx": "d9fcb9203c749fcab4e125a99bb12a86",
+      "src/components/ui/scroll-area.tsx": "87b65d3eb26f2b02ff35a7acea585ba5",
+      "src/components/ui/select.tsx": "31ea1bbd6671833b010b2e852c8a55d0",
+      "src/components/ui/separator.tsx": "433d163c4ffa00b59398a0c293198b5e",
+      "src/components/ui/sheet.tsx": "0221fbf97b69611b47fcbc10bb27669a",
+      "src/components/ui/sidebar.tsx": "83c1623eb50ebc370d7b1b84a542e369",
+      "src/components/ui/skeleton.tsx": "41b182e6e2fc3805960d41e767d4a972",
+      "src/components/ui/slider.tsx": "4752f1bfa26426988d325599e01c335b",
+      "src/components/ui/sonner.tsx": "97f59f60be3413196d095fcbf7383216",
+      "src/components/ui/switch.tsx": "82f5d8b0c59bb7ff305caa9f502e79ff",
+      "src/components/ui/table.tsx": "7cc889989d53894b659903c73aded96e",
+      "src/components/ui/tabs.tsx": "56e725558c2ce72c18243bf51717f385",
+      "src/components/ui/textarea.tsx": "c7aad96fb9545210d53135a96c76ed6b",
+      "src/components/ui/toggle-group.tsx": "ac26383acf721d116ca8e3ab5c5355d5",
+      "src/components/ui/toggle.tsx": "ee8c5adac74e7242b85b544db1a8fbad",
+      "src/components/ui/tooltip.tsx": "67d71db5a1ab935695d1def497f5b8a6",
+      "src/hooks/use-mobile.tsx": "c0a0bdd4638c391a1dd06ac82074e60b",
+      "src/lib/error-capture.ts": "f630d9686a9a989170f22eff4de7b30d",
+      "src/lib/error-page.ts": "8da0ddd7569bac2676b9a5c8edff8a36",
+      "src/lib/lovable-error-reporting.ts": "0367e03b7d71917510e4dc1cdae172ec",
+      "src/lib/relay-data.ts": "c2bcb6e02dafc11d34bdc6e80edfbec4",
+      "src/lib/utils.ts": "d9837f38cc05303254571985e3164050",
+      "src/routeTree.gen.ts": "aaf41131c3f37bc6fd8bc60fdb70bbf4",
+      "src/router.tsx": "8f905e713b0eba7fa8148b7995a708c9",
+      "src/routes/README.md": "b3a2f259b66fd1a11f54b6d5ac83bf57",
+      "src/routes/__root.tsx": "361df190f4ec518faf94cf610719c918",
+      "src/routes/health.tsx": "236442997498f6484c0f603670b744e8",
+      "src/routes/index.tsx": "60194dad8c38afaf47b4de3bf32b3d66",
+      "src/routes/lanes.tsx": "3a41e4c7182e1d65c6e0b7658ae33dcd",
+      "src/routes/mcp.tsx": "c338b51af7e64d867d0aaf68e6393ce9",
+      "src/routes/observability.tsx": "200b5c7cd7975377335354f1e12704dc",
+      "src/routes/policies.tsx": "293deae4db09a4519634fe4c00e8b4da",
+      "src/routes/providers.tsx": "49ce30068df03c058a127a64aa9daea1",
+      "src/routes/runs.$runId.tsx": "e2868be5c29152dec8b505a007167f04",
+      "src/routes/runs.index.tsx": "22e383ed4b58ef9635cb853dde094d2f",
+      "src/routes/settings.tsx": "21ce2974a6505c90eb543ddcefdac25e",
+      "src/routes/skills.tsx": "8e869fadb5b5f5fb3c38db220861ada1",
+      "src/routes/workflows.$workflowId.index.tsx": "0c93d663b3fc461eb071c561fb14712e",
+      "src/routes/workflows.$workflowId.versions.tsx": "23d1e730ce6e63c1de90e76c57def59f",
+      "src/routes/workflows.index.tsx": "26a361566d9d05011fc43e69472e5d45",
+      "src/server.ts": "c7bbc49bb70e318af618d92775ee0f27",
+      "src/start.ts": "0502f82c58afce5012b4c102e6fe2437",
+      "src/styles.css": "14e390b8d46c784b1505f21010e7bf63",
+      "tsconfig.json": "e84e5c7fe88e3c5a4d54f55a816d42c1",
+      "vite.config.ts": "d67e8217e5f31b87c276b6357c9aedcf"
+    },
+    "pipeline_version": 8
+  },
+  "tokens": {
+    "color": [
+      {
+        "name": "--background",
+        "raw": "oklch(0.17 0.007 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--foreground",
+        "raw": "oklch(0.93 0.005 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--canvas",
+        "raw": "oklch(0.145 0.008 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--panel",
+        "raw": "oklch(0.196 0.008 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--panel-raised",
+        "raw": "oklch(0.225 0.009 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--card",
+        "raw": "oklch(0.21 0.008 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--card-foreground",
+        "raw": "oklch(0.93 0.005 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--popover",
+        "raw": "oklch(0.205 0.009 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--popover-foreground",
+        "raw": "oklch(0.93 0.005 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--primary",
+        "raw": "oklch(0.68 0.15 252)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--primary-foreground",
+        "raw": "oklch(0.15 0.01 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--secondary",
+        "raw": "oklch(0.26 0.009 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--secondary-foreground",
+        "raw": "oklch(0.9 0.005 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--muted",
+        "raw": "oklch(0.24 0.008 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--muted-foreground",
+        "raw": "oklch(0.63 0.012 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--accent",
+        "raw": "oklch(0.28 0.02 258)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--accent-foreground",
+        "raw": "oklch(0.94 0.005 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--destructive",
+        "raw": "oklch(0.6 0.2 22)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--destructive-foreground",
+        "raw": "oklch(0.97 0.005 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--border",
+        "raw": "oklch(0.28 0.008 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--border-strong",
+        "raw": "oklch(0.36 0.01 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--input",
+        "raw": "oklch(0.26 0.008 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--ring",
+        "raw": "oklch(0.68 0.15 252)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--ok",
+        "raw": "oklch(0.74 0.16 158)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--warn",
+        "raw": "oklch(0.79 0.15 78)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--fail",
+        "raw": "oklch(0.65 0.2 22)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--info",
+        "raw": "oklch(0.72 0.13 232)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--violet",
+        "raw": "oklch(0.7 0.15 296)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--chart-1",
+        "raw": "oklch(0.68 0.15 252)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--chart-2",
+        "raw": "oklch(0.74 0.16 158)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--chart-3",
+        "raw": "oklch(0.79 0.15 78)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--chart-4",
+        "raw": "oklch(0.7 0.15 296)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--chart-5",
+        "raw": "oklch(0.65 0.2 22)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--sidebar",
+        "raw": "oklch(0.175 0.008 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--sidebar-foreground",
+        "raw": "oklch(0.78 0.008 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--sidebar-primary",
+        "raw": "oklch(0.68 0.15 252)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--sidebar-primary-foreground",
+        "raw": "oklch(0.15 0.01 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--sidebar-accent",
+        "raw": "oklch(0.235 0.009 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--sidebar-accent-foreground",
+        "raw": "oklch(0.95 0.005 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--sidebar-border",
+        "raw": "oklch(0.26 0.008 264)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--sidebar-ring",
+        "raw": "oklch(0.68 0.15 252)",
+        "source": "src/styles.css"
+      }
+    ],
+    "typography": [
+      {
+        "name": "--font-sans",
+        "raw": "\"IBM Plex Sans\", ui-sans-serif, system-ui, sans-serif",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--font-mono",
+        "raw": "\"IBM Plex Mono\", ui-monospace, SFMono-Regular, monospace",
+        "source": "src/styles.css"
+      }
+    ],
+    "radius": [
+      {
+        "name": "--radius-sm",
+        "raw": "calc(var(--radius) - 2px)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--radius-lg",
+        "raw": "calc(var(--radius) + 2px)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--radius-xl",
+        "raw": "calc(var(--radius) + 4px)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--radius-2xl",
+        "raw": "calc(var(--radius) + 8px)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--radius-3xl",
+        "raw": "calc(var(--radius) + 12px)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--radius-4xl",
+        "raw": "calc(var(--radius) + 16px)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--radius",
+        "raw": "0.375rem",
+        "source": "src/styles.css"
+      }
+    ],
+    "shadow": [
+      {
+        "name": "--shadow-panel",
+        "raw": "0 1px 0 0 oklch(1 0 0 / 4%) inset, 0 8px 24px -16px oklch(0 0 0 / 80%)",
+        "source": "src/styles.css"
+      },
+      {
+        "name": "--shadow-node",
+        "raw": "0 1px 2px oklch(0 0 0 / 60%), 0 8px 20px -12px oklch(0 0 0 / 80%)",
+        "source": "src/styles.css"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "AppShell",
+      "file": "src/components/relay/AppShell",
+      "import_path": ""
+    },
+    {
+      "name": "CommandPalette",
+      "file": "src/components/relay/CommandPalette",
+      "import_path": ""
+    },
+    {
+      "name": "StatusDot",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "StatusText",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "Tag",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "SectionLabel",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "Panel",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "Metric",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "PageHeader",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "EmptyState",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "Bar",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "TableShell",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "Td",
+      "file": "src/components/relay/primitives",
+      "import_path": ""
+    },
+    {
+      "name": "Inspector",
+      "file": "src/components/relay/workflow/Inspector",
+      "import_path": ""
+    },
+    {
+      "name": "NodeLibrary",
+      "file": "src/components/relay/workflow/NodeLibrary",
+      "import_path": ""
+    },
+    {
+      "name": "WorkflowBuilder",
+      "file": "src/components/relay/workflow/WorkflowBuilder",
+      "import_path": ""
+    },
+    {
+      "name": "RelayFlowNode",
+      "file": "src/components/relay/workflow/nodes",
+      "import_path": ""
+    },
+    {
+      "name": "Command",
+      "file": "src/components/ui/command",
+      "import_path": ""
+    },
+    {
+      "name": "CommandDialog",
+      "file": "src/components/ui/command",
+      "import_path": ""
+    },
+    {
+      "name": "CommandInput",
+      "file": "src/components/ui/command",
+      "import_path": ""
+    },
+    {
+      "name": "CommandList",
+      "file": "src/components/ui/command",
+      "import_path": ""
+    },
+    {
+      "name": "CommandEmpty",
+      "file": "src/components/ui/command",
+      "import_path": ""
+    },
+    {
+      "name": "CommandGroup",
+      "file": "src/components/ui/command",
+      "import_path": ""
+    },
+    {
+      "name": "CommandItem",
+      "file": "src/components/ui/command",
+      "import_path": ""
+    },
+    {
+      "name": "CommandShortcut",
+      "file": "src/components/ui/command",
+      "import_path": ""
+    },
+    {
+      "name": "CommandSeparator",
+      "file": "src/components/ui/command",
+      "import_path": ""
+    },
+    {
+      "name": "Dialog",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    },
+    {
+      "name": "DialogPortal",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    },
+    {
+      "name": "DialogOverlay",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    },
+    {
+      "name": "DialogTrigger",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    },
+    {
+      "name": "DialogClose",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    },
+    {
+      "name": "DialogContent",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    },
+    {
+      "name": "DialogHeader",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    },
+    {
+      "name": "DialogFooter",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    },
+    {
+      "name": "DialogTitle",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    },
+    {
+      "name": "DialogDescription",
+      "file": "src/components/ui/dialog",
+      "import_path": ""
+    }
+  ]
+}

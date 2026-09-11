@@ -5,10 +5,14 @@
 ```text
 .
 ├── apps/
-│   └── gateway/                # Rust data plane (Phase 1 complete)
+│   ├── gateway/                # Rust data plane (Phase 1 complete)
+│   └── web/                    # React/React Flow visual editor (TanStack Start, mock data)
 ├── crates/
 │   ├── mock-upstream/          # Configurable mock LLM for tests/benchmarks
-│   └── test-harness/           # In-process gateway+mock spawn helpers
+│   ├── test-harness/           # In-process gateway+mock spawn helpers
+│   ├── protocol-core/          # Canonical protocol model + 3 adapters (Phase 2 complete)
+│   ├── workflow-schema/        # Workflow types + graph validation
+│   └── workflow-runtime/       # Node execution engine (stubs)
 ├── docs/
 │   ├── architecture.md         # System topology and domain model
 │   ├── state.md                # Current implementation state
@@ -34,6 +38,15 @@
 ├── .github/workflows/ci.yml   # CI: SHA-pinned actions, clippy, test
 ├── Cargo.toml                  # Workspace root
 └── rust-toolchain.toml         # stable, rustfmt + clippy
+```
+
+### Frontend (apps/web)
+
+```bash
+cd apps/web
+bun install
+bun run dev       # Vite dev server with TanStack Start SSR
+bun run build     # Production build to .output/
 ```
 
 ## Local development

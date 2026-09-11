@@ -2,7 +2,7 @@
 
 ## Status
 
-**Phase 1 COMPLETE. Phase 2 COMPLETE. Ready for Phase 3.**
+**Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 5 (frontend) PARTIAL. Phase 4 (workflow) PARTIAL.**
 
 ### Phase 1 — High-performance HTTP proxy data plane
 - TOML config → immutable snapshot, no DB dependency
@@ -36,13 +36,11 @@ routes without protocol config.
 | M2.4 SSE Parser + Stream Engine | ✅ | `StreamingSseParser` (protocol-framing-level, not transport-chunk-level), `format_sse_event`, `format_done_event` |
 | M2.5 Conformance Tests | ✅ | 36 translation e2e tests, 26 streaming boundary tests, 13 canonical/error tests, golden fixtures, round-trip tests, capability loss detection, enforcement tests, error handling, edge cases |
 | M2.6 OpenAI Responses | ✅ | Full adapter: `ResponsesRequest`, `ResponsesResponse`, `ResponsesItem`, `ResponsesContentPart`, `ResponsesStreamEvent`, `decode_request`, `decode_response`, `encode_response`, `encode_stream_event` — handles `input_text`/`output_text`/`input_audio`/`function_call`/reasoning items, `tool_choice` decoding |
-| M2.7 Performance Benchmarks | ✅ | Criterion benchmarks for request decoding, response encoding, stream event encoding, cross-adapter translation (167 total tests) |
+| M2.7 Performance Benchmarks | ✅ | Criterion benchmarks for request decoding, response encoding, stream event encoding, cross-adapter translation |
 | M2.8 Code Quality | ✅ | Split oversized adapter functions (`encode_request` → 4 helpers, `decode_request` → `decode_request_messages` + `decode_tool_choice`), `enforce_translation_losses()` wired into adapter boundaries |
 | M2.10 Gateway Integration | ✅ | `ProtocolEngine` in gateway: route-level `source_protocol`/`target_protocol` config, request decode→canonical→target encode, response decode→canonical→client encode, SSE event-by-event stream translation, error mapping (`ProtocolEngineError` → `GatewayError` → HTTP) |
 
-**Total test count: 167 tests passing, zero failures.** Includes 7 gateway protocol-translation
-integration tests (OpenAI→Anthropic, Anthropic→OpenAI, streaming, error handling, admin unaffected),
-5 property tests (SSE parser non-panic, format→parse roundtrip, canonical serde roundtrip).
+**Total test count: 197 tests passing, zero failures.** 131 in protocol-core, 39 in gateway, 12 in workflow-schema, 4 in mock-upstream. Includes 5 property tests (SSE parser non-panic, format→parse roundtrip, canonical serde roundtrip).
 
 Phase 2 compliance status (post-audit):
 - ✅ Gateway now depends on and invokes `protocol-core` (was pure passthrough)
@@ -57,6 +55,34 @@ Phase 2 compliance status (post-audit):
   enforcement is documented as a known limitation (see `docs/protocols.md`)
 
 This document is the source of truth for current implementation state. Update it after meaningful work.
+
+### Workflow schema (`crates/workflow-schema/`)
+
+Typed workflow definition crate (807 lines, 12 tests passing). Provides:
+
+- `Workflow`, `Node`, `Edge` with typed `NodeKind` (8 variants: Input, Output, LLM, Router, Transform, Condition, MCP, Skill) and `NodeConfig`
+- Port-based data flow model (`PortType`: Message, Stream, ToolCall, ToolResult, Json, Bool)
+- `Workflow::validate()` — graph validation: duplicate IDs, unknown refs, cycles, reachability, dead-end detection
+
+### Workflow runtime (`crates/workflow-runtime/`)
+
+Execution engine skeleton (815 lines, **0 tests**). Provides:
+
+- `ExecutionPlan::compile(Workflow)` — topological sort via Kahn's algorithm
+- `NodeRuntime::execute()` — walks nodes in order with cancellation token support
+- `ExecutionContext` with `LaneRegistry` for provider connection lookup
+- **All 7 node implementations are stubs** — LLM node builds a `CanonicalRequest` but returns `{"status": "llm_node_stub"}`; MCP, Skill, Router, Transform are passthroughs; Condition evaluates but does not route
+
+### Frontend (`apps/web/`)
+
+React 19 + TanStack Start 1.168 + TanStack Router 1.170 + React Flow 12 + Vite 8.1.5 (scaffolded via Lovable.dev).
+
+- 15 pages across 16 route files (Workflows, Providers, Lanes, MCP, Skills, Policies, Secrets, Runs, Observability, Health, Settings, Versions)
+- Workflow editor: React Flow canvas with 16 node kind variants, drag-and-drop, edge connections, Inspector panel, execution simulation (client-side `setTimeout` animation)
+- **100% mock data** — zero `fetch()` calls, zero API integration, `@tanstack/react-query` wired but unused
+- **0 tests**
+
+See `CURRENT_STATE.md` for the full state audit.
 
 ## Current decisions
 
