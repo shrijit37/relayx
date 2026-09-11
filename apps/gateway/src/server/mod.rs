@@ -160,9 +160,3 @@ mod tests {
         Ok(())
     }
 }
-
-
-
-/*
- *  Gateway server implementation for relay-x. will handled by the proxy layer 
- */

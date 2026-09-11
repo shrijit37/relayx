@@ -54,15 +54,27 @@ if [[ ${#rust_files[@]} -eq 0 ]]; then
   exit 0
 fi
 
+# Mirrors the test-file exemption in ~/.claude/scripts/rust-unwrap-blocker.sh
+# (which uses grep -qE '(test|tests|_test\.rs|test_)') so both layers agree.
+is_test_file() {
+  grep -qE '(test|tests|_test\.rs|test_)' <<< "$1" && return 0
+  return 1
+}
+
 failed=0
 
 check_pattern() {
   local description="$1"
   local pattern="$2"
+  local test_exempt="${3:-false}"
   local file
 
   for file in "${rust_files[@]}"; do
     [[ -f "$file" ]] || continue
+
+    if [[ "$test_exempt" == "true" ]] && is_test_file "$file"; then
+      continue
+    fi
 
     if grep -nE "$pattern" "$file"; then
       echo >&2
@@ -101,15 +113,18 @@ check_pattern \
 # ─────────────────────────────────────────────────────────────
 # PANIC-PRONE SHORTCUTS
 # .unwrap_or / .unwrap_or_else / .unwrap_err are allowed.
+# Test files are exempt — unwrap/expect in a failing test is fine.
 # ─────────────────────────────────────────────────────────────
 
 check_pattern \
   ".unwrap()" \
-  '\.unwrap\s*\(\s*\)'
+  '\.unwrap\s*\(\s*\)' \
+  true
 
 check_pattern \
   ".expect(...)" \
-  '\.expect\s*\('
+  '\.expect\s*\(' \
+  true
 
 # ─────────────────────────────────────────────────────────────
 

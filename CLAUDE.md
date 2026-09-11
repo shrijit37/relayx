@@ -75,6 +75,8 @@ The following are prohibited unless explicitly authorized by the user:
 - `.unwrap()`
 - `.expect(...)`
 
+These two are also allowed in test files (a panicking test just fails — no prod risk).
+
 Narrow, item-scoped `#[allow(...)]` / `#[expect(...)]` for FFI, generated code, platform-specific code, or a documented compiler false positive is permitted. Using those attributes (or `unused`) to hide dead code is not.
 
 When the compiler reports unused or problematic code:
@@ -89,7 +91,7 @@ When the compiler reports unused or problematic code:
 
 If an exception is genuinely required, stop and ask for explicit user authorization before introducing it.
 
-This policy applies to all Rust source files, including `src/`, `tests/`, `benches/`, examples, binaries, workspace crates, and build scripts.
+This policy applies to all Rust source files, including `src/`, `tests/`, `benches/`, examples, binaries, workspace crates, and build scripts — except `.unwrap()` and `.expect(...)` which are allowed in test files.
 
 Enforcement is layered: these instructions, `.claude/hooks/check-rust-policy.sh` (PostToolUse + pre-commit), and CI (`--all` plus `cargo clippy -- -D warnings`).
 
