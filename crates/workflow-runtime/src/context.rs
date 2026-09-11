@@ -3,6 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::nodes::RuntimeValue;
+
 /// Runtime context passed to every node during execution.
 ///
 /// Contains no database fields — all state is memory-resident or
@@ -22,7 +24,45 @@ pub struct ExecutionContext {
     pub default_timeout: Duration,
     /// Lane registry for LLM nodes to resolve provider connections.
     pub lane_registry: Arc<LaneRegistry>,
+    /// HTTP client for upstream provider calls.
+    pub upstream_client: Option<
+        Arc<
+            hyper_util::client::legacy::Client<
+                hyper_util::client::legacy::connect::HttpConnector,
+                axum::body::Body,
+            >,
+        >,
+    >,
+    /// MCP tool executor — if provided, MCP nodes call real tools.
+    pub mcp_executor: Option<Arc<dyn McpToolExecutor>>,
+    /// Skill loader — if provided, Skill nodes load real skills.
+    pub skill_loader: Option<Arc<dyn SkillLoader>>,
 }
+
+// ─── MCP tool executor trait ────────────────────────────────────────────────
+
+/// Trait for executing MCP tools. Implementations connect to real MCP servers.
+#[async_trait::async_trait]
+pub trait McpToolExecutor: Send + Sync {
+    /// Execute an MCP tool and return the result.
+    async fn execute_tool(
+        &self,
+        server_ref: &str,
+        tool_name: &str,
+        input: &RuntimeValue,
+    ) -> Result<RuntimeValue, crate::error::NodeError>;
+}
+
+// ─── Skill loader trait ─────────────────────────────────────────────────────
+
+/// Trait for loading and applying skills. Implementations connect to skill registries.
+#[async_trait::async_trait]
+pub trait SkillLoader: Send + Sync {
+    /// Load a skill and return its content as a runtime value.
+    async fn load_skill(&self, skill_ref: &str) -> Result<RuntimeValue, crate::error::NodeError>;
+}
+
+// ─── Lane registry ──────────────────────────────────────────────────────────
 
 /// Registry of available lanes (provider/endpoint combinations).
 ///
@@ -69,6 +109,9 @@ impl ExecutionContext {
             deadline: None,
             default_timeout: std::time::Duration::from_secs(60),
             lane_registry,
+            upstream_client: None,
+            mcp_executor: None,
+            skill_loader: None,
         }
     }
 
@@ -82,6 +125,9 @@ impl ExecutionContext {
             deadline: self.deadline,
             default_timeout: self.default_timeout,
             lane_registry: self.lane_registry.clone(),
+            upstream_client: self.upstream_client.clone(),
+            mcp_executor: self.mcp_executor.clone(),
+            skill_loader: self.skill_loader.clone(),
         }
     }
 }

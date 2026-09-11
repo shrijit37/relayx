@@ -1,36 +1,56 @@
-//! Condition node — evaluates a condition and routes accordingly.
+//! Condition node — evaluates a condition and outputs on the "true" or "false" port.
 
 use crate::context::ExecutionContext;
 use crate::error::NodeError;
-use crate::nodes::{NodeInput, NodeOutput};
+use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
 use workflow_schema::ConditionConfig;
 
-/// Execute a condition node. Evaluates the configured condition against the input.
+/// Execute a condition node. Evaluates the configured condition against the input
+/// and returns the result on the "true" or "false" output port.
 pub async fn execute(
     config: &ConditionConfig,
     _ctx: &ExecutionContext,
     input: NodeInput,
 ) -> Result<NodeOutput, NodeError> {
-    let data = input.to_json();
-    let field_value = data
-        .get(&config.field)
-        .and_then(|v| match config.operator {
-            workflow_schema::ConditionOp::IsEmpty => Some(v.is_null() || v == ""),
-            workflow_schema::ConditionOp::IsNotEmpty => Some(!v.is_null() && v != ""),
-            workflow_schema::ConditionOp::Equal => Some(v == &config.value),
-            workflow_schema::ConditionOp::NotEqual => Some(v != &config.value),
-            workflow_schema::ConditionOp::Contains => v
-                .as_str()
-                .map(|s| s.contains(config.value.as_str().unwrap_or(""))),
-            workflow_schema::ConditionOp::NotContains => v
-                .as_str()
-                .map(|s| !s.contains(config.value.as_str().unwrap_or(""))),
-            _ => Some(false),
-        })
-        .unwrap_or(false);
+    let result = evaluate_condition(config, &input.value);
 
-    Ok(NodeOutput::Message(serde_json::json!({
-        "condition": config.condition,
-        "result": field_value,
-    })))
+    let port = if result { "true" } else { "false" };
+
+    Ok(NodeOutput::on_port(port, RuntimeValue::Bool(result)))
+}
+
+/// Evaluate a condition config against a runtime value.
+fn evaluate_condition(config: &ConditionConfig, value: &RuntimeValue) -> bool {
+    let field_value = value.get_field(&config.field);
+
+    match (&field_value, &config.operator) {
+        (None, workflow_schema::ConditionOp::IsEmpty) => true,
+        (None, _) => false,
+        (Some(rv), op) => match op {
+            workflow_schema::ConditionOp::Equal => rv.to_json() == config.value,
+            workflow_schema::ConditionOp::NotEqual => rv.to_json() != config.value,
+            workflow_schema::ConditionOp::GreaterThan => {
+                let a = rv.to_json().as_f64().unwrap_or(0.0);
+                let b = config.value.as_f64().unwrap_or(0.0);
+                a > b
+            }
+            workflow_schema::ConditionOp::LessThan => {
+                let a = rv.to_json().as_f64().unwrap_or(0.0);
+                let b = config.value.as_f64().unwrap_or(0.0);
+                a < b
+            }
+            workflow_schema::ConditionOp::Contains => {
+                let text = rv.as_text().unwrap_or("");
+                let needle = config.value.as_str().unwrap_or("");
+                text.contains(needle)
+            }
+            workflow_schema::ConditionOp::NotContains => {
+                let text = rv.as_text().unwrap_or("");
+                let needle = config.value.as_str().unwrap_or("");
+                !text.contains(needle)
+            }
+            workflow_schema::ConditionOp::IsEmpty => rv.to_json() == serde_json::Value::Null,
+            workflow_schema::ConditionOp::IsNotEmpty => rv.to_json() != serde_json::Value::Null,
+        },
+    }
 }

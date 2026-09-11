@@ -2,7 +2,7 @@
 //!
 //! Provides the execution engine for compiled workflow IR. Nodes execute
 //! in topological order, passing data through typed ports. The runtime
-//! supports streaming, cancellation, and typed error propagation.
+//! supports branching, concurrency, cancellation, and typed error propagation.
 //!
 //! ```text
 //! Workflow Definition → Validation → Compilation → Execution IR → Runtime
@@ -15,5 +15,5 @@ pub mod nodes;
 
 pub use context::ExecutionContext;
 pub use error::{NodeError, WorkflowError};
-pub use execution::{ExecEdge, ExecNode, ExecutionPlan, NodeRuntime};
-pub use nodes::{NodeInput, NodeKind, NodeOutput};
+pub use execution::{EdgeCondition, ExecEdge, ExecNode, ExecutionPlan, NodeRuntime};
+pub use nodes::{NodeInput, NodeKind, NodeOutput, RuntimeValue};
