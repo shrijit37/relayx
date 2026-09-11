@@ -298,8 +298,7 @@ async fn proxy_timeout_during_streaming() -> anyhow::Result<()> {
             );
             let status = resp.status();
             assert!(
-                status == http::StatusCode::GATEWAY_TIMEOUT
-                    || status.as_u16() == 499,
+                status == http::StatusCode::GATEWAY_TIMEOUT || status.as_u16() == 499,
                 "expected 504/499 from gateway timeout, got: {status}"
             );
         }
@@ -342,10 +341,12 @@ async fn proxy_concurrent_upstream_disconnect() -> anyhow::Result<()> {
             let resp = client.request(req).await?;
             // First chunk arrives immediately (no delay), so headers should be OK.
             assert_eq!(resp.status(), http::StatusCode::OK);
-            tokio::time::timeout(std::time::Duration::from_secs(10),
-                http_body_util::BodyExt::collect(resp.into_body())
-            ).await
-                .map_err(|_| anyhow::anyhow!("task timed out collecting body"))??;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                http_body_util::BodyExt::collect(resp.into_body()),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("task timed out collecting body"))??;
             Ok::<(), anyhow::Error>(())
         }));
     }
@@ -359,7 +360,10 @@ async fn proxy_concurrent_upstream_disconnect() -> anyhow::Result<()> {
         .state
         .requests_served
         .load(std::sync::atomic::Ordering::Relaxed);
-    assert!(served >= 20, "mock should have served at least 20 requests, got {served}");
+    assert!(
+        served >= 20,
+        "mock should have served at least 20 requests, got {served}"
+    );
 
     Ok(())
 }

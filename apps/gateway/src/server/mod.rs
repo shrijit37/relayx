@@ -49,10 +49,7 @@ impl GatewayServer {
     /// Run the gateway until shutdown signal.
     pub async fn run(self) -> anyhow::Result<()> {
         // ── Proxy client (connection pool) ─────────────────────────────────
-        let client = crate::upstream::build_http_client(
-            Duration::from_secs(90),
-            64,
-        );
+        let client = crate::upstream::build_http_client(Duration::from_secs(90), 64);
 
         let state = Arc::new(AppState {
             config: self.config.clone(),
@@ -62,9 +59,7 @@ impl GatewayServer {
         });
 
         // ── Proxy listener ────────────────────────────────────────────────
-        let proxy_router = Router::new()
-            .fallback(any(proxy_handler))
-            .with_state(state);
+        let proxy_router = Router::new().fallback(any(proxy_handler)).with_state(state);
 
         let proxy_listener = TcpListener::bind(self.server_config.listen).await?;
         tracing::info!(addr = %self.server_config.listen, "proxy listener started");

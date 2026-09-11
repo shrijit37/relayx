@@ -29,6 +29,7 @@ uuid.workspace = true
 url.workspace = true
 anyhow.workspace = true
 futures-util.workspace = true
+protocol-core = { path = "../../crates/protocol-core" }
 
 [dev-dependencies]
 criterion.workspace = true

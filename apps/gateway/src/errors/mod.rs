@@ -3,6 +3,8 @@ use std::fmt;
 use http::StatusCode;
 use thiserror::Error;
 
+use protocol_core::error::ProtocolEngineError;
+
 /// Typed gateway error hierarchy.
 ///
 /// Each variant maps to a stable HTTP status code.
@@ -44,6 +46,51 @@ pub enum GatewayError {
     /// An internal gateway error that should never happen.
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+/// Convert a protocol engine error into a gateway error.
+///
+/// The mapping preserves HTTP status semantics and avoids leaking internal
+/// details: only the user-facing message is forwarded.
+impl From<ProtocolEngineError> for GatewayError {
+    fn from(e: ProtocolEngineError) -> Self {
+        match e {
+            ProtocolEngineError::UnsupportedProtocol { protocol } => GatewayError::InvalidRequest {
+                status: StatusCode::BAD_REQUEST,
+                message: format!("unsupported protocol: {protocol}"),
+            },
+            ProtocolEngineError::InvalidPayload { message } => GatewayError::InvalidRequest {
+                status: StatusCode::BAD_REQUEST,
+                message,
+            },
+            ProtocolEngineError::UnsupportedFeature { feature, reason } => {
+                GatewayError::InvalidRequest {
+                    status: StatusCode::NOT_IMPLEMENTED,
+                    message: format!("unsupported feature '{feature}': {reason}"),
+                }
+            }
+            ProtocolEngineError::InvalidStreamEvent { message } => GatewayError::UpstreamProtocol {
+                upstream: "upstream".into(),
+                message,
+            },
+            ProtocolEngineError::TranslationFailure { message } => GatewayError::Internal(message),
+            ProtocolEngineError::LossyTranslation {
+                feature,
+                reason,
+                policy,
+            } => GatewayError::InvalidRequest {
+                status: StatusCode::BAD_REQUEST,
+                message: format!(
+                    "translation rejected for '{feature}' (policy: {policy:?}): {reason}"
+                ),
+            },
+            ProtocolEngineError::ProviderError { message } => GatewayError::UpstreamProtocol {
+                upstream: "upstream".into(),
+                message,
+            },
+            ProtocolEngineError::Internal(msg) => GatewayError::Internal(msg),
+        }
+    }
 }
 
 impl GatewayError {
