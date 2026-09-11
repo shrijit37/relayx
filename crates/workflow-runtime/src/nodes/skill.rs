@@ -1,29 +1,37 @@
-//! Skill node — loads and applies a skill.
+//! Skill node — loads and applies a skill via the loader trait.
+//!
+//! If a `SkillLoader` is provided in the execution context, the node calls it.
+//! Otherwise, it returns a stub result (graceful degradation).
 
 use crate::context::ExecutionContext;
 use crate::error::NodeError;
-use crate::nodes::{NodeInput, NodeOutput};
+use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
 use workflow_schema::SkillConfig;
 
 /// Execute a skill node. Loads skill content progressively.
 pub async fn execute(
     config: &SkillConfig,
-    _ctx: &ExecutionContext,
+    ctx: &ExecutionContext,
     _input: NodeInput,
 ) -> Result<NodeOutput, NodeError> {
     tracing::debug!(
         skill = %config.skill_ref,
         progressive = config.progressive,
-        "Skill node stub — no skill registry yet"
+        has_loader = ctx.skill_loader.is_some(),
+        "Skill node executing"
     );
 
-    // Stub: return a placeholder. Full implementation would:
-    // 1. Load skill metadata
-    // 2. If progressive, load SKILL.md content
-    // 3. If needed, load references/resources
-    // 4. Apply skill instructions to the input
-    Ok(NodeOutput::Message(serde_json::json!({
-        "skill": config.skill_ref,
-        "status": "skill_node_stub",
-    })))
+    match &ctx.skill_loader {
+        Some(loader) => {
+            let result = loader.load_skill(&config.skill_ref).await?;
+            Ok(NodeOutput::message(result))
+        }
+        None => {
+            // Graceful degradation — no skill registry connected.
+            Ok(NodeOutput::message(RuntimeValue::Json(serde_json::json!({
+                "skill": config.skill_ref,
+                "status": "skill_not_loaded",
+            }))))
+        }
+    }
 }
