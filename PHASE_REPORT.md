@@ -4,8 +4,10 @@
 
 The core engine now has stable extension contracts, a versioned Execution IR with deterministic hashing, a compiler with lane and schema validation, fast-path classification, immutable runtime snapshots, fallback/retry nodes, and the wiring to compose these into a real request path. All existing tests continue passing and the extension boundary is proven.
 
-**Test count:** 225 passing (was 208; +17 new inline + 6 new integration/proof tests)
+**Test count:** 232 passing (was 208; +24 net new — 21 inline in new modules + 3 extension-proof integration tests)
 **Clippy:** clean | **Fmt:** clean | **Rust policy:** clean
+
+Test breakdown by crate: protocol-core 131 · workflow-schema 12 · workflow-runtime 35 · relay-gateway 50 · mock-upstream 4 · test-harness 0 (harness). All 208 baseline tests still green.
 
 ---
 
@@ -127,7 +129,7 @@ Both wired into the `execute_node()` match in `execution.rs` and declared in `wo
 | Fallback/retry work through execution model | ✅ Fallback + Retry node kinds + implementations |
 | Existing protocol functionality intact | ✅ Zero changes to protocol-core |
 | Existing tests continue passing | ✅ 208 baseline all green |
-| New tests exist | ✅ 225 total (+17 new inline, 6 proof/integration) |
+| New tests exist | ✅ 232 total (+24: 21 inline in new modules, 3 extension-proof) |
 | Performance benchmarks exist | ✅ Classification + compile bench |
 | Adding a test provider doesn't change core executor | ✅ `extension_proof.rs` — `ProviderEntry` registered outside core |
 | Adding a test node doesn't change scheduler internals | ✅ `extension_proof.rs` — `UppercaseNode` via registry |
