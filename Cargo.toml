@@ -4,6 +4,9 @@ members = [
     "apps/gateway",
     "crates/mock-upstream",
     "crates/test-harness",
+    "crates/protocol-core",
+    "crates/workflow-schema",
+    "crates/workflow-runtime",
 ]
 
 [workspace.package]
@@ -16,6 +19,7 @@ rust-version = "1.88"
 # Runtime
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "time", "macros", "signal", "sync"] }
 tokio-stream = { version = "0.1", features = ["time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 hyper = { version = "1.11", features = ["http1", "server", "client", "http2"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http = "1"
