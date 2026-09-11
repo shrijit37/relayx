@@ -60,7 +60,12 @@ impl SseEvent {
 pub fn build_sse_events(config: &SseConfig) -> Vec<SseEvent> {
     // Build payload chunks of `chunk_size` bytes each over a filler payload.
     const FILLER: &[u8] = b"mock-stream-data-filler-";
-    let filler: Vec<u8> = FILLER.iter().copied().cycle().take(config.chunk_size).collect();
+    let filler: Vec<u8> = FILLER
+        .iter()
+        .copied()
+        .cycle()
+        .take(config.chunk_size)
+        .collect();
     let mut events = Vec::with_capacity(config.chunks);
     for i in 0..config.chunks {
         let data = format!(
@@ -124,6 +129,24 @@ pub fn sse_response(config: SseConfig) -> Response {
 
     let body = Body::from_stream(stream);
 
+    (
+        axum::http::StatusCode::OK,
+        [(CONTENT_TYPE, "text/event-stream")],
+        body,
+    )
+        .into_response()
+}
+
+/// Produce an SSE response body from raw data strings.
+///
+/// Each entry in `data_lines` is emitted as `data: <line>\n\n`.
+pub fn raw_sse_response(data_lines: Vec<String>) -> Response {
+    let stream = stream::iter(data_lines.into_iter().map(|line| {
+        let wire = format!("data: {line}\n\n").into_bytes();
+        Ok::<_, std::convert::Infallible>(wire)
+    }));
+
+    let body = Body::from_stream(stream);
     (
         axum::http::StatusCode::OK,
         [(CONTENT_TYPE, "text/event-stream")],
