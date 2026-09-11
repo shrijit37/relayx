@@ -1,0 +1,13 @@
+[package]
+name = "workflow-schema"
+edition.workspace = true
+version.workspace = true
+description = "Workflow definition types for the relay-x node-based runtime"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
