@@ -14,14 +14,15 @@
 
 ## Phase 1 test coverage
 
-### Unit tests (13)
+### Unit tests (17)
 
-- Config parsing, validation, compilation, route matching
-- Error status codes, JSON error body serialization
-- Transport: hop-by-hop header filtering, Host header building
-- Upstream client builder smoke test
-- Server healthz/ready endpoints
-- Proxy: upstream request rewriting (Host, query string, header stripping)
+- Config parsing, validation, compilation, route matching (5)
+- Error status codes, JSON error body serialization (2)
+- Transport: hop-by-hop header filtering, Host header building (3)
+- Upstream client builder smoke test (1)
+- Server healthz/ready endpoints (2)
+- Proxy: upstream request rewriting (1)
+- Protocol engine: creation, same-pair rejection, capabilities, loss detection (4)
 
 ### Integration tests (15)
 
@@ -94,9 +95,16 @@ The `crates/test-harness` crate provides in-process spawn helpers:
 - `dead_upstream_addr()` — port that will refuse connections
 - `post_hyper(url, body, headers)` / `get_hyper(url)` — raw HTTP client helpers
 
-## Protocol conformance (Phase 2+)
+## Protocol conformance (Phase 2, COMPLETE)
 
-For each adapter, maintain canonical fixtures in both directions where supported.
+131 tests in `crates/protocol-core/`:
+
+- 38 unit tests across SSE parser + 3 adapters
+- 26 streaming boundary tests (byte-level splitting, format roundtrip, edge cases)
+- 41 translation e2e tests (OpenAI↔Anthropic, Responses, tool calls, streaming, reasoning, capability loss detection)
+- 13 canonical/error tests (serde roundtrips, error variants, capability helpers)
+- 5 property tests (SSE parser fuzzing, canonical/usage serde roundtrip)
+- Benchmark suite in `benches/translation_throughput.rs` (4 groups: request_decode, response_encode, stream_event_encode, cross_adapter)
 
 Test:
 

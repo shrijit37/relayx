@@ -21,6 +21,13 @@ Thumbs.db
 # Benchmark artifacts
 benchmarks/last_run.json
 
+# Claude Code worktrees
+.claude/worktrees/
+
+# Web app build output
+apps/web/.output/
+apps/web/.wrangler/
+
 # AI agent tooling — imported/third-party skills (not project-specific)
 .codex/
 .agents/
