@@ -121,38 +121,45 @@ async fn proxy_handler_inner(
     tracing::Span::current().record("request_id", request_id.as_str());
 
     // ── 1. Match route ──────────────────────────────────────────────────────
-    let (route, lane) =
-        state
-            .config
-            .match_route(&method, &path)
-            .ok_or_else(|| GatewayError::InvalidRequest {
+    let (route_id, lane_id, src_proto, tgt_proto, workflow_id) = {
+        let (route, lane) = state.config.match_route(&method, &path).ok_or_else(|| {
+            GatewayError::InvalidRequest {
                 status: StatusCode::NOT_FOUND,
                 message: format!("no route matches {method} {path}"),
-            })?;
+            }
+        })?;
 
-    let route_id = &route.id;
-    let lane_id = &lane.id;
+        // A workflow route carries no lane; a normal route always does.
+        let lane_id = match lane {
+            Some(l) => l.id.clone(),
+            None => String::new(),
+        };
+        (
+            route.id.clone(),
+            lane_id,
+            route.source_protocol,
+            route.target_protocol,
+            route.workflow_id.clone(),
+        )
+    };
+
+    // If the route is a workflow route, execute the compiled plan instead of
+    // proxying to a lane.
+    if let Some(ref wf_id) = workflow_id {
+        return workflow_route_request(state, req, wf_id, &request_id, start).await;
+    }
 
     tracing::debug!(
         route_id = %route_id,
         lane_id = %lane_id,
-        upstream = %lane.base_url,
         request_id = %request_id,
         "matched route"
     );
 
-    crate::observability::increment_route_selected(route_id);
-    crate::observability::increment_lane_selected(lane_id);
+    crate::observability::increment_route_selected(&route_id);
+    crate::observability::increment_lane_selected(&lane_id);
 
-    let _active_guard = crate::observability::track_active_request(lane_id);
-
-    // If the route declares protocol translation, route the request through
-    // the protocol engine; otherwise use the Phase 1 passthrough path.
-    // Copy needed route data before passing `state` to sub-functions.
-    let src_proto = route.source_protocol;
-    let tgt_proto = route.target_protocol;
-    let route_id = route_id.to_owned();
-    let lane_id = lane_id.to_owned();
+    let _active_guard = crate::observability::track_active_request(&lane_id);
 
     match (src_proto, tgt_proto) {
         (Some(src), Some(tgt)) => {
@@ -418,6 +425,49 @@ fn build_upstream_request(
     upstream_req
         .body(body)
         .map_err(|e| GatewayError::Internal(format!("failed to build upstream request: {e}")))
+}
+
+/// Workflow route: execute a compiled plan instead of proxying.
+///
+/// Decodes the request body as JSON, runs it through the execution plan
+/// (fast path or full interpreter as classified at compile time), and
+/// returns the result as `application/json`.
+async fn workflow_route_request(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    workflow_id: &str,
+    request_id: &str,
+    _start: Instant,
+) -> Result<axum::response::Response<Body>, GatewayError> {
+    let snapshot = state
+        .snapshot
+        .as_ref()
+        .ok_or_else(|| GatewayError::Internal("workflow execution not configured".into()))?;
+
+    let plan = snapshot
+        .get_plan(workflow_id)
+        .ok_or_else(|| GatewayError::InvalidRequest {
+            status: StatusCode::NOT_FOUND,
+            message: format!("workflow not found: {workflow_id}"),
+        })?;
+
+    let (_parts, body) = req.into_parts();
+    let body_bytes = http_body_util::BodyExt::collect(body)
+        .await
+        .map_err(|e| {
+            GatewayError::Internal(format!("failed to buffer workflow request body: {e}"))
+        })?
+        .to_bytes();
+
+    crate::execution::execute_workflow(
+        snapshot,
+        plan,
+        body_bytes,
+        workflow_id,
+        request_id,
+        state.client.clone(),
+    )
+    .await
 }
 
 #[cfg(test)]

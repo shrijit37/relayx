@@ -140,5 +140,91 @@ fn input_transform_output_bench(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, input_to_output_bench, input_transform_output_bench);
+fn fast_path_classification_bench(c: &mut Criterion) {
+    let wf = Workflow {
+        id: "bench-fp".into(),
+        name: "fast-path".into(),
+        version: 1,
+        nodes: vec![
+            Node {
+                id: "in".into(),
+                kind: NodeKind::Input,
+                config: NodeConfig::Input(InputConfig::default()),
+                inputs: vec![],
+                outputs: vec![PortDef {
+                    name: "out".into(),
+                    port_type: PortType::Message,
+                }],
+            },
+            Node {
+                id: "llm1".into(),
+                kind: NodeKind::Llm,
+                config: NodeConfig::Llm(LlmConfig {
+                    protocol: None,
+                    model: Some("bench-model".into()),
+                    temperature: None,
+                    max_tokens: None,
+                    stream: false,
+                    lane_id: Some("bench-lane".into()),
+                }),
+                inputs: vec![PortDef {
+                    name: "in".into(),
+                    port_type: PortType::Message,
+                }],
+                outputs: vec![PortDef {
+                    name: "out".into(),
+                    port_type: PortType::Message,
+                }],
+            },
+            Node {
+                id: "out".into(),
+                kind: NodeKind::Output,
+                config: NodeConfig::Output(OutputConfig::default()),
+                inputs: vec![PortDef {
+                    name: "in".into(),
+                    port_type: PortType::Message,
+                }],
+                outputs: vec![],
+            },
+        ],
+        edges: vec![
+            Edge {
+                source_node: "in".into(),
+                source_port: "out".into(),
+                target_node: "llm1".into(),
+                target_port: "in".into(),
+                condition: None,
+            },
+            Edge {
+                source_node: "llm1".into(),
+                source_port: "out".into(),
+                target_node: "out".into(),
+                target_port: "in".into(),
+                condition: None,
+            },
+        ],
+    };
+
+    let plan = match ExecutionPlan::compile(&wf) {
+        Ok(p) => p,
+        Err(e) => panic!("compile failed: {e}"),
+    };
+
+    // Verify the plan was classified correctly.
+    black_box(plan.classification());
+
+    c.bench_function("plan_compile_with_classification", |b| {
+        b.iter(|| {
+            let p = ExecutionPlan::compile(black_box(&wf));
+            black_box(p.ok());
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    input_to_output_bench,
+    input_transform_output_bench,
+    fast_path_classification_bench
+);
 criterion_main!(benches);

@@ -58,6 +58,7 @@ pub struct GatewayConfig {
 
     pub server: ServerConfig,
     pub routes: Vec<RouteConfig>,
+    #[serde(default)]
     pub lanes: Vec<LaneConfig>,
 }
 
@@ -92,7 +93,8 @@ pub struct RouteConfig {
     #[serde(default = "default_methods")]
     pub methods: Vec<String>,
 
-    /// Lane this route forwards to.
+    /// Lane this route forwards to. Required unless `workflow_id` is set.
+    #[serde(default)]
     pub lane: String,
 
     /// Client-facing wire protocol, when the route translates protocols.
@@ -105,6 +107,11 @@ pub struct RouteConfig {
     /// Must be set together with `source_protocol` (or neither).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_protocol: Option<String>,
+
+    /// When set, this route executes a compiled workflow instead of proxying
+    /// to a lane. The `lane` field is ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +192,8 @@ pub struct CompiledRoute {
     /// and `target_protocol` (upstream side). Absence means pure passthrough.
     pub source_protocol: Option<protocol_core::canonical::Protocol>,
     pub target_protocol: Option<protocol_core::canonical::Protocol>,
+    /// When set, this route executes a compiled workflow instead of proxying.
+    pub workflow_id: Option<String>,
 }
 
 /// A fully parsed lane with pre-cased headers ready for forwarding.
@@ -222,15 +231,22 @@ impl ConfigSnapshot {
     }
 
     /// Find the first matching route for a given method and path.
+    ///
+    /// The lane is `None` for workflow routes (which execute a compiled plan
+    /// instead of proxying to a lane).
     pub fn match_route(
         &self,
         method: &http::Method,
         path: &str,
-    ) -> Option<(&CompiledRoute, &Arc<CompiledLane>)> {
+    ) -> Option<(&CompiledRoute, Option<&Arc<CompiledLane>>)> {
         self.routes.iter().find_map(|route| {
             if route.methods.iter().any(|m| m == method) && path.starts_with(&route.path_prefix) {
-                let lane = self.lanes.get(&route.lane_id)?;
-                Some((route, lane))
+                if route.workflow_id.is_some() {
+                    Some((route, None))
+                } else {
+                    let lane = self.lanes.get(&route.lane_id)?;
+                    Some((route, Some(lane)))
+                }
             } else {
                 None
             }
@@ -282,8 +298,8 @@ impl GatewayConfig {
 
         let mut routes = Vec::new();
         for route_cfg in &self.routes {
-            // Validate the lane exists.
-            if !lanes.contains_key(&route_cfg.lane) {
+            // A workflow route doesn't use a lane; skip the exists check.
+            if route_cfg.workflow_id.is_none() && !lanes.contains_key(&route_cfg.lane) {
                 return Err(ConfigError::Validation(format!(
                     "route '{}': references unknown lane '{}'",
                     route_cfg.id, route_cfg.lane
@@ -318,6 +334,7 @@ impl GatewayConfig {
                     .as_deref()
                     .map(parse_protocol)
                     .transpose()?,
+                workflow_id: route_cfg.workflow_id.clone(),
             });
         }
 
@@ -350,7 +367,7 @@ impl GatewayConfig {
                 "at least one route must be defined".into(),
             ));
         }
-        if self.lanes.is_empty() {
+        if self.lanes.is_empty() && self.routes.iter().any(|r| r.workflow_id.is_none()) {
             return Err(ConfigError::Validation(
                 "at least one lane must be defined".into(),
             ));
@@ -541,6 +558,7 @@ base_url = "http://127.0.0.1:8102"
             .match_route(&http::Method::POST, "/v1/messages")
             .ok_or_else(|| anyhow::anyhow!("expected a route match for /v1/messages"))?;
         assert_eq!(route.id, "anthropic");
+        let lane = lane.ok_or_else(|| anyhow::anyhow!("expected a lane for proxy route"))?;
         assert_eq!(lane.id, "anthropic");
 
         // Match OpenAI
@@ -548,6 +566,7 @@ base_url = "http://127.0.0.1:8102"
             .match_route(&http::Method::POST, "/v1/chat/completions")
             .ok_or_else(|| anyhow::anyhow!("expected a route match for /v1/chat/completions"))?;
         assert_eq!(route.id, "openai");
+        let lane = lane.ok_or_else(|| anyhow::anyhow!("expected a lane for proxy route"))?;
         assert_eq!(lane.id, "openai");
 
         // No match on GET

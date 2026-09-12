@@ -1,11 +1,16 @@
 //! Node implementations for the workflow runtime.
 
 pub mod condition;
+pub mod fallback;
 pub mod llm;
 pub mod mcp;
+pub mod retry;
 pub mod router;
 pub mod skill;
+pub mod trait_node;
 pub mod transform;
+
+pub use trait_node::{NodeExecutor, NodeRegistry, RegisteredNode};
 
 use serde::{Deserialize, Serialize};
 
