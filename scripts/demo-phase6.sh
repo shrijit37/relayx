@@ -72,20 +72,25 @@ echo "▶ smoke: healthcare"
 curl -sf http://127.0.0.1:$GW_ADMIN_PORT/healthz >/dev/null && echo "  gateway healthz OK"
 curl -sf http://127.0.0.1:$CP_PORT/healthz >/dev/null && echo "  control-plane healthz OK"
 
-echo "▶ create workflow, lane, provider through the control plane"
-WF_ID=$(curl -sf -X POST http://127.0.0.1:$CP_PORT/workflows \
+echo "▶ create/update workflow (id wf-demo matches the gateway route), lane through the control plane"
+# The workflow id MUST equal the gateway route's workflow_id so the compiled
+# plan resolves when a request hits /v1/workflow (review #6).
+WF_ID="wf-demo"
+curl -sf -X POST http://127.0.0.1:$CP_PORT/workflows \
   -H 'content-type: application/json' \
-  -d "{\"name\":\"demo\",\"project_id\":\"proj_default\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+  -d '{"id":"wf-demo","name":"demo","project_id":"proj_default"}' >/dev/null \
+  || curl -sf -X PUT http://127.0.0.1:$CP_PORT/workflows/wf-demo \
+     -H 'content-type: application/json' \
+     -d '{"name":"demo"}' >/dev/null
 echo "  workflow id: $WF_ID"
 
 curl -sf -X POST http://127.0.0.1:$CP_PORT/lanes \
   -H 'content-type: application/json' \
-  -d "{\"id\":\"mock-lane\",\"name\":\"mock\",\"project_id\":\"proj_default\",\"endpoint\":\"/v1/chat/completions\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT\",\"egress\":\"direct\",\"policies\":[],\"credential_ref\":{\"ref\":\"RELAYX_DEMO_KEY\",\"provider\":\"env\"}}" >/dev/null
+  -d "{\"id\":\"mock-lane\",\"name\":\"mock\",\"project_id\":\"proj_default\",\"endpoint\":\"/v1/chat/completions\",\"base_url\":\"http://127.0.0.1:$MOCK_PORT\",\"egress\":\"direct\",\"policies\":[],\"credential_ref\":{\"ref\":\"RELAYX_DEMO_KEY\",\"provider\":\"env\"}}" >/dev/null \
+  || curl -sf -X PUT "http://127.0.0.1:$CP_PORT/lanes/mock-lane" \
+     -H 'content-type: application/json' \
+     -d "{\"base_url\":\"http://127.0.0.1:$MOCK_PORT\"}" >/dev/null
 echo "  lane mock-lane OK (credential_ref env)"
-
-RELAYX_DEMO_KEY=sk-demo-secret curl -sf -X POST http://127.0.0.1:$CP_PORT/lanes/mock-lane \
-  -H 'content-type: application/json' \
-  -d '{"credential_ref":{"ref":"RELAYX_DEMO_KEY","provider":"env"}}' >/dev/null || true
 
 echo "▶ publish a workflow that routes to the mock"
 cat > /tmp/relayx-demo-wf.json <<EOF
@@ -94,9 +99,9 @@ cat > /tmp/relayx-demo-wf.json <<EOF
   "name": "demo",
   "version": 3,
   "nodes": [
-    {"id":"in","kind":"input","config":{},"inputs":[],"outputs":[{"name":"out","port_type":"message"}]},
-    {"id":"llm","kind":"llm","config":{"lane_id":"mock-lane","stream":true,"model":"gpt-4"},"inputs":[{"name":"in","port_type":"message"}],"outputs":[{"name":"out","port_type":"message"}]},
-    {"id":"out","kind":"output","config":{},"inputs":[{"name":"in","port_type":"message"}],"outputs":[]}
+    {"id":"in","kind":"input","config":{"kind":"input"},"inputs":[],"outputs":[{"name":"out","port_type":"message"}]},
+    {"id":"llm","kind":"llm","config":{"kind":"llm","lane_id":"mock-lane","stream":true,"model":"gpt-4"},"inputs":[{"name":"in","port_type":"message"}],"outputs":[{"name":"out","port_type":"message"}]},
+    {"id":"out","kind":"output","config":{"kind":"output"},"inputs":[{"name":"in","port_type":"message"}],"outputs":[]}
   ],
   "edges":[
     {"source_node":"in","source_port":"out","target_node":"llm","target_port":"in","condition":null},
@@ -105,8 +110,6 @@ cat > /tmp/relayx-demo-wf.json <<EOF
 }
 EOF
 WF_JSON=$(cat /tmp/relayx-demo-wf.json)
-# Use the created workflow id so versions land on the durable row.
-WF_JSON=$(echo "$WF_JSON" | python3 -c "import sys,json;d=json.load(sys.stdin);d['id']='$WF_ID';print(json.dumps(d))")
 
 VERS=$(curl -sf -X POST "http://127.0.0.1:$CP_PORT/workflows/$WF_ID/versions" \
   -H 'content-type: application/json' \

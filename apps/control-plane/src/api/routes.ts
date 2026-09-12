@@ -269,21 +269,53 @@ function projectIdOf(req: import("fastify").FastifyRequest, fallback: string): s
   return ((req.query as Record<string, string> | undefined)?.project_id ?? fallback);
 }
 
-/**
- * The version whose stored `workflow_json` EXACTLY matches `json`, so a
- * plan hash is never recorded against a different version's content
- * (review #5). Returns the highest matching version, or null (→ the caller
- * refuses rather than hashing mismatched content).
- */
+/** The version whose stored graph matches `json` on the compilable parts
+ *  (nodes + edges). Key order is canonicalized (recursively sorted) so a
+ *  semantically-identical JSON matches regardless of insertion order; the
+ *  serde `kind` tag inside configs and top-level identity fields are
+ *  excluded (serialization artifacts, not editor content). Review #5. */
 async function versionForJson(
   pool: Pool,
   workflowId: string,
   json: Record<string, unknown>,
 ): Promise<number | null> {
   const versions = await repo.workflows.listVersions(pool, workflowId);
-  const needle = JSON.stringify(json);
+  if (versions.length === 0) return null;
+  const graphOf = (wj: Record<string, unknown>): string =>
+    JSON.stringify(sortKeys([
+      stripKind(wj.nodes),
+      stripKind(wj.edges),
+    ]));
+  const needle = graphOf(json);
   for (const v of versions) {
-    if (JSON.stringify(v.workflow_json ?? {}) === needle) return v.version;
+    if (graphOf(v.workflow_json as Record<string, unknown>) === needle) return v.version;
   }
   return null;
+}
+
+/** Recursively sort object keys (stable across JSON representations). */
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(value as Record<string, unknown>).sort()) {
+      out[k] = sortKeys((value as Record<string, unknown>)[k]);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** Recursively drop `kind` from node configs (serde tag ≠ editor content). */
+function stripKind(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripKind);
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (k === "kind") continue;
+      out[k] = stripKind(v);
+    }
+    return out;
+  }
+  return value;
 }

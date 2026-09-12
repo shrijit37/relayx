@@ -22,8 +22,8 @@ const jsonHeaders = { "content-type": "application/json" };
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${API_BASE}${path}`, {
-    headers: jsonHeaders,
     ...init,
+    headers: { ...jsonHeaders, ...(init?.headers ?? {}) },
   });
   const data = (await resp.json().catch(() => null)) as Partial<T> | null;
   if (!resp.ok) {
@@ -79,26 +79,13 @@ export async function publishWorkflow(
   // the editor's lane-node map, kept for API-compat — resolution happens
   // control-plane-side at publish time.
 
-  const existing = (await req<WorkflowRow[]>(`/workflows`)).find((w) => w.id === workflow.id);
-  let wfId: string;
-  if (existing) {
-    wfId = existing.id;
-  } else {
-    const created = await req<WorkflowRow>(`/workflows`, {
-      method: "POST",
-      body: JSON.stringify({ name: workflow.name || workflow.id, project_id: "proj_default" }),
-    });
-    wfId = created.id;
-  }
+  // The workflow's durable row is keyed by the EDITOR's id (e.g.
+  // "production-gateway"), so subsequent GET/POST /workflows/:id target the
+  // same workflow — no orphan UUID rows (review #3).
+  const wfRow = await ensureWorkflow(workflow);
+  await createImmutableVersion(wfRow.id, workflow);
 
-  // Persist this exact editor state as a new version (immutable; never mutate
-  // an active published version).
-  await req<VersionRow>(`/workflows/${wfId}/versions`, {
-    method: "POST",
-    body: JSON.stringify({ workflow_json: workflow }),
-  });
-
-  const result = await req<PublishResponse>(`/workflows/${wfId}/publish`, {
+  const result = await req<PublishResponse>(`/workflows/${wfRow.id}/publish`, {
     method: "POST",
     body: JSON.stringify({ workflow_json: workflow }),
   });
@@ -141,9 +128,38 @@ export async function fetchLanes(projectId = "proj_default"): Promise<
 export async function validateWorkflow(
   workflow: WorkflowJson,
 ): Promise<{ plan_hash: string; status: string }> {
+  const row = await ensureWorkflow(workflow);
+  return req(`/workflows/${row.id}/validate`, {
+    method: "POST",
+    body: JSON.stringify({ workflow_json: workflow }),
+  });
+}
+
+// ── Shared helpers ──────────────────────────────────────────────────────
+
+/**
+ * Get or create the workflow's durable row, keyed by the editor's id.
+ * The control plane accepts an explicit `id` on POST /workflows so the
+ * frontend's workflow identity (e.g. "production-gateway") is preserved
+ * instead of orphaning a UUID row per publish (review #3).
+ */
+async function ensureWorkflow(workflow: WorkflowJson): Promise<WorkflowRow> {
   const existing = (await req<WorkflowRow[]>(`/workflows`)).find((w) => w.id === workflow.id);
-  if (!existing) throw new Error("publish the workflow once before validating");
-  return req(`/workflows/${existing.id}/validate`, {
+  if (existing) return existing;
+  const created = await req<WorkflowRow>(`/workflows`, {
+    method: "POST",
+    body: JSON.stringify({
+      id: workflow.id,
+      name: typeof workflow.name === "string" ? workflow.name : workflow.id,
+      project_id: "proj_default",
+    }),
+  });
+  return created;
+}
+
+/** Persist the exact editor state as a new immutable version. */
+async function createImmutableVersion(workflowId: string, workflow: WorkflowJson): Promise<void> {
+  await req<VersionRow>(`/workflows/${workflowId}/versions`, {
     method: "POST",
     body: JSON.stringify({ workflow_json: workflow }),
   });

@@ -63,6 +63,37 @@ async function toWireLane(lane: LaneRowWithCred): Promise<WireLane> {
   };
 }
 
+/**
+ * The SINGLE coherent-bundle builder. Given an explicit set of workflows +
+ * a lane resolver + a global snapshot-version allocator, builds ONE
+ * `WireSnapshot` where every referenced lane has its credential resolved
+ * and the snapshot version is global (monotonic across restarts and
+ * workflows). Used by `createPublishService` and by the rehydrate boot
+ * path (review #1, #2, #9, #10) — no caller re-implements lane/bundle
+ * resolution.
+ */
+export async function buildCoherentWire(
+  flows: BundleWorkflow[],
+  getLane: (id: string) => Promise<LaneRowWithCred | null>,
+  nextSnapshotVersion: () => Promise<number>,
+): Promise<WireSnapshot | { error: string }> {
+  const snapshot_version = await nextSnapshotVersion();
+  const workflows: WireWorkflow[] = [];
+
+  for (const flow of flows) {
+    const referenced = collectReferencedLanes(flow.workflowJson);
+    const flowLanes: Record<string, WireLane> = {};
+    for (const id of referenced) {
+      const lane = await getLane(id);
+      if (!lane) return { error: `workflow '${flow.id}' references unknown lane '${id}'` };
+      flowLanes[id] = await toWireLane(lane);
+    }
+    workflows.push({ id: flow.id, workflow: flow.workflowJson, lanes: flowLanes });
+  }
+
+  return { snapshot_version, workflows };
+}
+
 export type PublishResult = {
   status: "published" | "error";
   snapshot_version?: number;
@@ -97,23 +128,7 @@ export function createPublishService(deps: {
     getLane: (id: string) => Promise<LaneRowWithCred | null>,
     nextSnapshotVersion: () => Promise<number>,
   ): Promise<WireSnapshot | { error: string }> {
-    const snapshot_version = await nextSnapshotVersion();
-    const workflows: WireWorkflow[] = [];
-    const lanesSeen = new Set<string>();
-
-    for (const flow of flows) {
-      const referenced = collectReferencedLanes(flow.workflowJson);
-      const flowLanes: Record<string, WireLane> = {};
-      for (const id of referenced) {
-        const lane = await getLane(id);
-        if (!lane) return { error: `workflow '${flow.id}' references unknown lane '${id}'` };
-        flowLanes[id] = await toWireLane(lane);
-        lanesSeen.add(id);
-      }
-      workflows.push({ id: flow.id, workflow: flow.workflowJson, lanes: flowLanes });
-    }
-
-    return { snapshot_version, workflows };
+    return buildCoherentWire(flows, getLane, nextSnapshotVersion);
   }
   /**
    * Build the coherent wire bundle: the target workflow ∪ every other ACTIVE
@@ -127,7 +142,7 @@ export function createPublishService(deps: {
     version: number;
   }): Promise<WireSnapshot | { error: string }> {
     const others = await deps.listActiveWorkflows([opts.workflowId]);
-    return buildWireForFlows(
+    return buildCoherentWire(
       [
         { id: opts.workflowId, version: opts.version, workflowJson: opts.workflowJson, revision: "target" as const },
         ...others,
