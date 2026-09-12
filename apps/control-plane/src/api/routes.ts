@@ -144,6 +144,7 @@ export async function buildApp(opts: {
       workflow_version: version,
       snapshot_version: result.snapshot_version,
       plan_hash: result.plan_hash,
+      published_at: result.published_at,
     };
   });
 
@@ -311,16 +312,42 @@ function sortKeys(value: unknown): unknown {
   return value;
 }
 
-/** Recursively drop `kind` from node configs (serde tag ≠ editor content). */
-function stripKind(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripKind);
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (k === "kind") continue;
-      out[k] = stripKind(v);
-    }
-    return out;
+/** Strip the `kind` tag from config objects only.
+ *
+ * The graph layout is `node = {id, kind, config, inputs, outputs}` where
+ * `config = {kind, …}`. The node-level `kind` is the semantic discriminator
+ * ("llm" vs "router" — must be preserved); the config-level `kind` is a
+ * serde artifact. We strip only the `kind` inside `config` (and recurse
+ * into children) — never the node's own `kind`. Review D7. */
+function stripKind(nodesOrValue: unknown): unknown {
+  const isNodeList = Array.isArray(nodesOrValue) && nodesOrValue.every((n) => isNode(n));
+  if (isNodeList) return nodesOrValue.map(stripNode);
+  return nodesOrValue;
+}
+
+function isNode(v: unknown): boolean {
+  return (
+    v !== null &&
+    typeof v === "object" &&
+    typeof (v as Record<string, unknown>).kind === "string" &&
+    typeof (v as Record<string, unknown>).id !== "undefined"
+  );
+}
+
+function stripNode(node: unknown): unknown {
+  const n = node as { id?: unknown; kind?: unknown; config?: unknown; inputs?: unknown; outputs?: unknown };
+  const config = n.config === undefined ? n.config : stripConfig(n.config);
+  return { ...n, config };
+}
+
+/** Drop `kind` from this config object, recursively (children keep kinds). */
+function stripConfig(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(stripConfig);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (k === "kind") continue;
+    out[k] = k === "config" ? stripConfig(v) : v;
   }
-  return value;
+  return out;
 }

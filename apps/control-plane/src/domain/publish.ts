@@ -98,6 +98,7 @@ export type PublishResult = {
   status: "published" | "error";
   snapshot_version?: number;
   plan_hash?: string;
+  published_at?: string;
   error?: string;
 };
 
@@ -198,11 +199,18 @@ export function createPublishService(deps: {
       // Post-publish metadata as ONE transaction: if control-plane state and
       // the gateway swap ever disagree, a crash here leaves ACTIVE pointer
       // consistent with the gateway (no silent rollback on next reboot).
-      await recordPublished(deps.pool, workflowId, version, planHash, published.snapshot_version);
+      const publishedAt = await recordPublished(
+        deps.pool,
+        workflowId,
+        version,
+        planHash,
+        published.snapshot_version,
+      );
       return {
         status: "published",
         snapshot_version: published.snapshot_version,
         plan_hash: planHash,
+        published_at: publishedAt,
       };
     },
   };
@@ -244,7 +252,7 @@ export async function recordPublished(
   version: number,
   planHash: string,
   snapshotVersion: number,
-): Promise<void> {
+): Promise<string> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -256,8 +264,8 @@ export async function recordPublished(
       "UPDATE workflows SET status = 'active', updated_at = now() WHERE id = $1",
       [workflowId],
     );
-    await client.query(
-      "INSERT INTO publications (id, workflow_id, workflow_version, plan_hash, snapshot_version, status) VALUES ($1,$2,$3,$4,$5,'succeeded')",
+    const pub = await client.query<{ published_at: string }>(
+      "INSERT INTO publications (id, workflow_id, workflow_version, plan_hash, snapshot_version, status) VALUES ($1,$2,$3,$4,$5,'succeeded') RETURNING published_at",
       [crypto.randomUUID(), workflowId, version, planHash, snapshotVersion],
     );
     await client.query(
@@ -271,6 +279,7 @@ export async function recordPublished(
       snapshotVersion,
     ]);
     await client.query("COMMIT");
+    return pub.rows[0]?.published_at ?? new Date().toISOString();
   } catch (e) {
     await client.query("ROLLBACK");
     throw e;

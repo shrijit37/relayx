@@ -61,8 +61,15 @@ export class GatewayClient {
   }
 
   private interpret(data: GatewayResponse | { status: "error"; error: string }): GatewayResult {
-    if (data.status === "error" || !Array.isArray(data.workflows)) {
-      return { ok: false, error: data.status === "error" ? data.error ?? "unknown gateway error" : "gateway returned an unexpected response" };
+    // Only the two real success statuses are accepted; a future gateway
+    // introducing "partial"/"pending" must NOT be treated as published
+    // (review:angle-c). Anything else is a hard error.
+    const okStatus = data.status === "published" || data.status === "validated";
+    if (!okStatus || !Array.isArray(data.workflows)) {
+      return {
+        ok: false,
+        error: data.status === "error" ? data.error ?? "unknown gateway error" : `unexpected gateway status '${(data as GatewayResponse).status ?? "unknown"}'`,
+      };
     }
     return {
       ok: true,

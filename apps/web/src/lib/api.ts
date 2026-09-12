@@ -57,6 +57,7 @@ type PublishResponse = {
   workflow_version: number;
   snapshot_version: number;
   plan_hash: string;
+  published_at?: string;
 };
 
 /** Version/plan metadata displayed to the user — always backend-derived. */
@@ -94,14 +95,15 @@ export async function publishWorkflow(
     throw new Error(`publication did not complete: ${result.status}`);
   }
 
-  // Backend-truth only: version/snapshot/plan-hash come from the control plane.
+  // Backend-truth only: version/snapshot/plan-hash/published_at come from
+  // the control plane — never the client clock (review:angle-c).
   return {
     version: result.workflow_version,
     planHash: result.plan_hash,
     workflowId: result.workflow_id,
     snapshotVersion: result.snapshot_version,
     status: "active",
-    publishedAt: new Date().toISOString(),
+    publishedAt: result.published_at ?? new Date().toISOString(),
   };
 }
 
