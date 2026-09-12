@@ -87,13 +87,27 @@ fn validate_lane_refs(workflow: &Workflow, ctx: &CompileContext) -> Result<(), C
 
     for node in &workflow.nodes {
         match &node.config {
-            NodeConfig::Llm(llm_cfg) => {
-                if let Some(lane_id) = llm_cfg.lane_id.as_deref()
-                    && ctx.lanes.get(lane_id).is_none()
-                {
-                    return Err(CompileError::LaneNotFound(lane_id.to_owned()));
+            NodeConfig::Llm(llm_cfg) => match llm_cfg.lane_id.as_deref() {
+                Some(lane_id) => {
+                    if ctx.lanes.get(lane_id).is_none() {
+                        return Err(CompileError::LaneNotFound(lane_id.to_owned()));
+                    }
                 }
-            }
+                // Lane-less LLM node: only unambiguous with exactly one lane.
+                None => {
+                    if ctx.lanes.is_empty() {
+                        return Err(CompileError::Schema(
+                            "LLM node has no lane_id and no lane is registered".into(),
+                        ));
+                    }
+                    if ctx.lanes.len() > 1 {
+                        return Err(CompileError::Schema(
+                            "LLM node has no lane_id but multiple lanes exist; a lane_id is required"
+                                .into(),
+                        ));
+                    }
+                }
+            },
             NodeConfig::Fallback(FallbackConfig { providers, .. }) => {
                 for provider in providers {
                     if ctx.lanes.get(&provider.lane_id).is_none() {
@@ -264,6 +278,67 @@ mod tests {
             Err(e) => panic!("compile 2 failed: {e}"),
         };
         assert_eq!(hash1, hash2, "same workflow must produce same hash");
+    }
+
+    #[test]
+    fn lane_less_llm_with_no_lanes_is_rejected() {
+        // A lane-less LLM node with ZERO lanes is unambiguous-but-impossible:
+        // the runtime would have no lane to route through, so it must fail at
+        // compile time (not 500 on the first request).
+        let wf = Workflow {
+            id: "wf-none".into(),
+            name: "no-lanes".into(),
+            version: 1,
+            nodes: vec![input_node("in"), llm_node("llm1", None), output_node("out")],
+            edges: vec![simple_edge("in", "llm1"), simple_edge("llm1", "out")],
+        };
+        let ctx = CompileContext {
+            lanes: Arc::new(LaneRegistry::new()),
+        };
+        let result = compile_workflow(&wf, &ctx);
+        assert!(
+            result.is_err(),
+            "lane-less LLM with no lanes must fail to compile"
+        );
+    }
+
+    #[test]
+    fn lane_less_llm_with_multiple_lanes_is_rejected() {
+        // A lane-less LLM node with MULTIPLE lanes is ambiguous — the runtime
+        // must not guess. Require an explicit lane_id.
+        let mut two_lanes = LaneRegistry::new();
+        let a = match Url::parse("http://127.0.0.1:9001") {
+            Ok(u) => u,
+            Err(e) => panic!("invalid url: {e}"),
+        };
+        let b = match Url::parse("http://127.0.0.1:9002") {
+            Ok(u) => u,
+            Err(e) => panic!("invalid url: {e}"),
+        };
+        two_lanes.register(LaneEntry {
+            id: "a".into(),
+            base_url: a,
+        });
+        two_lanes.register(LaneEntry {
+            id: "b".into(),
+            base_url: b,
+        });
+
+        let wf = Workflow {
+            id: "wf-two".into(),
+            name: "two-lanes".into(),
+            version: 1,
+            nodes: vec![input_node("in"), llm_node("llm1", None), output_node("out")],
+            edges: vec![simple_edge("in", "llm1"), simple_edge("llm1", "out")],
+        };
+        let ctx = CompileContext {
+            lanes: Arc::new(two_lanes),
+        };
+        let result = compile_workflow(&wf, &ctx);
+        assert!(
+            result.is_err(),
+            "lane-less LLM with multiple lanes must fail to compile"
+        );
     }
 
     #[test]

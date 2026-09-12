@@ -533,6 +533,9 @@ impl NodeRuntime {
                         "node completed"
                     );
 
+                    ctx.reporter
+                        .node_completed(&exec_node.id, output.port.as_deref());
+
                     let port_name = output.port.clone().unwrap_or_else(|| "out".to_owned());
                     store.store(&exec_node.id, &port_name, output.value);
                     active_port.insert(exec_node.id.clone(), output.port);
@@ -558,6 +561,7 @@ impl NodeRuntime {
                     }
                 }
                 Err(e) => {
+                    ctx.reporter.node_failed(&exec_node.id, &e.to_string());
                     tracing::error!(
                         node_id = %exec_node.id,
                         error = %e,
