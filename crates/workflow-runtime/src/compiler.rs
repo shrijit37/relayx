@@ -146,6 +146,7 @@ mod tests {
         registry.register(LaneEntry {
             id: "test-lane".into(),
             base_url,
+            authorization: None,
         });
         Arc::new(registry)
     }
@@ -318,10 +319,12 @@ mod tests {
         two_lanes.register(LaneEntry {
             id: "a".into(),
             base_url: a,
+            authorization: None,
         });
         two_lanes.register(LaneEntry {
             id: "b".into(),
             base_url: b,
+            authorization: None,
         });
 
         let wf = Workflow {

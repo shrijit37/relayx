@@ -103,10 +103,16 @@ pub async fn execute(
         .map_err(|e| NodeError::Internal(format!("invalid lane URL: {e}")))?;
 
     // Build the HTTP request.
-    let req = hyper::Request::builder()
+    let mut builder = hyper::Request::builder()
         .method(hyper::Method::POST)
         .uri(url.as_str())
-        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::CONTENT_TYPE, "application/json");
+    // Attach the lane's resolved authorization header when the lane carries
+    // one (control-plane credential resolution, never in workflow JSON).
+    if let Some(auth) = &lane.authorization {
+        builder = builder.header(http::header::AUTHORIZATION, auth);
+    }
+    let req = builder
         .body(axum::body::Body::from(wire))
         .map_err(|e| NodeError::Internal(format!("failed to build request: {e}")))?;
 

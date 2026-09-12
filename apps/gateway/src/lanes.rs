@@ -123,6 +123,7 @@ mod tests {
                 Ok(u) => u,
                 Err(e) => panic!("invalid lane url: {e}"),
             },
+            authorization: None,
         });
         registry.register(LaneEntry {
             id: "lane-b".into(),
@@ -130,6 +131,7 @@ mod tests {
                 Ok(u) => u,
                 Err(e) => panic!("invalid lane url: {e}"),
             },
+            authorization: None,
         });
         Arc::new(registry)
     }

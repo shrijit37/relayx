@@ -199,6 +199,7 @@ fn foreign_lane_resolves_for_compiler() {
     lanes.register(LaneEntry {
         id: "example-lane".into(),
         base_url,
+        authorization: None,
     });
     let lanes = Arc::new(lanes);
 

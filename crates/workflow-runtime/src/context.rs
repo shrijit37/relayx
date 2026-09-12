@@ -121,6 +121,11 @@ pub struct LaneEntry {
     pub id: String,
     /// Base URL for the upstream provider.
     pub base_url: url::Url,
+    /// Optional static authorization header value (e.g. `Bearer <token>`)
+    /// attached to requests routed through this lane. Resolved at publish
+    /// time from a `credential_ref` on the control plane — never stored in
+    /// workflow JSON. `None` for lanes that carry no auth.
+    pub authorization: Option<String>,
 }
 
 impl LaneRegistry {

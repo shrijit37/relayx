@@ -134,6 +134,7 @@ fn lanes_with(url: &str) -> Arc<LaneRegistry> {
             Ok(u) => u,
             Err(e) => panic!("invalid lane url: {e}"),
         },
+        authorization: None,
     });
     Arc::new(lanes)
 }
@@ -213,6 +214,116 @@ async fn publication_state_compiles_and_publishes_wire_snapshot() {
     };
     assert_eq!(snap.version(), 7);
     assert!(snap.get_plan("echo-wf").is_some());
+}
+
+#[tokio::test]
+async fn validate_compiles_but_does_not_publish() {
+    let publisher = Arc::new(InMemoryPublisher::new());
+    let publication = Arc::new(PublicationState::new(
+        publisher.clone(),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+    ));
+
+    // Seed a v1 runtime so there is something to verify "unchanged".
+    publication.publish(snapshot_at(1));
+
+    // Validate a v7 wire snapshot — compiles, does NOT touch the active runtime.
+    let validated = publication
+        .validate_workflows(&wire_snapshot(7))
+        .map_err(|e| panic!("validate failed: {e}"))
+        .expect("valid wire snapshot validates");
+    assert_eq!(validated.version(), 7);
+    // Plan hashes are deterministic and present even before publish.
+    assert!(
+        !validated
+            .plan_hash_for("echo-wf")
+            .unwrap_or_default()
+            .is_empty()
+    );
+
+    // The active runtime is still v1.
+    let active = match publication.snapshot() {
+        Some(s) => s,
+        None => panic!("v1 should still be active"),
+    };
+    assert_eq!(active.version(), 1, "validate must not publish");
+}
+
+#[tokio::test]
+async fn published_lanes_carry_resolved_authorization() {
+    let publisher = Arc::new(InMemoryPublisher::new());
+    let publication = Arc::new(PublicationState::new(
+        publisher.clone(),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+    ));
+
+    let wire = WireSnapshot {
+        snapshot_version: 1,
+        workflows: vec![WireWorkflow {
+            id: "echo-wf".into(),
+            workflow: passthrough_workflow(),
+            lanes: std::collections::HashMap::from([(
+                "lane-a".into(),
+                relay_gateway::observability::WireLane {
+                    base_url: "http://127.0.0.1:9001".into(),
+                    authorization: Some("Bearer sk-test-123".into()),
+                },
+            )]),
+        }],
+    };
+
+    publication
+        .publish_workflows(wire)
+        .map_err(|e| panic!("publish failed: {e}"))
+        .expect("publish with credential should succeed");
+
+    let snap = match publication.snapshot() {
+        Some(s) => s,
+        None => panic!("snapshot published"),
+    };
+    let lane = snap
+        .lanes()
+        .get("lane-a")
+        .ok_or("lane-a missing from snapshot")
+        .expect("lane registered");
+    assert_eq!(
+        lane.authorization.as_deref(),
+        Some("Bearer sk-test-123"),
+        "resolved credential carried on the lane entry"
+    );
+
+    // The default (test-only) path must NOT leak a credential by accident.
+    let plain = WireSnapshot {
+        snapshot_version: 2,
+        workflows: vec![WireWorkflow {
+            id: "echo-wf".into(),
+            workflow: passthrough_workflow(),
+            lanes: std::collections::HashMap::from([(
+                "lane-a".into(),
+                relay_gateway::observability::WireLane {
+                    base_url: "http://127.0.0.1:9001".into(),
+                    authorization: None,
+                },
+            )]),
+        }],
+    };
+    publication
+        .publish_workflows(plain)
+        .map_err(|e| panic!("publish failed: {e}"))
+        .expect("publish without credential");
+    let snap = match publication.snapshot() {
+        Some(s) => s,
+        None => panic!("snapshot published"),
+    };
+    assert_eq!(
+        snap.lanes()
+            .get("lane-a")
+            .and_then(|l| l.authorization.clone()),
+        None,
+        "no fallback credential is invented"
+    );
 }
 
 #[tokio::test]

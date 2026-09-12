@@ -83,6 +83,7 @@ fn workflow_snapshot() -> Arc<workflow_runtime::RuntimeSnapshot> {
     lanes.register(LaneEntry {
         id: "mock".into(),
         base_url: base,
+        authorization: None,
     });
     let lanes = Arc::new(lanes);
 

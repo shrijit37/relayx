@@ -2,7 +2,8 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { AlertTriangle, ArrowLeft, Check, GitCompare, RotateCcw } from "lucide-react";
 import { AppShell } from "@/components/relay/AppShell";
 import { KV, PageHeader, Panel, StatusText, TableShell, Td } from "@/components/relay/primitives";
-import { compileStages, validationIssues, versions } from "@/lib/relay-data";
+import { compileStages, validationIssues } from "@/lib/relay-data";
+import { useWorkflowVersions } from "@/lib/use-workflow-publication";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/workflows/$workflowId/versions")({
@@ -21,11 +22,14 @@ export const Route = createFileRoute("/workflows/$workflowId/versions")({
 
 function VersionsPage() {
   const { workflowId } = Route.useParams();
+  const { data: liveVersions, isPending } = useWorkflowVersions(workflowId);
+  const active = liveVersions?.find((v) => v.status === "active");
+
   return (
     <AppShell>
       <PageHeader
         title="Compilation & versions"
-        subtitle="Production Gateway · the visual graph is authored, the execution plan is served."
+        subtitle={`${active ? `ACTIVE v${active.version} · plan ${shortHash(active.plan_hash)}` : "no live version yet"} · the visual graph is authored, the execution plan is served.`}
         meta={
           <Link
             to="/workflows/$workflowId"
@@ -40,12 +44,13 @@ function VersionsPage() {
             <button className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs hover:border-border-strong">
               <GitCompare className="size-3.5" /> Compare
             </button>
-            <button className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs hover:border-border-strong">
-              <RotateCcw className="size-3.5" /> Rollback
-            </button>
-            <button className="focus-ring h-7 rounded-sm bg-primary px-2.5 text-xs font-medium text-primary-foreground hover:opacity-90">
-              Publish v25
-            </button>
+            <Link
+              to="/workflows/$workflowId"
+              params={{ workflowId }}
+              className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs hover:border-border-strong"
+            >
+              <RotateCcw className="size-3.5" /> Edit
+            </Link>
           </>
         }
       />
@@ -80,12 +85,9 @@ function VersionsPage() {
 
         <div className="grid content-start gap-3">
           <Panel title="Plan artifact">
-            <KV k="Plan id" v="plan_8f31a2" />
-            <KV k="Graph hash" v="a91f…4d20" />
-            <KV k="Size" v="14.2 KB" />
-            <KV k="Compile time" v="35.0 ms" />
-            <KV k="Propagation" v="112 ms" />
-            <KV k="Hot-path DB reads" v="0" tone="ok" />
+            <KV k="Plan hash" v={active?.plan_hash ?? "—"} />
+            <KV k="Snapshot version" v={String(active?.version ?? "—")} />
+            <KV k="Workflow" v={workflowId} />
           </Panel>
           <Panel title="Validation">
             <ul className="space-y-2">
@@ -107,27 +109,36 @@ function VersionsPage() {
         </div>
 
         <Panel title="Version history" className="xl:col-span-3" dense>
-          <TableShell head={["Version", "Status", "Plan", "Change", "Author", "When", ""]}>
-            {versions.map((v) => (
-              <tr key={v.v} className="hover:bg-panel-raised/50">
-                <Td className="num font-medium">v{v.v}</Td>
-                <Td>
-                  <StatusText status={v.status} />
-                </Td>
-                <Td className="num text-muted-foreground">{v.plan}</Td>
-                <Td>{v.note}</Td>
-                <Td className="num text-muted-foreground">{v.author}</Td>
-                <Td className="num text-muted-foreground">{v.when}</Td>
-                <Td className="text-right">
-                  <button className="focus-ring rounded-sm border border-border px-1.5 py-0.5 text-[10px] hover:border-primary hover:text-primary">
-                    {v.status === "Production" ? "Compare" : "Rollback"}
-                  </button>
-                </Td>
-              </tr>
-            ))}
-          </TableShell>
+          {isPending ? (
+            <div className="p-4 text-xs text-muted-foreground">loading versions…</div>
+          ) : liveVersions && liveVersions.length > 0 ? (
+            <TableShell head={["Version", "Status", "Plan", "When", ""]}>
+              {liveVersions.map((v) => (
+                <tr key={v.version} className="hover:bg-panel-raised/50">
+                  <Td className="num font-medium">v{v.version}</Td>
+                  <Td>
+                    <StatusText status={v.status === "active" ? "Production" : v.status === "compiled" ? "Staging" : "Draft"} />
+                  </Td>
+                  <Td className="num text-muted-foreground">{shortHash(v.plan_hash)}</Td>
+                  <Td className="num text-muted-foreground">{new Date(v.created_at).toLocaleString()}</Td>
+                  <Td className="text-right">
+                    <button className="focus-ring rounded-sm border border-border px-1.5 py-0.5 text-[10px] hover:border-primary hover:text-primary">
+                      {v.status === "active" ? "Active" : "Draft"}
+                    </button>
+                  </Td>
+                </tr>
+              ))}
+            </TableShell>
+          ) : (
+            <div className="p-4 text-xs text-muted-foreground">no versions persisted yet — open the editor and publish.</div>
+          )}
         </Panel>
       </div>
     </AppShell>
   );
+}
+
+function shortHash(h: string | null | undefined): string {
+  if (!h) return "—";
+  return h.length > 12 ? `${h.slice(0, 12)}…` : h;
 }

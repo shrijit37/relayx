@@ -27,6 +27,7 @@ pub fn compile_workflow_with_lanes(
         lane_registry.register(LaneEntry {
             id: id.clone(),
             base_url,
+            authorization: None,
         });
     }
 
@@ -48,6 +49,7 @@ pub fn build_snapshot(
             lane_registry.register(LaneEntry {
                 id: id.clone(),
                 base_url,
+                authorization: None,
             });
         }
     }

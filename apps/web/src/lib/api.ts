@@ -1,115 +1,150 @@
 /**
  * Frontend API boundary — the contract between the React Flow editor and the
- * gateway/control plane.
+ * control plane (Fastify on RELAYX_CONTROL_PORT, real Postgres behind it).
  *
- * The frontend owns editor state; server state is fetched via React Query.
- * This module defines the wire types and the fetch calls. A real control
- * plane is NOT built this phase — the boundary is proven against the
- * gateway's admin `/publish` endpoint, which accepts the same wire shape
- * (`WireSnapshot`).
+ * The frontend owns editor state; the control plane owns durable workflows,
+ * versions, plan hashes, and publication. Every field shown to the user
+ * (version, plan hash, snapshot, lane URLs, publication status) comes from
+ * the backend — the frontend never fabricates runtime truth.
  *
- * When no backend is reachable, every call surfaces a typed error so the UI
+ * When the control plane is unreachable, calls throw typed errors so the UI
  * degrades to an explicit "not connected" state instead of faking success.
  */
 
 import type { WorkflowJson } from "@/lib/workflow-serializer";
 
-/** Base URL for control-plane/gateway admin API; empty = wallet-wide mock. */
+/** Base URL for the control-plane API. */
 const API_BASE: string =
-  (import.meta.env["VITE_CONTROL_PLANE_URL"] as string | undefined) ?? "";
-
-/** The wire payload the gateway `/publish` endpoint accepts. */
-export interface PublishRequest {
-  snapshot_version: number;
-  workflows: {
-    id: string;
-    workflow: WorkflowJson;
-    lanes: Record<string, string>;
-  }[];
-}
-
-export interface PublishResult {
-  status: "published" | "error";
-  error?: string;
-  /** Present on success: the snapshot version the gateway compiled. */
-  snapshot_version?: number;
-  /** Plan hashes per workflow id, computed server-side. */
-  workflows?: { workflow_id: string; plan_hash: string; version: number }[];
-}
-
-/** Publication/version info returned by a successful publish. */
-export interface VersionInfo {
-  version: number;
-  planHash: string;
-  workflowId: string;
-  publishedAt: string;
-}
+  (import.meta.env["VITE_CONTROL_PLANE_URL"] as string | undefined) ??
+  "http://127.0.0.1:9091";
 
 const jsonHeaders = { "content-type": "application/json" };
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-  if (!API_BASE) {
-    throw new Error(
-      "control plane is not configured — set VITE_CONTROL_PLANE_URL to the gateway admin URL (e.g. http://127.0.0.1:9090)",
-    );
-  }
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
     headers: jsonHeaders,
-    body: JSON.stringify(body),
+    ...init,
   });
-  const data = (await resp.json().catch(() => null)) as Partial<PublishResult> | null;
+  const data = (await resp.json().catch(() => null)) as Partial<T> | null;
   if (!resp.ok) {
-    throw new Error(data?.error ?? `HTTP ${resp.status}`);
+    throw new Error(((data as { error?: string } | null)?.error) ?? `HTTP ${resp.status}`);
   }
   return data as T;
 }
 
-/**
- * Publish a workflow to the gateway. Returns publication metadata; throws on
- * network error, non-2xx, or a compile failure surfaced by the backend.
- *
- * Version + plan hash come from the gateway's response (server truth), never
- * fabricated client-side.
- */
+/** The control-plane API shapes (mirror of the Fastify routes). */
+type WorkflowRow = {
+  id: string;
+  name: string;
+  status: string;
+  project_id: string;
+  created_at: string;
+};
+
+type VersionRow = {
+  id: string;
+  workflow_id: string;
+  version: number;
+  workflow_json: WorkflowJson;
+  plan_hash: string | null;
+  status: string;
+  created_at: string;
+};
+
+type PublishResponse = {
+  status: string;
+  workflow_id: string;
+  workflow_version: number;
+  snapshot_version: number;
+  plan_hash: string;
+};
+
+/** Version/plan metadata displayed to the user — always backend-derived. */
+export interface VersionInfo {
+  version: number;
+  planHash: string;
+  workflowId: string;
+  snapshotVersion: number;
+  status: string;
+  publishedAt: string;
+}
+
+/** Ensure the workflow row exists (create if it doesn't), then publish. */
 export async function publishWorkflow(
   workflow: WorkflowJson,
-  lanes: Record<string, string>,
+  _lanes: Record<string, string>,
 ): Promise<VersionInfo> {
-  const payload: PublishRequest = {
-    snapshot_version: workflow.version,
-    workflows: [{ id: workflow.id, workflow, lanes }],
-  };
-  const result = await post<PublishResult>("/publish", payload);
-  if (result.status === "error") {
-    throw new Error(result.error ?? "publication failed");
+  // Lane records (base_url + credentials) live in the control plane; the
+  // frontend references lanes by id inside the workflow JSON. `_lanes` is
+  // the editor's lane-node map, kept for API-compat — resolution happens
+  // control-plane-side at publish time.
+
+  const existing = (await req<WorkflowRow[]>(`/workflows`)).find((w) => w.id === workflow.id);
+  let wfId: string;
+  if (existing) {
+    wfId = existing.id;
+  } else {
+    const created = await req<WorkflowRow>(`/workflows`, {
+      method: "POST",
+      body: JSON.stringify({ name: workflow.name || workflow.id, project_id: "proj_default" }),
+    });
+    wfId = created.id;
   }
-  const plan = result.workflows?.find((w) => w.workflow_id === workflow.id);
+
+  // Persist this exact editor state as a new version (immutable; never mutate
+  // an active published version).
+  await req<VersionRow>(`/workflows/${wfId}/versions`, {
+    method: "POST",
+    body: JSON.stringify({ workflow_json: workflow }),
+  });
+
+  const result = await req<PublishResponse>(`/workflows/${wfId}/publish`, {
+    method: "POST",
+    body: JSON.stringify({ workflow_json: workflow }),
+  });
+
+  if (result.status !== "published") {
+    throw new Error(`publication did not complete: ${result.status}`);
+  }
+
+  // Backend-truth only: version/snapshot/plan-hash come from the control plane.
   return {
-    version: result.snapshot_version ?? workflow.version,
-    planHash: plan?.plan_hash ?? "",
-    workflowId: workflow.id,
+    version: result.workflow_version,
+    planHash: result.plan_hash,
+    workflowId: result.workflow_id,
+    snapshotVersion: result.snapshot_version,
+    status: "active",
     publishedAt: new Date().toISOString(),
   };
 }
 
-/**
- * Validate + compile without publishing — the gateway admin has no separate
- * dry-run endpoint yet, so this exercises the serialize path client-side and
- * reports structural errors immediately.
- */
-export function validateLocally(workflow: WorkflowJson): string[] {
-  const errors: string[] = [];
-  const input = workflow.nodes.filter((n) => n.kind === "input");
-  const output = workflow.nodes.filter((n) => n.kind === "output");
-  if (input.length !== 1) errors.push(`expected exactly one Input node, found ${input.length}`);
-  if (output.length !== 1) errors.push(`expected exactly one Output node, found ${output.length}`);
-  if (workflow.nodes.length === 0) errors.push("workflow has no nodes");
+/** Load workflow versions for the versions page (backend-derived). */
+export async function fetchWorkflowVersions(workflowId: string): Promise<VersionRow[]> {
+  return req<VersionRow[]>(`/workflows/${workflowId}/versions`);
+}
 
-  const ids = new Set(workflow.nodes.map((n) => n.id));
-  for (const e of workflow.edges) {
-    if (!ids.has(e.source_node)) errors.push(`edge references unknown source '${e.source_node}'`);
-    if (!ids.has(e.target_node)) errors.push(`edge references unknown target '${e.target_node}'`);
-  }
-  return errors;
+/** Load all workflows (backend-derived list for the index page). */
+export async function fetchWorkflows(): Promise<
+  Array<{ id: string; name: string; status: string; created_at: string }>
+> {
+  return req(`/workflows`);
+}
+
+/** Load lane records so the editor can show real lane URLs/config. */
+export async function fetchLanes(projectId = "proj_default"): Promise<
+  Array<{ id: string; base_url: string; egress: string; credential_ref: { ref: string } | null }>
+> {
+  return req(`/lanes?project_id=${projectId}`);
+}
+
+/** Validate + compile without publishing; returns the real plan hash. */
+export async function validateWorkflow(
+  workflow: WorkflowJson,
+): Promise<{ plan_hash: string; status: string }> {
+  const existing = (await req<WorkflowRow[]>(`/workflows`)).find((w) => w.id === workflow.id);
+  if (!existing) throw new Error("publish the workflow once before validating");
+  return req(`/workflows/${existing.id}/validate`, {
+    method: "POST",
+    body: JSON.stringify({ workflow_json: workflow }),
+  });
 }

@@ -291,14 +291,14 @@ fn test_llm_node_with_mock_upstream() {
             Err(e) => panic!("failed to spawn mock: {e}"),
         };
         let base_url: url::Url = match format!("http://{}", mock.addr).parse() {
-            Ok(u) => u,
-            Err(e) => panic!("failed to parse URL: {e}"),
+            Ok(m) => m,
+            Err(e) => panic!("failed to spawn mock: {e}"),
         };
-
         let mut lanes = LaneRegistry::new();
         lanes.register(LaneEntry {
             id: "test-lane".into(),
             base_url,
+            authorization: None,
         });
         let lanes = Arc::new(lanes);
 
@@ -358,14 +358,14 @@ async fn test_concurrent_executions() {
         Err(e) => panic!("failed to spawn mock: {e}"),
     };
     let base_url: url::Url = match format!("http://{}", mock.addr).parse() {
-        Ok(u) => u,
-        Err(e) => panic!("failed to parse URL: {e}"),
+        Ok(m) => m,
+        Err(e) => panic!("failed to spawn mock: {e}"),
     };
-
     let mut lanes = LaneRegistry::new();
     lanes.register(LaneEntry {
         id: "lane1".into(),
         base_url,
+        authorization: None,
     });
     let lanes = Arc::new(lanes);
 
