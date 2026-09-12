@@ -10,7 +10,11 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import type { Pool } from "pg";
 import * as repo from "../db/repositories";
-import { createPublishService } from "../domain/publish";
+import {
+  createPublishService,
+  listActiveWorkflows,
+  nextSnapshotVersion,
+} from "../domain/publish";
 import type { GatewayClient } from "../gateway/client";
 import { createWorkflowSchema, laneDtoSchema, providerDtoSchema, publishSchema } from "./schemas";
 import type { CredentialRef } from "../secrets";
@@ -32,6 +36,8 @@ export async function buildApp(opts: {
   const publish = createPublishService({
     pool,
     getLane: (id) => repo.lanes.get(pool, id),
+    listActiveWorkflows: (except) => listActiveWorkflows(pool, except),
+    nextSnapshotVersion: () => nextSnapshotVersion(pool),
     gateway,
   });
 
@@ -48,7 +54,11 @@ export async function buildApp(opts: {
   app.post("/workflows", async (req, reply) => {
     const parsed = createWorkflowSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    const wf = await repo.workflows.create(pool, parsed.data.project_id, parsed.data.name);
+    // The frontend may create its durable row UNDER the editor's own id
+    // (e.g. "production-gateway") so later GET/POST /workflows/:id match.
+    // Without this, every publish creates an orphan UUID row (review #3).
+    const id = parsed.data.id !== undefined ? parsed.data.id : undefined;
+    const wf = await repo.workflows.create(pool, parsed.data.project_id, parsed.data.name, id);
     return reply.code(201).send(wf);
   });
 
@@ -75,29 +85,40 @@ export async function buildApp(opts: {
 
   app.post("/workflows/:id/versions", async (req, reply) => {
     const { id } = req.params as { id: string };
-    if (!(await repo.workflows.get(pool, id))) return reply.code(404).send({ error: "workflow not found" });
+    const wf = await repo.workflows.get(pool, id);
+    if (!wf) return reply.code(404).send({ error: "workflow not found" });
     const body = (req.body ?? {}) as { workflow_json?: Record<string, unknown> };
     const versions = await repo.workflows.listVersions(pool, id);
     const next = (versions[0]?.version ?? 0) + 1;
     const v = await repo.workflows.createVersion(pool, id, next, body.workflow_json ?? {});
-    await repo.workflows.setStatus(pool, id, "draft");
+    // A new draft must NOT downgrade a parent that is still actively serving
+    // (review #8): the workflow-level status reflects the LIVE version.
+    if (wf.status !== "active") await repo.workflows.setStatus(pool, id, "draft");
     return reply.code(201).send(v);
   });
 
   /** Validate + compile against the gateway without publishing. */
-  const validateCompile = async (req: FastifyInstance["inject"] extends never ? never : import("fastify").FastifyRequest, reply: import("fastify").FastifyReply) => {
+  const validateCompile = async (req: import("fastify").FastifyRequest, reply: import("fastify").FastifyReply) => {
     const { id } = req.params as { id: string };
-    if (!(await repo.workflows.get(pool, id))) return reply.code(404).send({ error: "workflow not found" });
+    const wf = await repo.workflows.get(pool, id);
+    if (!wf) return reply.code(404).send({ error: "workflow not found" });
     const body = (req.body ?? {}) as { workflow_json?: Record<string, unknown>; version?: number };
     const workflowJson = body.workflow_json ?? {};
-    const version = body.version ?? (await latestVersion(pool, id));
+    // Resolve the version whose stored JSON MATCHES the submitted content, so
+    // the recorded plan_hash always belongs to the version it is stored under
+    // (review #5). No match → refuse rather than hash mismatched content.
+    const version = body.version ?? (await versionForJson(pool, id, workflowJson));
+    if (version === null) {
+      return reply.code(400).send({ error: "no stored version matches the submitted workflow_json (create a version first)" });
+    }
     const wire = await publish.buildWire({ workflowId: id, workflowJson, version });
     if ("error" in wire) return reply.code(400).send({ error: wire.error });
     const result = await gateway.validate(wire);
     if (!result.ok) return reply.code(400).send({ error: result.error });
     const planHash = result.workflows.find((w) => w.workflow_id === id)?.plan_hash ?? null;
     await repo.workflows.updateVersionStatus(pool, id, version, "compiled", planHash);
-    await repo.workflows.setStatus(pool, id, "compiled");
+    // A validate/compile must NOT degrade an active parent (review #9).
+    if (wf.status !== "active") await repo.workflows.setStatus(pool, id, "compiled");
     return { status: "compiled", snapshot_version: result.snapshot_version, plan_hash: planHash, workflows: result.workflows };
   };
 
@@ -110,7 +131,10 @@ export async function buildApp(opts: {
     if (!wf) return reply.code(404).send({ error: "workflow not found" });
     const parsed = publishSchema.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
-    const version = parsed.data.version ?? (await latestVersion(pool, id));
+    const version = parsed.data.version ?? (await versionForJson(pool, id, parsed.data.workflow_json));
+    if (version === null) {
+      return reply.code(400).send({ error: "no stored version matches the submitted workflow_json (create a version first)" });
+    }
     const result = await publish.publish({
       workflowId: id,
       version,
@@ -245,7 +269,21 @@ function projectIdOf(req: import("fastify").FastifyRequest, fallback: string): s
   return ((req.query as Record<string, string> | undefined)?.project_id ?? fallback);
 }
 
-async function latestVersion(pool: Pool, workflowId: string): Promise<number> {
+/**
+ * The version whose stored `workflow_json` EXACTLY matches `json`, so a
+ * plan hash is never recorded against a different version's content
+ * (review #5). Returns the highest matching version, or null (→ the caller
+ * refuses rather than hashing mismatched content).
+ */
+async function versionForJson(
+  pool: Pool,
+  workflowId: string,
+  json: Record<string, unknown>,
+): Promise<number | null> {
   const versions = await repo.workflows.listVersions(pool, workflowId);
-  return versions[0]?.version ?? 1;
+  const needle = JSON.stringify(json);
+  for (const v of versions) {
+    if (JSON.stringify(v.workflow_json ?? {}) === needle) return v.version;
+  }
+  return null;
 }

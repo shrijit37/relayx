@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { freshDb, mockGateway } from "./helpers";
+import { freshDb, mockGateway, publishDeps } from "./helpers";
 import { createPublishService } from "../src/domain/publish";
 import type { GatewayResult } from "../src/gateway/client";
 import * as repo from "../src/db/repositories";
@@ -82,11 +82,7 @@ describe("publish pipeline", () => {
     const gw = gatewayApp!;
     const base = `http://127.0.0.1:${(gw.server.address() as { port: number }).port}`;
     const gateway = makeGatewayClient(base);
-    const service = createPublishService({
-      pool: db!.pool,
-      getLane: (id) => repo.lanes.get(db!.pool, id),
-      gateway,
-    });
+    const service = createPublishService(publishDeps(db!.pool, gateway));
 
     // Seed a project + lane.
     await db!.pool.query("INSERT INTO projects (id,name) VALUES ('p1','p1')");
@@ -112,7 +108,9 @@ describe("publish pipeline", () => {
     });
 
     expect(result.status).toBe("published");
-    expect(result.snapshot_version).toBe(1);
+    // snapshot_version is the global monotonic counter (not workflow version).
+    expect(typeof result.snapshot_version).toBe("number");
+    expect(result.snapshot_version).toBeGreaterThanOrEqual(1);
 
     // DB now ACTIVE + publication record + plan hash.
     const versions = await repo.workflows.listVersions(db!.pool, wf.id);
@@ -132,11 +130,7 @@ describe("publish pipeline", () => {
     const gw = gatewayApp!;
     const base = `http://127.0.0.1:${(gw.server.address() as { port: number }).port}`;
     const gateway = makeGatewayClient(base);
-    const service = createPublishService({
-      pool: db!.pool,
-      getLane: (id) => repo.lanes.get(db!.pool, id),
-      gateway,
-    });
+    const service = createPublishService(publishDeps(db!.pool, gateway));
 
     await db!.pool.query("INSERT INTO projects (id,name) VALUES ('p1','p1')");
     await repo.lanes.create(db!.pool, {
@@ -173,11 +167,7 @@ describe("publish pipeline", () => {
     const gw = gatewayApp!;
     const base = `http://127.0.0.1:${(gw.server.address() as { port: number }).port}`;
     const gateway = makeGatewayClient(base);
-    const service = createPublishService({
-      pool: db!.pool,
-      getLane: (id) => repo.lanes.get(db!.pool, id),
-      gateway,
-    });
+    const service = createPublishService(publishDeps(db!.pool, gateway));
 
     await db!.pool.query("INSERT INTO projects (id,name) VALUES ('p1','p1')");
     await repo.lanes.create(db!.pool, {
@@ -195,11 +185,7 @@ describe("publish pipeline", () => {
     expect(active!.workflow_version).toBe(2);
 
     // Rollback → republish v1 (previous valid).
-    const service2 = createPublishService({
-      pool: db!.pool,
-      getLane: (id) => repo.lanes.get(db!.pool, id),
-      gateway,
-    });
+    const service2 = createPublishService(publishDeps(db!.pool, gateway));
     // Simulate the route handler rollback flow.
     const rollback = () =>
       service2.publish({
@@ -220,11 +206,7 @@ describe("workflow lifecycle", () => {
     const gw = gatewayApp!;
     const base = `http://127.0.0.1:${(gw.server.address() as { port: number }).port}`;
     const gateway = makeGatewayClient(base);
-    const service = createPublishService({
-      pool: db!.pool,
-      getLane: (id) => repo.lanes.get(db!.pool, id),
-      gateway,
-    });
+    const service = createPublishService(publishDeps(db!.pool, gateway));
 
     await db!.pool.query("INSERT INTO projects (id,name) VALUES ('p1','p1')");
     await repo.lanes.create(db!.pool, {

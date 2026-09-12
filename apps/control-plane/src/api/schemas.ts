@@ -37,6 +37,7 @@ export const workflowUpdateSchema = z.object({
 });
 
 export const createWorkflowSchema = z.object({
+  id: z.string().min(1).optional(),
   name: z.string().min(1),
   project_id: z.string().min(1),
 });

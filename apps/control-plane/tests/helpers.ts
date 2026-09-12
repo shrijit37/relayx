@@ -7,6 +7,7 @@
  */
 
 import { createPool, dbConfigFromEnv, migrate } from "../src/db/db";
+import { listActiveWorkflows, nextSnapshotVersion } from "../src/domain/publish";
 import Fastify from "fastify";
 
 export async function freshDb(name: string) {
@@ -18,6 +19,17 @@ export async function freshDb(name: string) {
   const pool = createPool({ ...dbConfigFromEnv(), database: dbName });
   await migrate(pool, "./src/db");
   return { pool, dbName, async close() { await pool.end(); } };
+}
+
+/** Standard publish-service deps wired to the pool (routes use these too). */
+export function publishDeps(pool: import("pg").Pool, gateway: { validate(p: unknown): any; publish(p: unknown): any }) {
+  return {
+    pool,
+    getLane: async (id: string) => (await import("../src/db/repositories")).lanes.get(pool, id),
+    listActiveWorkflows: (except?: string[]) => listActiveWorkflows(pool, except),
+    nextSnapshotVersion: () => nextSnapshotVersion(pool),
+    gateway,
+  };
 }
 
 /** A deterministic, minimal in-process gateway admin. */

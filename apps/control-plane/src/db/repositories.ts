@@ -81,11 +81,16 @@ const newId = (): string => crypto.randomUUID();
 // ── Workflows ──────────────────────────────────────────────────────────
 
 export const workflows = {
-  async create(pool: Pool, projectId: string, name: string): Promise<WorkflowRow> {
+  async create(
+    pool: Pool,
+    projectId: string,
+    name: string,
+    id?: string,
+  ): Promise<WorkflowRow> {
     const { rows } = await pool.query<WorkflowRow>(
       `INSERT INTO workflows (id, project_id, name) VALUES ($1,$2,$3)
        RETURNING *`,
-      [newId(), projectId, name],
+      [id ?? newId(), projectId, name],
     );
     return rows[0]!;
   },
@@ -152,22 +157,6 @@ export const workflows = {
     );
     return rows[0] ?? null;
   },
-
-  async upsertActive(
-    pool: Pool,
-    workflowId: string,
-    version: number,
-    planHash: string,
-    snapshotVersion: number,
-  ): Promise<void> {
-    await pool.query(
-      `INSERT INTO workflow_active (workflow_id, workflow_version, plan_hash, snapshot_version, updated_at)
-       VALUES ($1,$2,$3,$4,now())
-       ON CONFLICT (workflow_id) DO UPDATE
-       SET workflow_version = $2, plan_hash = $3, snapshot_version = $4, updated_at = now()`,
-      [workflowId, version, planHash, snapshotVersion],
-    );
-  },
 };
 
 // ── Providers ──────────────────────────────────────────────────────────
@@ -214,7 +203,6 @@ export const providers = {
       }
     }
     if (fields.length === 0) return providers.get(pool, id);
-    values.push(Date.now());
     const { rows } = await pool.query<ProviderRow>(
       `UPDATE providers SET ${fields.join(", ")}, updated_at = now() WHERE id = $1 RETURNING *`,
       values,

@@ -3,15 +3,19 @@
  *
  * ```text
  * load workflow version
- *   → resolve lane records referenced by the workflow
- *   → resolve credential_ref → authorization (env: in-process, minimal)
- *   → build WireSnapshot (lanes have base_url + authorization, workflow JSON
- *     itself never carries credentials)
+ *   → gather ALL active workflows + the one being published
+ *   → resolve every referenced lane record (credential_ref → authorization)
+ *   → build ONE coherent WireSnapshot (global monotonic snapshot_version)
  *   → gateway /validate (compile-only, deterministic plan hash)
  *   → persist COMPILED + plan_hash
- *   → gateway /publish (atomic)
- *   → persist PUBLISHED + publication record + ACTIVE pointer
+ *   → gateway /publish (atomic — replaces the whole runtime bundle)
+ *   → persist PUBLISHED + publication record + ACTIVE pointer (one txn)
  * ```
+ *
+ * The wire bundle always carries EVERY active workflow, not just the one being
+ * published: the gateway swap is all-or-nothing for the whole runtime, so a
+ * single-workflow publish would silently drop every other workflow from the
+ * data plane (review finding #2). Publishing B therefore preserves A.
  *
  * Any failure leaves the previously active runtime untouched — the gateway
  * swaps snapshot + lane pools only on a successful compile of the whole
@@ -30,9 +34,8 @@ type LaneRow = repo.LaneRow & { credential_ref: CredentialRef | null };
 export type LaneRowWithCred = LaneRow;
 
 /**
- * Build the wire lane map for a workflow — only lanes the workflow actually
- * references (llm.lane_id, fallback providers, retry target) survive into
- * the publish. The compiler rejects lane-less LLM nodes, so an unresolved
+ * Lane ids a workflow references: llm.lane_id, fallback providers, retry
+ * target. The compiler rejects lane-less LLM nodes, so an unresolved
  * referenced lane is a hard failure, never a silent "default".
  */
 export function collectReferencedLanes(workflowJson: Record<string, unknown>): Set<string> {
@@ -67,41 +70,82 @@ export type PublishResult = {
   error?: string;
 };
 
+/** A workflow that will be part of the coherent bundle. */
+export type BundleWorkflow = {
+  id: string;
+  version: number;
+  workflowJson: Record<string, unknown>;
+  revision: "active" | "target";
+};
+
 export function createPublishService(deps: {
   pool: Pool;
   getLane: (id: string) => Promise<LaneRowWithCred | null>;
+  /** Load every ACTIVE workflow (id + latest version) so a publish preserves
+   *  the rest of the runtime. Repository seam. */
+  listActiveWorkflows: (exceptWorkflowIds?: string[]) => Promise<BundleWorkflow[]>;
+  /** Allocate the next global snapshot version (monotonic across restarts). */
+  nextSnapshotVersion: () => Promise<number>;
   gateway: { validate(p: unknown): Promise<GatewayResult>; publish(p: unknown): Promise<GatewayResult> };
 }) {
-  /** Build the wire bundle for one workflow: referenced lanes only, with
-   *  credentials resolved out-of-band. This is the SINGLE lane-resolution
-   *  path shared by /validate, /compile and /publish. */
+  /** Build the coherent wire bundle for an EXPLICIT workflow set. Shared by
+   *  `buildWire` (normal publish, with the target first) and rehydrate
+   *  (all active workflows). Lanes resolve credentials identically; the
+   *  bundle's snapshot version is global, not per-workflow (review #1/#9). */
+  async function buildWireForFlows(
+    flows: BundleWorkflow[],
+    getLane: (id: string) => Promise<LaneRowWithCred | null>,
+    nextSnapshotVersion: () => Promise<number>,
+  ): Promise<WireSnapshot | { error: string }> {
+    const snapshot_version = await nextSnapshotVersion();
+    const workflows: WireWorkflow[] = [];
+    const lanesSeen = new Set<string>();
+
+    for (const flow of flows) {
+      const referenced = collectReferencedLanes(flow.workflowJson);
+      const flowLanes: Record<string, WireLane> = {};
+      for (const id of referenced) {
+        const lane = await getLane(id);
+        if (!lane) return { error: `workflow '${flow.id}' references unknown lane '${id}'` };
+        flowLanes[id] = await toWireLane(lane);
+        lanesSeen.add(id);
+      }
+      workflows.push({ id: flow.id, workflow: flow.workflowJson, lanes: flowLanes });
+    }
+
+    return { snapshot_version, workflows };
+  }
+  /**
+   * Build the coherent wire bundle: the target workflow ∪ every other ACTIVE
+   * workflow, all lanes resolved out-of-band. This is the SINGLE lane- and
+   * bundle-resolution path shared by /validate, /compile, /publish and
+   * rehydrate — no caller duplicates it.
+   */
   async function buildWire(opts: {
     workflowId: string;
     workflowJson: Record<string, unknown>;
     version: number;
   }): Promise<WireSnapshot | { error: string }> {
-    const { workflowId, workflowJson, version } = opts;
-    const lanes: Record<string, WireLane> = {};
-    for (const id of collectReferencedLanes(workflowJson)) {
-      const lane = await deps.getLane(id);
-      if (!lane) return { error: `workflow references unknown lane '${id}'` };
-      lanes[id] = await toWireLane(lane);
-    }
-    return {
-      snapshot_version: version,
-      workflows: [
-        {
-          id: workflowId,
-          workflow: workflowJson,
-          lanes,
-        } satisfies WireWorkflow,
+    const others = await deps.listActiveWorkflows([opts.workflowId]);
+    return buildWireForFlows(
+      [
+        { id: opts.workflowId, version: opts.version, workflowJson: opts.workflowJson, revision: "target" as const },
+        ...others,
       ],
-    };
+      async (id) => deps.getLane(id),
+      async () => deps.nextSnapshotVersion(),
+    );
   }
 
   return {
-    /** Build the wire bundle (validate/compile proxy uses this). */
+    /** Build the coherent wire bundle (validate/compile proxy uses this). */
     buildWire,
+
+    /** Build a coherent wire bundle over an EXPLICIT workflow set (rehydrate
+     *  uses this: all active workflows, no "target"). Shared with buildWire so
+     *  credentials, lane union, and the global snapshot version are resolved
+     *  identically on every path (review #1, #2, #9, #10). */
+    buildWireForFlows,
 
     /**
      * Full publish pipeline for one workflow version.
@@ -136,6 +180,9 @@ export function createPublishService(deps: {
         return { status: "error", error: published.error };
       }
 
+      // Post-publish metadata as ONE transaction: if control-plane state and
+      // the gateway swap ever disagree, a crash here leaves ACTIVE pointer
+      // consistent with the gateway (no silent rollback on next reboot).
       await recordPublished(deps.pool, workflowId, version, planHash, published.snapshot_version);
       return {
         status: "published",
@@ -147,8 +194,10 @@ export function createPublishService(deps: {
 }
 
 // ── Persistence helpers (raw SQL through the pool; repositories stay CRUD-only) ──
+// NOTE: the ACTIVE-pointer write here is the ONLY copy — `workflows.upsertActive`
+// in repositories.ts is dead and was removed to avoid a divergent duplicate.
 
-async function recordCompiled(
+export async function recordCompiled(
   pool: Pool,
   workflowId: string,
   version: number,
@@ -161,26 +210,45 @@ async function recordCompiled(
   await pool.query("UPDATE workflows SET status = 'compiled', updated_at = now() WHERE id = $1", [workflowId]);
 }
 
-async function recordPublished(
+export async function recordPublished(
   pool: Pool,
   workflowId: string,
   version: number,
   planHash: string,
   snapshotVersion: number,
 ): Promise<void> {
-  await pool.query("UPDATE workflow_versions SET status = 'active' WHERE workflow_id = $1 AND version = $2", [workflowId, version]);
-  await pool.query("UPDATE workflows SET status = 'active', updated_at = now() WHERE id = $1", [workflowId]);
-  await pool.query(
-    "INSERT INTO publications (id, workflow_id, workflow_version, plan_hash, snapshot_version, status) VALUES ($1,$2,$3,$4,$5,'succeeded')",
-    [crypto.randomUUID(), workflowId, version, planHash, snapshotVersion],
-  );
-  await pool.query(
-    `INSERT INTO workflow_active (workflow_id, workflow_version, plan_hash, snapshot_version, updated_at)
-     VALUES ($1,$2,$3,$4,now())
-     ON CONFLICT (workflow_id) DO UPDATE
-     SET workflow_version = $2, plan_hash = $3, snapshot_version = $4, updated_at = now()`,
-    [workflowId, version, planHash, snapshotVersion],
-  );
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "UPDATE workflow_versions SET status = 'active' WHERE workflow_id = $1 AND version = $2",
+      [workflowId, version],
+    );
+    await client.query(
+      "UPDATE workflows SET status = 'active', updated_at = now() WHERE id = $1",
+      [workflowId],
+    );
+    await client.query(
+      "INSERT INTO publications (id, workflow_id, workflow_version, plan_hash, snapshot_version, status) VALUES ($1,$2,$3,$4,$5,'succeeded')",
+      [crypto.randomUUID(), workflowId, version, planHash, snapshotVersion],
+    );
+    await client.query(
+      `INSERT INTO workflow_active (workflow_id, workflow_version, plan_hash, snapshot_version, updated_at)
+       VALUES ($1,$2,$3,$4,now())
+       ON CONFLICT (workflow_id) DO UPDATE
+       SET workflow_version = $2, plan_hash = $3, snapshot_version = $4, updated_at = now()`,
+      [workflowId, version, planHash, snapshotVersion],
+    );
+    await client.query("UPDATE runtime_meta SET snapshot_version = $1, updated_at = now() WHERE id = 'global'", [
+      snapshotVersion,
+    ]);
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 async function recordFailure(
@@ -195,4 +263,41 @@ async function recordFailure(
     [crypto.randomUUID(), workflowId, version, error],
   );
   await pool.query("UPDATE workflow_versions SET status = $3 WHERE workflow_id = $1 AND version = $2", [workflowId, version, revertTo]);
+}
+
+/** Allocate the next global snapshot version (monotonic across restarts).
+ *  Note: Postgres BIGINT arrives as a string via node-pg; cast to Number. */
+export async function nextSnapshotVersion(pool: Pool): Promise<number> {
+  const { rows } = await pool.query<{ snapshot_version: string }>(
+    "UPDATE runtime_meta SET snapshot_version = snapshot_version + 1, updated_at = now() WHERE id = 'global' RETURNING snapshot_version",
+  );
+  const next = rows[0]?.snapshot_version;
+  return next ? Number(next) : 1;
+}
+
+/** All ACTIVE workflows (id + version + JSON), optionally excluding some. */
+export async function listActiveWorkflows(
+  pool: Pool,
+  exceptWorkflowIds: string[] = [],
+): Promise<BundleWorkflow[]> {
+  const exclusions = exceptWorkflowIds.length > 0 ? "WHERE wa.workflow_id != ANY($1)" : "";
+  const params: unknown[] = exceptWorkflowIds.length > 0 ? [exceptWorkflowIds] : [];
+  const { rows } = await pool.query<{
+    workflow_id: string;
+    workflow_version: number;
+    workflow_json: Record<string, unknown>;
+  }>(
+    `SELECT wa.workflow_id, wa.workflow_version, wv.workflow_json
+     FROM workflow_active wa
+     JOIN workflow_versions wv
+       ON wv.workflow_id = wa.workflow_id AND wv.version = wa.workflow_version
+     ${exclusions}`,
+    params,
+  );
+  return rows.map((r) => ({
+    id: r.workflow_id,
+    version: r.workflow_version,
+    workflowJson: r.workflow_json,
+    revision: "active" as const,
+  }));
 }

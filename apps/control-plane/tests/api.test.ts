@@ -215,7 +215,8 @@ describe("REST API", () => {
     expect(pubRes.status).toBe(200);
     const pub = (await pubRes.json()) as { status: string; snapshot_version: number; workflow_version: number };
     expect(pub.status).toBe("published");
-    expect(pub.snapshot_version).toBe(1);
+    expect(typeof pub.snapshot_version).toBe("number");
+    expect(pub.snapshot_version).toBeGreaterThanOrEqual(1);
     expect(pub.workflow_version).toBe(1);
 
     // workflow status ACTIVE.
