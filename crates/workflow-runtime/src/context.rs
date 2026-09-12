@@ -4,6 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::nodes::RuntimeValue;
+use crate::snapshot::RuntimeSnapshot;
+
+/// Type alias for the gateway's shared HTTP client.
+pub type GatewayHttpClient = hyper_util::client::legacy::Client<
+    hyper_util::client::legacy::connect::HttpConnector,
+    axum::body::Body,
+>;
 
 /// Runtime context passed to every node during execution.
 ///
@@ -25,18 +32,53 @@ pub struct ExecutionContext {
     /// Lane registry for LLM nodes to resolve provider connections.
     pub lane_registry: Arc<LaneRegistry>,
     /// HTTP client for upstream provider calls.
-    pub upstream_client: Option<
-        Arc<
-            hyper_util::client::legacy::Client<
-                hyper_util::client::legacy::connect::HttpConnector,
-                axum::body::Body,
-            >,
-        >,
-    >,
+    pub upstream_client: Option<Arc<GatewayHttpClient>>,
     /// MCP tool executor — if provided, MCP nodes call real tools.
     pub mcp_executor: Option<Arc<dyn McpToolExecutor>>,
     /// Skill loader — if provided, Skill nodes load real skills.
     pub skill_loader: Option<Arc<dyn SkillLoader>>,
+    /// The "lane-aware" client resolver: hands back a client per lane name.
+    pub lane_clients: Option<Arc<dyn AsLaneClient>>,
+    /// Execution metadata (snapshot version, plan hash) for observability.
+    pub metadata: ExecutionMetadata,
+    /// Snapshot/plan metadata exposed as capability context.
+    pub snapshot: Option<Arc<crate::snapshot::RuntimeSnapshot>>,
+    /// Optional reporter of execution milestones.
+    pub reporter: Arc<dyn crate::milestone::MilestoneReporter>,
+}
+
+/// What snapshot/plan state an execution carries.
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionMetadata {
+    /// Snapshot wall version.
+    pub snapshot_version: u64,
+    /// Plan hash of the compiled workflow.
+    pub plan_hash: String,
+}
+
+impl ExecutionMetadata {
+    /// Attach snapshot+plan identity to an existing execution context.
+    pub fn from_snapshot(snapshot: &RuntimeSnapshot, workflow_id: &str) -> Self {
+        Self {
+            snapshot_version: snapshot.version(),
+            plan_hash: snapshot
+                .plan_hash_for(workflow_id)
+                .unwrap_or_default()
+                .to_owned(),
+        }
+    }
+}
+
+// ─── Lane-aware client resolver ──────────────────────────────────────────────
+
+/// Resolves an upstream HTTP client for a lane by name.
+///
+/// The data plane implements this extension trait over its lane snapshot map
+/// so a node can obtain the connection pool bound to a specific lane without
+/// the runtime knowing anything about per-lane pools.
+pub trait AsLaneClient: Send + Sync {
+    /// Client for the named lane, if that lane has a pool.
+    fn client_for_lane(&self, lane_id: &str) -> Option<Arc<GatewayHttpClient>>;
 }
 
 // ─── MCP tool executor trait ────────────────────────────────────────────────
@@ -96,6 +138,21 @@ impl LaneRegistry {
     pub fn get(&self, lane_id: &str) -> Option<&LaneEntry> {
         self.lanes.get(lane_id)
     }
+
+    /// Iterate over all registered lanes.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &LaneEntry)> {
+        self.lanes.iter()
+    }
+
+    /// Number of registered lanes.
+    pub fn len(&self) -> usize {
+        self.lanes.len()
+    }
+
+    /// Whether the registry has no lanes.
+    pub fn is_empty(&self) -> bool {
+        self.lanes.is_empty()
+    }
 }
 
 impl ExecutionContext {
@@ -112,6 +169,10 @@ impl ExecutionContext {
             upstream_client: None,
             mcp_executor: None,
             skill_loader: None,
+            lane_clients: None,
+            metadata: ExecutionMetadata::default(),
+            snapshot: None,
+            reporter: Arc::new(crate::milestone::NoopReporter),
         }
     }
 
@@ -128,6 +189,10 @@ impl ExecutionContext {
             upstream_client: self.upstream_client.clone(),
             mcp_executor: self.mcp_executor.clone(),
             skill_loader: self.skill_loader.clone(),
+            lane_clients: self.lane_clients.clone(),
+            metadata: self.metadata.clone(),
+            snapshot: self.snapshot.clone(),
+            reporter: self.reporter.clone(),
         }
     }
 }

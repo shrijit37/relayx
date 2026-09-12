@@ -53,6 +53,16 @@ impl RuntimeSnapshot {
         self.plans.get(workflow_id)
     }
 
+    /// Get the plan hash for a workflow id (for observability).
+    pub fn plan_hash_for(&self, workflow_id: &str) -> Option<&str> {
+        self.plans.get(workflow_id).map(|p| p.plan_hash())
+    }
+
+    /// All compiled workflow ids in this snapshot.
+    pub fn workflow_ids(&self) -> impl Iterator<Item = &String> {
+        self.plans.keys()
+    }
+
     /// The lane registry.
     pub fn lanes(&self) -> &LaneRegistry {
         &self.lanes

@@ -7,7 +7,10 @@ use axum::routing::any;
 use tokio::net::TcpListener;
 
 use crate::config::ConfigSnapshot;
+use crate::lanes::LanePools;
+use crate::observability::PublicationState;
 use crate::proxy::proxy_handler;
+use workflow_runtime::InMemoryPublisher;
 
 /// Shared gateway state, immutable after startup.
 pub struct AppState {
@@ -23,9 +26,10 @@ pub struct AppState {
     /// Maximum time between body frames. If no frame arrives within this
     /// duration, the streaming response is terminated.
     pub frame_timeout: Duration,
-    /// Immutable runtime snapshot: compiled workflow plans, lanes, providers.
+    /// Runtime publication state: the active compiled snapshot and the
+    /// per-lane connection pools, hot-swappable via `PublicationState`.
     /// None for pure proxy deployments that don't execute workflows.
-    pub snapshot: Option<Arc<workflow_runtime::RuntimeSnapshot>>,
+    pub publication: Option<Arc<PublicationState>>,
 }
 
 /// The gateway server — binds listeners and serves traffic.
@@ -35,6 +39,9 @@ pub struct GatewayServer {
     metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
     /// Compiled workflow snapshot, when the deployment executes workflows.
     workflow_snapshot: Option<Arc<workflow_runtime::RuntimeSnapshot>>,
+    /// Shared publication state (publisher + per-lane pools). When present,
+    /// the server publishes into it and hot-swaps are visible to its workers.
+    publication: Option<Arc<PublicationState>>,
 }
 
 impl GatewayServer {
@@ -60,6 +67,30 @@ impl GatewayServer {
             server_config,
             metrics_handle,
             workflow_snapshot,
+            publication: None,
+        })
+    }
+
+    /// Create a server that shares an externally-owned publication state.
+    ///
+    /// The caller controls the publisher (e.g. control-plane tests or an
+    /// embedded control plane), so each `publish` is immediately visible to
+    /// this gateway's data plane without a restart.
+    pub fn with_publication(
+        raw_config: crate::config::GatewayConfig,
+        publication: Option<Arc<PublicationState>>,
+    ) -> Result<Self, anyhow::Error> {
+        let server_config = raw_config.server.clone();
+        let config = raw_config.compile()?;
+
+        let metrics_handle = crate::observability::install_metrics()?;
+
+        Ok(Self {
+            config: Arc::new(config),
+            server_config,
+            metrics_handle,
+            workflow_snapshot: None,
+            publication,
         })
     }
 
@@ -68,12 +99,28 @@ impl GatewayServer {
         // ── Proxy client (connection pool) ─────────────────────────────────
         let client = crate::upstream::build_http_client(Duration::from_secs(90), 64);
 
+        // ── Per-lane pools + snapshot publisher ────────────────────────────
+        let pool_builder = crate::lanes::HyperPoolBuilder::new(Duration::from_secs(90), 64);
+        let publication_state = match (self.publication.clone(), self.workflow_snapshot.clone()) {
+            (Some(external), _) => Some(external),
+            (None, Some(snap)) => {
+                let state = Arc::new(PublicationState::new(
+                    Arc::new(InMemoryPublisher::new()),
+                    LanePools::build(&snap, &pool_builder),
+                    Box::new(pool_builder),
+                ));
+                state.publish(snap);
+                Some(state)
+            }
+            (None, None) => None,
+        };
+
         let state = Arc::new(AppState {
             config: self.config.clone(),
             client: Arc::new(client),
             timeout: Duration::from_millis(self.server_config.total_timeout_ms),
             frame_timeout: Duration::from_secs(60), // Default; per-lane override in Phase 3
-            snapshot: self.workflow_snapshot.clone(),
+            publication: publication_state.clone(),
         });
 
         // ── Proxy listener ────────────────────────────────────────────────
@@ -83,7 +130,13 @@ impl GatewayServer {
         tracing::info!(addr = %self.server_config.listen, "proxy listener started");
 
         // ── Admin listener ────────────────────────────────────────────────
-        let admin_router = crate::observability::admin_router(self.metrics_handle.clone());
+        let admin_router = match &publication_state {
+            Some(state) => crate::observability::admin_router_with_publication(
+                self.metrics_handle.clone(),
+                Some(state.clone()),
+            ),
+            None => crate::observability::admin_router(self.metrics_handle.clone()),
+        };
 
         let admin_listener = TcpListener::bind(self.server_config.admin_listen).await?;
         tracing::info!(addr = %self.server_config.admin_listen, "admin listener started");

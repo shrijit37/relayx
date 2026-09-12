@@ -14,6 +14,32 @@ use tokio_stream::Stream;
 use crate::errors::GatewayError;
 use crate::server::AppState;
 use crate::transport;
+use workflow_runtime::RuntimeSnapshot;
+
+/// Extension: read the current published runtime snapshot.
+///
+/// `publication` is the active snapshot store; None when the deployment is a
+/// pure proxy (no workflow execution).
+pub trait CurrentSnapshot {
+    fn current_snapshot(&self) -> Option<Arc<RuntimeSnapshot>>;
+}
+
+impl CurrentSnapshot for AppState {
+    fn current_snapshot(&self) -> Option<Arc<RuntimeSnapshot>> {
+        self.publication.as_ref().and_then(|p| p.snapshot())
+    }
+}
+
+/// Extension: per-lane client for a lane name.
+///
+/// The data plane knows which pool belongs to which lane; the runtime calls
+/// this through `ExecutionContext::lane_clients` (via `AsLaneClient`).
+impl workflow_runtime::AsLaneClient for AppState {
+    fn client_for_lane(&self, lane_id: &str) -> Option<Arc<crate::execution::GatewayClient>> {
+        let pools = self.publication.as_ref()?.pools();
+        pools.get(lane_id).map(|snapshot| snapshot.client.clone())
+    }
+}
 
 /// A stream wrapper that enforces a per-frame timeout.
 ///
@@ -230,6 +256,13 @@ async fn translate_proxy_request(
 
     let canonical_request = engine.decode_request(&body_bytes)?;
 
+    // ── Enforce translation-loss policy on the ACTUAL request ───────────────
+    // A `Reject`/`Drop` loss is surfaced as a client error rather than
+    // silently degrading the request. Loss detection compares the features
+    // this request actually uses against the target's capabilities — the
+    // capability matrices may differ without the request being lossy.
+    engine.check_request_losses(&canonical_request)?;
+
     // ── Encode for the target protocol ───────────────────────────────────────
     let target_body = engine.encode_request(&canonical_request)?;
     let is_stream = canonical_request.stream;
@@ -440,8 +473,7 @@ async fn workflow_route_request(
     _start: Instant,
 ) -> Result<axum::response::Response<Body>, GatewayError> {
     let snapshot = state
-        .snapshot
-        .as_ref()
+        .current_snapshot()
         .ok_or_else(|| GatewayError::Internal("workflow execution not configured".into()))?;
 
     let plan = snapshot
@@ -460,12 +492,13 @@ async fn workflow_route_request(
         .to_bytes();
 
     crate::execution::execute_workflow(
-        snapshot,
+        &snapshot,
         plan,
         body_bytes,
         workflow_id,
         request_id,
         state.client.clone(),
+        Some(state.clone()),
     )
     .await
 }

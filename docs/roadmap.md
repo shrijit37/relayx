@@ -48,23 +48,32 @@
 
 - [x] workflow schema (types + validation — `crates/workflow-schema`)
 - [x] semantic validator (`Workflow::validate()`: cycles, reachability, dead-end detection)
-- [ ] compiler (React Flow graph → execution IR)
-- [x] execution IR (`ExecutionPlan` via `workflow-runtime`)
-- [ ] fast-path classification
-- [x] runtime executor (`NodeRuntime::execute` — node handlers are stubs)
+- [x] compiler (`crates/workflow-runtime/src/compiler.rs` — schema + lane validation)
+- [x] execution IR (`ExecutionPlan`, versioned + content-hashed via `workflow-runtime`)
+- [x] fast-path classification (`PlanClassification` — simple / translated / workflow)
+- [x] runtime executor (`NodeRuntime::execute` — LLM/Transform/Condition/Router/Fallback/Retry)
+- [x] gateway workflow execution (`GatewayServer::with_snapshot` + `workflow_id` routes)
 
-## Phase 5 — Visual editor
+## Phase 5 — Runtime publication & real workflow wiring
 
-- [x] React Flow canvas (drag-drop, edges, selection, minimap, zoom)
-- [x] node library (16 node kind variants)
-- [x] lane node
-- [x] provider node
-- [x] route node
-- [x] fallback node
-- [x] MCP node
-- [x] Skill node
-- [ ] publish/version workflow (buttons exist, no handler)
-- [ ] backend wiring (all 15 pages use mock data, zero API calls)
+- [x] snapshot publication abstraction (`SnapshotPublisher` / `SnapshotReader`)
+- [x] atomic hot-swap (`InMemoryPublisher` via `ArcSwap`)
+- [x] gateway snapshot integration (request → snapshot lookup → compiled plan → classify)
+- [x] end-to-end compiled workflow execution (fast path, interpreter, fallback, streaming)
+- [x] React Flow → Workflow JSON serializer (`workflow-serializer.ts`)
+- [x] frontend API boundary (React Query: `usePublishWorkflow` → gateway admin `/publish`)
+- [x] per-lane connection-pool isolation (`LanePools` + `HyperPoolBuilder`)
+- [x] protocol translation-loss handling (request-aware loss gate)
+- [x] `ExecutionContext` capability plumbing (snapshot metadata / lane clients / milestone reporter)
+- [x] integration tests: snapshot publication, hot-swap, workflow e2e, context capabilities
+- [x] performance benchmarks for snapshot publication + reader path
+
+## Phase 5b — Control plane (durable state, not started this phase)
+
+- [ ] PostgreSQL-backed control plane (workflow/provider/lane CRUD)
+- [ ] workflow lifecycle DB (DRAFT → VALIDATED → COMPILED → PUBLISHED → ACTIVE)
+- [ ] admin REST endpoints beyond `/publish` (fetch/validate/compile)
+- [ ] credential references (never raw secrets in workflow JSON)
 
 ## Phase 6 — MCP and Skills
 

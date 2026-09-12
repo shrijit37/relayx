@@ -221,10 +221,77 @@ fn fast_path_classification_bench(c: &mut Criterion) {
     });
 }
 
+/// Snapshots are published at control-plane cadence and read per request.
+///
+/// Billable: the cost of an atomic publish (build + swap) and the cost of a
+/// per-request read. The read is what the data plane pays on the hot path.
+fn snapshot_publication_bench(c: &mut Criterion) {
+    use workflow_runtime::RuntimeSnapshotBuilder;
+    use workflow_runtime::publish::{InMemoryPublisher, SnapshotPublisher, SnapshotReader};
+
+    let wf = Workflow {
+        id: "pass".into(),
+        name: "pass".into(),
+        version: 1,
+        nodes: vec![
+            Node {
+                id: "in".into(),
+                kind: NodeKind::Input,
+                config: NodeConfig::Input(InputConfig::default()),
+                inputs: vec![],
+                outputs: vec![PortDef {
+                    name: "out".into(),
+                    port_type: PortType::Message,
+                }],
+            },
+            Node {
+                id: "out".into(),
+                kind: NodeKind::Output,
+                config: NodeConfig::Output(OutputConfig::default()),
+                inputs: vec![PortDef {
+                    name: "in".into(),
+                    port_type: PortType::Message,
+                }],
+                outputs: vec![],
+            },
+        ],
+        edges: vec![Edge {
+            source_node: "in".into(),
+            source_port: "out".into(),
+            target_node: "out".into(),
+            target_port: "in".into(),
+            condition: None,
+        }],
+    };
+
+    let make_snapshot = || {
+        let plan = match ExecutionPlan::compile(&wf) {
+            Ok(p) => p,
+            Err(e) => panic!("compile failed: {e}"),
+        };
+        Arc::new(RuntimeSnapshotBuilder::new(1).with_plan("wf", plan).build())
+    };
+
+    let publisher = InMemoryPublisher::new();
+    publisher.publish(make_snapshot());
+
+    c.bench_function("snapshot_atomic_publish", |b| {
+        b.iter(|| publisher.publish(make_snapshot()));
+    });
+
+    c.bench_function("snapshot_reader_lookup", |b| {
+        b.iter(|| {
+            let s = publisher.snapshot();
+            black_box(s).map(|s| s.get_plan("wf").map(|p| p.plan_hash().to_owned()));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     input_to_output_bench,
     input_transform_output_bench,
-    fast_path_classification_bench
+    fast_path_classification_bench,
+    snapshot_publication_bench
 );
 criterion_main!(benches);

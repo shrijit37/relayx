@@ -2,7 +2,21 @@
 
 ## Status
 
-**Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 5 (frontend) PARTIAL. Phase 4 (workflow) PARTIAL.**
+**Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 3 (lanes/routing) PARTIAL (lanes exist, no health/WireGuard). Phase 4 (workflow compiler) COMPLETE. Phase 5 (runtime publication & frontend wiring) COMPLETE.**
+
+### Phase 5 — Runtime publication & frontend wiring (COMPLETE)
+
+See [`PHASE5_REPORT.md`](../PHASE5_REPORT.md) for the full completion report. Highlights:
+
+- **Snapshot publication + atomic hot-swap** — `SnapshotPublisher`/`SnapshotReader` + `InMemoryPublisher` (ArcSwap). Gateway serves compiled workflows from an atomically swapped `RuntimeSnapshot`; no PostgreSQL/Redis/control-plane on the request hot path.
+- **Per-lane connection pools** — `LanePools` + `HyperPoolBuilder`; a distinct Hyper client per lane (no cross-lane connection reuse), rebuilt on each published snapshot, swapped atomically with the snapshot as one bundle.
+- **End-to-end compiled workflow execution** — fast path, interpreter, fallback, and streaming all served from published snapshots through the real gateway HTTP endpoint.
+- **Protocol translation-loss gate (request-aware)** — `ProtocolEngine::check_request_losses` rejects only the features a request actually uses that the target can't represent.
+- **React Flow → Workflow JSON** — `workflow-serializer.ts` (kind/port mapping, lane folding, condition validation, reject-on-invalid editor state).
+- **Frontend API boundary** — `api.ts` + `usePublishWorkflow` (React Query) against gateway admin `/publish`; version/plan-hash read from server response (not fabricated).
+- **`ExecutionContext` capability plumbing** — snapshot identity, execution metadata (snapshot_version/plan_hash), lane-aware client resolver (`AsLaneClient`), milestone reporter.
+
+**Test count (Phase 5): 265 passing, zero failures.** Baseline 239 → +26.
 
 ### Phase 1 — High-performance HTTP proxy data plane
 - TOML config → immutable snapshot, no DB dependency
@@ -40,7 +54,7 @@ routes without protocol config.
 | M2.8 Code Quality | ✅ | Split oversized adapter functions (`encode_request` → 4 helpers, `decode_request` → `decode_request_messages` + `decode_tool_choice`), `enforce_translation_losses()` wired into adapter boundaries |
 | M2.10 Gateway Integration | ✅ | `ProtocolEngine` in gateway: route-level `source_protocol`/`target_protocol` config, request decode→canonical→target encode, response decode→canonical→client encode, SSE event-by-event stream translation, error mapping (`ProtocolEngineError` → `GatewayError` → HTTP) |
 
-**Total test count: 197 tests passing, zero failures.** 131 in protocol-core, 39 in gateway, 12 in workflow-schema, 4 in mock-upstream. Includes 5 property tests (SSE parser non-panic, format→parse roundtrip, canonical serde roundtrip).
+**Total test count (Phase 2 snapshot): 197 tests passing, zero failures.** 131 in protocol-core, 39 in gateway, 12 in workflow-schema, 4 in mock-upstream. Includes 5 property tests (SSE parser non-panic, format→parse roundtrip, canonical serde roundtrip). **Workspace-wide count today: 265 (see Phase 5 section).**
 
 Phase 2 compliance status (post-audit):
 - ✅ Gateway now depends on and invokes `protocol-core` (was pure passthrough)
@@ -58,31 +72,35 @@ This document is the source of truth for current implementation state. Update it
 
 ### Workflow schema (`crates/workflow-schema/`)
 
-Typed workflow definition crate (807 lines, 12 tests passing). Provides:
+Typed workflow definition crate (12 tests passing). Provides:
 
-- `Workflow`, `Node`, `Edge` with typed `NodeKind` (8 variants: Input, Output, LLM, Router, Transform, Condition, MCP, Skill) and `NodeConfig`
+- `Workflow`, `Node`, `Edge` with typed `NodeKind` (11 variants: Input, Output, LLM, Router, Transform, Condition, MCP, Skill, Fallback, Retry, Custom) and `NodeConfig`
 - Port-based data flow model (`PortType`: Message, Stream, ToolCall, ToolResult, Json, Bool)
 - `Workflow::validate()` — graph validation: duplicate IDs, unknown refs, cycles, reachability, dead-end detection
 
 ### Workflow runtime (`crates/workflow-runtime/`)
 
-Execution engine skeleton (815 lines, **0 tests**). Provides:
+Execution engine (52 tests: unit + integration + extension-proof + context capabilities). Provides:
 
-- `ExecutionPlan::compile(Workflow)` — topological sort via Kahn's algorithm
-- `NodeRuntime::execute()` — walks nodes in order with cancellation token support
-- `ExecutionContext` with `LaneRegistry` for provider connection lookup
-- **All 7 node implementations are stubs** — LLM node builds a `CanonicalRequest` but returns `{"status": "llm_node_stub"}`; MCP, Skill, Router, Transform are passthroughs; Condition evaluates but does not route
+- `ExecutionPlan::compile(Workflow)` — topological sort via Kahn's algorithm, versioned (`PLAN_VERSION`), deterministic content hash, execution-path classification (fast path / workflow)
+- `compile_workflow(workflow, ctx)` — schema + lane validation (including compile-time rejection of lane-less LLM nodes when 0 or multiple lanes exist)
+- `NodeRuntime::execute()` — walks nodes in topological order with cancellation + deadline support, port-based data flow, conditional edges
+- Real node implementations: **LLM** (real provider calls + incremental SSE streaming), Transform, Condition, Router, Fallback, Retry; Custom nodes dispatch through the `NodeRegistry` (extension boundary)
+- `ExecutionContext` — lane registry, lane-aware client resolver (`AsLaneClient`), snapshot identity, execution metadata (snapshot_version/plan_hash), milestone reporter
+- `RuntimeSnapshot` / `RuntimeSnapshotBuilder` — immutable bundle of plans + lanes + providers; published atomically via `SnapshotPublisher`/`InMemoryPublisher` (ArcSwap)
+- `ProviderEntry`/`ProviderRegistry` — stable provider extension boundary (adding a provider is register + capabilities, no scheduler change)
+- MCP/Skill nodes return explicit "not yet executed" behavior until the MCP/Skills runtime ships
 
 ### Frontend (`apps/web/`)
 
-React 19 + TanStack Start 1.168 + TanStack Router 1.170 + React Flow 12 + Vite 8.1.5 (scaffolded via Lovable.dev).
+React 19 + TanStack Start + TanStack Router + React Flow + Vite (scaffolded via Lovable.dev).
 
 - 15 pages across 16 route files (Workflows, Providers, Lanes, MCP, Skills, Policies, Secrets, Runs, Observability, Health, Settings, Versions)
-- Workflow editor: React Flow canvas with 16 node kind variants, drag-and-drop, edge connections, Inspector panel, execution simulation (client-side `setTimeout` animation)
-- **100% mock data** — zero `fetch()` calls, zero API integration, `@tanstack/react-query` wired but unused
-- **0 tests**
-
-See `CURRENT_STATE.md` for the full state audit.
+- Workflow editor: React Flow canvas with 16 node kind variants, drag-and-drop, edge connections, Inspector panel, execution simulation
+- **Workflow serialization** — `workflow-serializer.ts` maps React Flow state → canonical Workflow JSON (lane folding, condition validation, reject-on-invalid)
+- **API boundary** — `api.ts` (publish, local validate) + `usePublishWorkflow` (React Query) wiring the editor's Publish button to the gateway admin `/publish`
+- Non-workflow pages (providers/lanes/mcp/skills/policies/…) still render mock data + **0 `fetch()` calls** — control-plane CRUD is Phase 6
+- **5 tests** (`bun test` on the serializer), TS clean, production build clean
 
 ## Current decisions
 

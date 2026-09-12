@@ -11,8 +11,8 @@
 │   ├── mock-upstream/          # Configurable mock LLM for tests/benchmarks
 │   ├── test-harness/           # In-process gateway+mock spawn helpers
 │   ├── protocol-core/          # Canonical protocol model + 3 adapters (Phase 2 complete)
-│   ├── workflow-schema/        # Workflow types + graph validation
-│   └── workflow-runtime/       # Node execution engine (stubs)
+│   ├── workflow-schema/        # Workflow types + graph validation (Phase 4 complete)
+│   └── workflow-runtime/       # Node execution engine + compiler + snapshots (Phase 4/5 complete)
 ├── docs/
 │   ├── architecture.md         # System topology and domain model
 │   ├── state.md                # Current implementation state

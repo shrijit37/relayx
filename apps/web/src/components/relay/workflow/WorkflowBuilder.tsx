@@ -16,6 +16,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Link } from "@tanstack/react-router";
+import { toast } from "sonner";
 import {
   AlertTriangle,
   Check,
@@ -38,6 +39,8 @@ import { Inspector } from "./Inspector";
 import { NodeLibrary } from "./NodeLibrary";
 import { relayNodeTypes, type RelayNode, type RunState } from "./nodes";
 import { executionEdges, executionPath, initialEdges, initialNodes } from "./graph";
+import { serializeWorkflow } from "@/lib/workflow-serializer";
+import { usePublishWorkflow } from "@/lib/use-workflow-publication";
 
 let nodeSeq = 0;
 
@@ -45,6 +48,7 @@ function Toolbar({
   running,
   onRun,
   onStop,
+  onPublish,
   libraryOpen,
   inspectorOpen,
   toggleLibrary,
@@ -53,6 +57,7 @@ function Toolbar({
   running: boolean;
   onRun: () => void;
   onStop: () => void;
+  onPublish: () => void;
   libraryOpen: boolean;
   inspectorOpen: boolean;
   toggleLibrary: () => void;
@@ -99,7 +104,10 @@ function Toolbar({
           {running ? <Square className="size-3" /> : <Play className="size-3" />}
           {running ? "Stop" : "Run test"}
         </button>
-        <button className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border-strong px-2 text-xs font-medium hover:border-primary hover:text-primary">
+        <button
+          onClick={onPublish}
+          className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border-strong px-2 text-xs font-medium hover:border-primary hover:text-primary"
+        >
           <Rocket className="size-3.5" /> Publish
         </button>
         <span className="mx-1 h-5 w-px bg-border" />
@@ -152,6 +160,32 @@ function Canvas() {
   const [step, setStep] = useState(-1);
   const timers = useRef<number[]>([]);
   const { screenToFlowPosition } = useReactFlow();
+
+  const publish = usePublishWorkflow();
+
+  const onPublish = useCallback(() => {
+    const result = serializeWorkflow(nodes, edges, {
+      id: "production-gateway",
+      name: "Production Gateway",
+      version: 24,
+    });
+
+    if (!result.workflow) {
+      toast.error(`Cannot publish — ${result.errors.join("; ")}`);
+      return;
+    }
+    if (result.warnings.length > 0) {
+      toast.warning(`Publishing with warnings: ${result.warnings.join("; ")}`);
+    }
+
+    publish.mutate(
+      { workflow: result.workflow, lanes: result.lanes },
+      {
+        onSuccess: (info) => toast.success(`Published v${info.version} · ${info.workflowId}`),
+        onError: (err) => toast.error(`Publish failed — ${err.message}`),
+      },
+    );
+  }, [nodes, edges, publish]);
 
   const onConnect = useCallback(
     (c: Connection) => setEdges((eds) => addEdge({ ...c }, eds)),
@@ -259,6 +293,7 @@ function Canvas() {
         running={running}
         onRun={run}
         onStop={stop}
+        onPublish={onPublish}
         libraryOpen={libraryOpen}
         inspectorOpen={inspectorOpen}
         toggleLibrary={() => setLibraryOpen((o) => !o)}

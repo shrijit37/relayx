@@ -20,10 +20,11 @@ pub type GatewayClient =
 
 /// Execute a workflow plan in-process and return the result as an HTTP response.
 ///
-/// The snapshot supplies the lane registry and the pre-compiled plan. The
-/// request body is decoded as JSON and wrapped in a `RuntimeValue::Json`.
-/// The provided HTTP client is injected into the execution context so LLM
-/// nodes can reach their upstream providers.
+/// The snapshot supplies the lane registry, the pre-compiled plan, and the
+/// execution metadata (snapshot version + plan hash). The request body is
+/// decoded as JSON and wrapped in a `RuntimeValue::Json`. The provided HTTP
+/// client is injected so LLM nodes can reach their upstream providers;
+/// `lane_clients` (when present) resolves a per-lane pool for each lane.
 pub async fn execute_workflow(
     snapshot: &Arc<RuntimeSnapshot>,
     plan: &ExecutionPlan,
@@ -31,6 +32,7 @@ pub async fn execute_workflow(
     workflow_id: &str,
     request_id: &str,
     client: Arc<GatewayClient>,
+    lane_clients: Option<Arc<dyn workflow_runtime::AsLaneClient>>,
 ) -> Result<axum::response::Response<Body>, GatewayError> {
     // Decode request body.
     let input_json: serde_json::Value =
@@ -41,13 +43,17 @@ pub async fn execute_workflow(
 
     let input = NodeInput::message(RuntimeValue::Json(input_json));
 
-    // Build execution context with the real HTTP client.
+    // Build execution context with the real HTTP client and snapshot identity.
     let mut ctx = ExecutionContext::new(
         workflow_id.to_string(),
         request_id.to_string(),
         snapshot.lanes_arc(),
     );
     ctx.upstream_client = Some(client);
+    ctx.lane_clients = lane_clients;
+    ctx.snapshot = Some(snapshot.clone());
+    ctx.metadata = workflow_runtime::ExecutionMetadata::from_snapshot(snapshot, workflow_id);
+    ctx.reporter = Arc::new(GatewayMilestones);
 
     // Dispatch to the appropriate execution path.
     let output = match plan.classification() {
@@ -71,6 +77,35 @@ pub async fn execute_workflow(
         .header(http::header::CONTENT_TYPE, "application/json")
         .body(Body::from(body));
     resp.map_err(|e| GatewayError::Internal(format!("failed to build response: {e}")))
+}
+
+/// Gateway-side milestone reporter: records per-node execution outcomes as
+/// Prometheus counters so workflow runs are observable without logging
+/// prompts or completions.
+pub struct GatewayMilestones;
+
+impl workflow_runtime::MilestoneReporter for GatewayMilestones {
+    fn node_completed(&self, node_id: &str, output_port: Option<&str>) {
+        metrics::counter!(
+            "relayx_node_completed_total",
+            "node" => node_id.to_owned(),
+            "port" => output_port.unwrap_or("out").to_owned(),
+        )
+        .increment(1);
+    }
+
+    fn node_failed(&self, node_id: &str, error: &str) {
+        // Cap the error label to its first 96 chars so a high-cardinality
+        // error stream (per-429 body text, etc.) cannot grow the metric
+        // cardinality without bound or leak upstream response bodies.
+        let truncated: String = error.chars().take(96).collect();
+        metrics::counter!(
+            "relayx_node_failed_total",
+            "node" => node_id.to_owned(),
+            "error" => truncated,
+        )
+        .increment(1);
+    }
 }
 
 use bytes::Bytes;

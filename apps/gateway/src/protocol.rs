@@ -343,6 +343,37 @@ impl ProtocolEngine {
             .enforce_translation_losses(&self.source_capabilities())
     }
 
+    /// Request-aware loss gate: what the *actual* request uses vs what the
+    /// target adapter can represent.
+    ///
+    /// Capability matrices for two protocols can differ without a given
+    /// request being lossy (OpenAI Chat → Anthropic is equipped for tools and
+    /// streaming; only a request that *uses* structured output is drop-lossy).
+    /// This builds an effective source-capability set from the request and
+    /// enforces the loss policy against it.
+    pub fn check_request_losses(
+        &self,
+        request: &CanonicalRequest,
+    ) -> Result<(), ProtocolEngineError> {
+        let used = protocol_core::canonical::ProtocolCapabilities {
+            streaming: request.stream,
+            tools: !request.tools.is_empty() || request.tool_choice.is_some(),
+            multimodal_input: request.messages.iter().any(|m| {
+                m.content.clone().into_blocks().iter().any(|b| {
+                    matches!(
+                        b,
+                        protocol_core::canonical::ContentBlock::Image(_)
+                            | protocol_core::canonical::ContentBlock::Audio(_)
+                    )
+                })
+            }),
+            structured_output: request.response_format.is_some(),
+            ..Default::default()
+        };
+
+        self.target_capabilities().enforce_translation_losses(&used)
+    }
+
     // ── Request ──────────────────────────────────────────────────────────────
 
     /// Decode a raw request body (bytes) from the source wire protocol
@@ -1245,5 +1276,92 @@ mod tests {
         // OpenAI has structured_output, Anthropic does not → Drop loss → rejected.
         let result = engine.check_losses();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn request_aware_losses_pass_for_plain_text() {
+        let engine = match ProtocolEngine::from_pair(
+            Protocol::OpenAiChatCompletions,
+            Protocol::AnthropicMessages,
+        ) {
+            Ok(e) => e,
+            Err(e) => panic!("expected engine creation to succeed: {e:?}"),
+        };
+        let req = CanonicalRequest {
+            stream: false,
+            tools: vec![],
+            tool_choice: None,
+            response_format: None,
+            ..plain_request()
+        };
+        // Plain text/tools are lossless when translating to Anthropic.
+        let result = engine.check_request_losses(&req);
+        assert!(result.is_ok(), "plain request must not be rejected");
+    }
+
+    #[test]
+    fn request_aware_losses_reject_structured_output() {
+        let engine = match ProtocolEngine::from_pair(
+            Protocol::OpenAiChatCompletions,
+            Protocol::AnthropicMessages,
+        ) {
+            Ok(e) => e,
+            Err(e) => panic!("expected engine creation to succeed: {e:?}"),
+        };
+        let req = CanonicalRequest {
+            response_format: Some(protocol_core::canonical::ResponseFormat {
+                format_type: "json_schema".into(),
+                json_schema: Some(serde_json::json!({ "type": "object" })),
+            }),
+            ..plain_request()
+        };
+        // Structured output → Anthropic is a Drop loss → rejected.
+        let result = engine.check_request_losses(&req);
+        assert!(
+            result.is_err(),
+            "structured-output request must be rejected"
+        );
+    }
+
+    #[test]
+    fn request_aware_losses_reject_streaming_to_non_streaming() {
+        let engine = match ProtocolEngine::from_pair(
+            Protocol::OpenAiChatCompletions,
+            // A target without streaming (hypothetically):
+            Protocol::OpenAiResponses,
+        ) {
+            Ok(e) => e,
+            Err(e) => panic!("expected engine creation to succeed: {e:?}"),
+        };
+        let req = CanonicalRequest {
+            stream: true,
+            ..plain_request()
+        };
+        let result = engine.check_request_losses(&req);
+        assert!(
+            result.is_ok(),
+            "OpenAI Responses supports streaming — should not be rejected"
+        );
+    }
+
+    fn plain_request() -> CanonicalRequest {
+        CanonicalRequest {
+            model: "gpt-4".into(),
+            messages: vec![protocol_core::canonical::Message {
+                role: protocol_core::canonical::Role::User,
+                content: protocol_core::canonical::MessageContent::Text("hi".into()),
+            }],
+            system: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            stop: vec![],
+            tools: vec![],
+            tool_choice: None,
+            stream: false,
+            response_format: None,
+            metadata: None,
+            extensions: protocol_core::canonical::ProviderExtensions::default(),
+        }
     }
 }

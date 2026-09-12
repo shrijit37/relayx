@@ -6,6 +6,7 @@
 pub mod config;
 pub mod errors;
 pub mod execution;
+pub mod lanes;
 pub mod observability;
 pub mod protocol;
 pub mod proxy;
