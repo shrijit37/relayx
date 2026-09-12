@@ -137,6 +137,26 @@ export const workflows = {
     return rows[0]!;
   },
 
+  /** Atomically allocate + insert the next version under `workflow_id`.
+   *  `max(version)+1` in the same INSERT avoids the concurrent-publish race
+   *  where two callers compute the same `next` and one violates the
+   *  UNIQUE(workflow_id, version) constraint (review D2). */
+  async createNextVersion(
+    pool: Pool,
+    workflowId: string,
+    workflowJson: WorkflowJson,
+  ): Promise<WorkflowVersionRow> {
+    const { rows } = await pool.query<WorkflowVersionRow>(
+      `INSERT INTO workflow_versions (id, workflow_id, version, workflow_json)
+       SELECT $1, $2, COALESCE(MAX(version), 0) + 1, $3
+       FROM workflow_versions
+       WHERE workflow_id = $2
+       RETURNING *`,
+      [newId(), workflowId, workflowJson],
+    );
+    return rows[0]!;
+  },
+
   async updateVersionStatus(
     pool: Pool,
     workflowId: string,

@@ -250,9 +250,6 @@ pub fn admin_router(handle: PrometheusHandle) -> axum::Router {
         .layer(axum::Extension(handle))
 }
 
-/// Wire format for a workflow publication: workflow JSON + the lanes it may
-/// reference (name → base URL). The gateway compiles the workflow here — on
-/// the publication/control-plane cadence, never on the request hot path.
 /// Snapshot publication payload from the control plane.
 ///
 /// Lanes are keyed by name; the optional `authorization` value (resolved
@@ -371,6 +368,30 @@ pub fn admin_router_with_publication(
     use axum::extract::State;
     use axum::routing::{get, post};
 
+    /// Shared envelope builder for both /publish and /validate: renders the
+    /// real versioned plan identity (workflow_id / plan_hash / snapshot
+    /// version) so no handler re-implements the response shape (review).
+    fn plan_response(
+        status: &str,
+        snapshot: &Arc<RuntimeSnapshot>,
+    ) -> axum::Json<serde_json::Value> {
+        let plans: serde_json::Value = snapshot
+            .workflow_ids()
+            .map(|id| {
+                serde_json::json!({
+                    "workflow_id": id,
+                    "plan_hash": snapshot.plan_hash_for(id).unwrap_or_default(),
+                    "version": snapshot.version(),
+                })
+            })
+            .collect();
+        axum::Json(serde_json::json!({
+            "status": status,
+            "snapshot_version": snapshot.version(),
+            "workflows": plans,
+        }))
+    }
+
     async fn publish(
         State(publication): State<Option<Arc<PublicationState>>>,
         axum::Json(wire): axum::Json<WireSnapshot>,
@@ -383,25 +404,7 @@ pub fn admin_router_with_publication(
         };
 
         match publication.publish_workflows(wire) {
-            Ok(snapshot) => {
-                // Surface the real versioned plan identity so the client can
-                // cache server truth, not a fabricated value.
-                let plans: serde_json::Value = snapshot
-                    .workflow_ids()
-                    .map(|id| {
-                        serde_json::json!({
-                            "workflow_id": id,
-                            "plan_hash": snapshot.plan_hash_for(id).unwrap_or_default(),
-                            "version": snapshot.version(),
-                        })
-                    })
-                    .collect();
-                axum::Json(serde_json::json!({
-                    "status": "published",
-                    "snapshot_version": snapshot.version(),
-                    "workflows": plans,
-                }))
-            }
+            Ok(snapshot) => plan_response("published", &snapshot),
             Err(e) => axum::Json(serde_json::json!({
                 "status": "error",
                 "error": e
@@ -422,23 +425,7 @@ pub fn admin_router_with_publication(
 
         // Compile-only: the active runtime is never mutated.
         match publication.validate_workflows(&wire) {
-            Ok(snapshot) => {
-                let plans: serde_json::Value = snapshot
-                    .workflow_ids()
-                    .map(|id| {
-                        serde_json::json!({
-                            "workflow_id": id,
-                            "plan_hash": snapshot.plan_hash_for(id).unwrap_or_default(),
-                            "version": snapshot.version(),
-                        })
-                    })
-                    .collect();
-                axum::Json(serde_json::json!({
-                    "status": "validated",
-                    "snapshot_version": snapshot.version(),
-                    "workflows": plans,
-                }))
-            }
+            Ok(snapshot) => plan_response("validated", &snapshot),
             Err(e) => axum::Json(serde_json::json!({
                 "status": "error",
                 "error": e

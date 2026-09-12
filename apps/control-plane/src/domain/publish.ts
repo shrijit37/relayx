@@ -181,7 +181,7 @@ export function createPublishService(deps: {
       // Compile-only dry-run on the gateway: deterministic plan hash + validation.
       const validated = await deps.gateway.validate(wire);
       if (!validated.ok) {
-        await recordFailure(deps.pool, workflowId, version, validated.error, "draft");
+        await recordFailure(deps.pool, workflowId, version, validated.error, "draft", "", wire.snapshot_version);
         return { status: "error", error: validated.error };
       }
       const planHash =
@@ -191,7 +191,7 @@ export function createPublishService(deps: {
       // Atomic publish — the gateway swaps snapshot + lane pools in one store.
       const published = await deps.gateway.publish(wire);
       if (!published.ok) {
-        await recordFailure(deps.pool, workflowId, version, published.error, "compiled");
+        await recordFailure(deps.pool, workflowId, version, published.error, "compiled", planHash, wire.snapshot_version);
         return { status: "error", error: published.error };
       }
 
@@ -218,11 +218,24 @@ export async function recordCompiled(
   version: number,
   planHash: string,
 ): Promise<void> {
-  await pool.query(
-    "UPDATE workflow_versions SET status = 'compiled', plan_hash = $3 WHERE workflow_id = $1 AND version = $2",
-    [workflowId, version, planHash],
-  );
-  await pool.query("UPDATE workflows SET status = 'compiled', updated_at = now() WHERE id = $1", [workflowId]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "UPDATE workflow_versions SET status = 'compiled', plan_hash = $3 WHERE workflow_id = $1 AND version = $2",
+      [workflowId, version, planHash],
+    );
+    await client.query(
+      "UPDATE workflows SET status = 'compiled', updated_at = now() WHERE id = $1",
+      [workflowId],
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 export async function recordPublished(
@@ -272,22 +285,38 @@ async function recordFailure(
   version: number,
   error: string,
   revertTo: "draft" | "compiled" = "draft",
+  planHash: string = "",
+  snapshotVersion: number = 0,
 ): Promise<void> {
+  // Never fabricate 0/empty for a failure that DID reach a valid plan:
+  // callers pass the real plan_hash + snapshot_version when known so a
+  // downstream monotonicity consumer sees the actual counter, not a
+  // regression to 0 (review).
   await pool.query(
-    "INSERT INTO publications (id, workflow_id, workflow_version, plan_hash, snapshot_version, status, error) VALUES ($1,$2,$3,'',0,'failed',$4)",
-    [crypto.randomUUID(), workflowId, version, error],
+    "INSERT INTO publications (id, workflow_id, workflow_version, plan_hash, snapshot_version, status, error) VALUES ($1,$2,$3,$4,$5,'failed',$6)",
+    [crypto.randomUUID(), workflowId, version, planHash, snapshotVersion, error],
   );
   await pool.query("UPDATE workflow_versions SET status = $3 WHERE workflow_id = $1 AND version = $2", [workflowId, version, revertTo]);
 }
 
 /** Allocate the next global snapshot version (monotonic across restarts).
- *  Note: Postgres BIGINT arrives as a string via node-pg; cast to Number. */
+ *  Postgres BIGINT arrives as a string via node-pg. The value is safe as a
+ *  JS Number as long as it stays below 2^53 — at that point the deploy is
+ *  already long-lived enough to warrant a BigInt migration; here we fail
+ *  loudly instead of silently wrapping (review D3). */
 export async function nextSnapshotVersion(pool: Pool): Promise<number> {
   const { rows } = await pool.query<{ snapshot_version: string }>(
     "UPDATE runtime_meta SET snapshot_version = snapshot_version + 1, updated_at = now() WHERE id = 'global' RETURNING snapshot_version",
   );
-  const next = rows[0]?.snapshot_version;
-  return next ? Number(next) : 1;
+  const raw = rows[0]?.snapshot_version;
+  if (!raw) return 1;
+  const v = Number(raw);
+  if (!Number.isSafeInteger(v)) {
+    throw new Error(
+      `runtime_meta snapshot_version ${raw} exceeds Number.MAX_SAFE_INTEGER — time for BigInt migration`,
+    );
+  }
+  return v;
 }
 
 /** All ACTIVE workflows (id + version + JSON), optionally excluding some. */

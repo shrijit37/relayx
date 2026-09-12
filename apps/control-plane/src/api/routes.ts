@@ -88,11 +88,8 @@ export async function buildApp(opts: {
     const wf = await repo.workflows.get(pool, id);
     if (!wf) return reply.code(404).send({ error: "workflow not found" });
     const body = (req.body ?? {}) as { workflow_json?: Record<string, unknown> };
-    const versions = await repo.workflows.listVersions(pool, id);
-    const next = (versions[0]?.version ?? 0) + 1;
-    const v = await repo.workflows.createVersion(pool, id, next, body.workflow_json ?? {});
-    // A new draft must NOT downgrade a parent that is still actively serving
-    // (review #8): the workflow-level status reflects the LIVE version.
+    // Atomic version allocation avoids the concurrent-publish race (D2).
+    const v = await repo.workflows.createNextVersion(pool, id, body.workflow_json ?? {});
     if (wf.status !== "active") await repo.workflows.setStatus(pool, id, "draft");
     return reply.code(201).send(v);
   });
@@ -156,8 +153,16 @@ export async function buildApp(opts: {
     if (!wf) return reply.code(404).send({ error: "workflow not found" });
     const active = await repo.workflows.getActiveVersion(pool, id);
     if (!active) return reply.code(409).send({ error: "no active version to roll back from" });
+    // Roll back only to a version that was genuinely validated/compiled
+    // (status), never to a raw draft that may carry a stale plan_hash from
+    // the COALESCE in updateVersionStatus (review D1).
     const previous = (await repo.workflows.listVersions(pool, id))
-      .filter((v) => v.version < active.workflow_version && v.plan_hash)
+      .filter(
+        (v) =>
+          v.version < active.workflow_version &&
+          (v.status === "compiled" || v.status === "active" || v.status === "published") &&
+          Boolean(v.plan_hash),
+      )
       .sort((a, b) => b.version - a.version)[0];
     if (!previous) return reply.code(409).send({ error: "no prior validated version to republish" });
 

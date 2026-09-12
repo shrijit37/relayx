@@ -26,18 +26,9 @@ use mock_upstream::{MockConfig, MockMode, spawn_mock};
 use relay_gateway::lanes::HyperPoolBuilder;
 use relay_gateway::observability::{PublicationState, WireLane, WireSnapshot, WireWorkflow};
 use relay_gateway::server::GatewayServer;
-use test_harness::post_hyper;
+use test_harness::{free_port, post_hyper};
 use workflow_runtime::InMemoryPublisher;
 use workflow_schema::*;
-
-fn free_port() -> u16 {
-    use std::net::TcpListener;
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
 
 // NOTE: this test drives the publish path through the shared `PublicationState`
 // seam — the identical code the gateway admin `/publish` HTTP handler invokes

@@ -13,7 +13,6 @@ import type { WorkflowJson } from "@/lib/workflow-serializer";
 
 export const publicationKeys = {
   all: ["publication"] as const,
-  version: (workflowId: string) => ["publication", workflowId] as const,
   versions: (workflowId: string) => ["versions", workflowId] as const,
   workflows: ["workflows"] as const,
 };
@@ -21,6 +20,9 @@ export const publicationKeys = {
 /**
  * Publish a workflow through the control plane: persists as a new immutable
  * version → validate+compile → atomic publish → surfaces backend truth.
+ * On success the versions + workflows lists refetch from the server (the
+ * authoritative source) — no client-side optimistic write, since publication
+ * metadata must come from the backend.
  */
 export function usePublishWorkflow() {
   const queryClient = useQueryClient();
@@ -28,7 +30,6 @@ export function usePublishWorkflow() {
   return useMutation<VersionInfo, Error, { workflow: WorkflowJson; lanes: Record<string, string> }>({
     mutationFn: ({ workflow, lanes }) => publishWorkflow(workflow, lanes),
     onSuccess: (info) => {
-      queryClient.setQueryData(publicationKeys.version(info.workflowId), info);
       queryClient.invalidateQueries({ queryKey: publicationKeys.versions(info.workflowId) });
       queryClient.invalidateQueries({ queryKey: publicationKeys.workflows });
     },
