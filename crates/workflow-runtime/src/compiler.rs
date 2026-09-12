@@ -83,14 +83,32 @@ pub fn compile_workflow(
 }
 
 fn validate_lane_refs(workflow: &Workflow, ctx: &CompileContext) -> Result<(), CompileError> {
-    use workflow_schema::NodeConfig;
+    use workflow_schema::{FallbackConfig, NodeConfig};
 
     for node in &workflow.nodes {
-        if let NodeConfig::Llm(ref llm_cfg) = node.config
-            && let Some(ref lane_id) = llm_cfg.lane_id
-            && ctx.lanes.get(lane_id).is_none()
-        {
-            return Err(CompileError::LaneNotFound(lane_id.clone()));
+        match &node.config {
+            NodeConfig::Llm(llm_cfg) => {
+                if let Some(lane_id) = llm_cfg.lane_id.as_deref()
+                    && ctx.lanes.get(lane_id).is_none()
+                {
+                    return Err(CompileError::LaneNotFound(lane_id.to_owned()));
+                }
+            }
+            NodeConfig::Fallback(FallbackConfig { providers, .. }) => {
+                for provider in providers {
+                    if ctx.lanes.get(&provider.lane_id).is_none() {
+                        return Err(CompileError::LaneNotFound(provider.lane_id.clone()));
+                    }
+                }
+            }
+            NodeConfig::Retry(rt_cfg) => {
+                if let Some(lane_id) = rt_cfg.target.lane_id.as_deref()
+                    && ctx.lanes.get(lane_id).is_none()
+                {
+                    return Err(CompileError::LaneNotFound(lane_id.to_owned()));
+                }
+            }
+            _ => {}
         }
     }
     Ok(())

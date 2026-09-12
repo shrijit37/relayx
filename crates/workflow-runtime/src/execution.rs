@@ -5,6 +5,7 @@
 //! data routing and conditional edge evaluation.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::context::ExecutionContext;
 use crate::error::{NodeError, WorkflowError};
-use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
+use crate::nodes::{NodeInput, NodeOutput, NodeRegistry, RuntimeValue};
 use workflow_schema::{NodeConfig, NodeId, NodeKind};
 
 // ─── Edge conditions ────────────────────────────────────────────────────────
@@ -73,16 +74,16 @@ pub enum PlanClassification {
 }
 
 /// Pre-resolved metadata for fast-path plans, computed at compile time.
+///
+/// Carries the *real* `LlmConfig` from the plan node so the fast path
+/// behaves identically to the interpreter (same protocol, streaming flag,
+/// lane, and model).
 #[derive(Debug, Clone)]
 pub struct FastPathMetadata {
     /// Node id of the single LLM node.
     pub llm_node_id: String,
-    /// Lane carrying network egress for the provider.
-    pub lane_id: String,
-    /// Wire protocol of the provider.
-    pub protocol: protocol_core::canonical::Protocol,
-    /// Default model.
-    pub model: String,
+    /// The LLM node's actual configuration.
+    pub llm_config: workflow_schema::LlmConfig,
 }
 
 /// A compiled execution node — the runtime representation of a workflow node.
@@ -136,11 +137,22 @@ pub struct ExecutionPlan {
     classification: PlanClassification,
     /// Fast-path pre-resolved metadata (present only when classified fast path).
     fast_path: Option<FastPathMetadata>,
+    /// Registered custom node executors consulted before the built-in match.
+    registry: Arc<NodeRegistry>,
 }
 
 impl ExecutionPlan {
     /// Build an execution plan from a validated workflow definition.
     pub fn compile(workflow: &workflow_schema::Workflow) -> Result<Self, WorkflowError> {
+        Self::compile_with_registry(workflow, Arc::new(NodeRegistry::new()))
+    }
+
+    /// Build an execution plan that dispatches `Custom` nodes through a
+    /// caller-provided registry.
+    pub fn compile_with_registry(
+        workflow: &workflow_schema::Workflow,
+        registry: Arc<NodeRegistry>,
+    ) -> Result<Self, WorkflowError> {
         let mut node_map: HashMap<NodeId, ExecNode> = HashMap::new();
 
         for node in &workflow.nodes {
@@ -225,6 +237,7 @@ impl ExecutionPlan {
             plan_hash,
             classification,
             fast_path,
+            registry,
         })
     }
 
@@ -256,6 +269,11 @@ impl ExecutionPlan {
     /// Pre-resolved fast-path metadata, if this plan is classified fast path.
     pub fn fast_path(&self) -> Option<&FastPathMetadata> {
         self.fast_path.as_ref()
+    }
+
+    /// Registered custom node executors consulted before the built-in match.
+    pub fn registry(&self) -> &NodeRegistry {
+        &self.registry
     }
 
     /// Get the topological index for a node.
@@ -296,9 +314,7 @@ fn classify_plan(nodes: &[ExecNode]) -> (PlanClassification, Option<FastPathMeta
         {
             let meta = FastPathMetadata {
                 llm_node_id: llm.id.clone(),
-                lane_id: cfg.lane_id.clone().unwrap_or_else(|| "default".into()),
-                protocol: protocol_core::canonical::Protocol::OpenAiChatCompletions,
-                model: cfg.model.clone().unwrap_or_else(|| "default".into()),
+                llm_config: cfg.clone(),
             };
             return (PlanClassification::FastPathSimple, Some(meta));
         }
@@ -498,7 +514,14 @@ impl NodeRuntime {
             );
 
             let start = std::time::Instant::now();
-            let result = execute_node(exec_node, &node_ctx, node_input, &self.router_counter).await;
+            let result = execute_node(
+                exec_node,
+                &node_ctx,
+                node_input,
+                &self.router_counter,
+                &self.plan.registry,
+            )
+            .await;
             let duration = start.elapsed();
 
             match result {
@@ -625,6 +648,7 @@ async fn execute_node(
     ctx: &ExecutionContext,
     input: NodeInput,
     router_counter: &AtomicUsize,
+    registry: &Arc<NodeRegistry>,
 ) -> Result<NodeOutput, NodeError> {
     match &node.config {
         NodeConfig::Input(_) => Ok(NodeOutput::message(input.value)),
@@ -639,5 +663,11 @@ async fn execute_node(
         NodeConfig::Skill(config) => crate::nodes::skill::execute(config, ctx, input).await,
         NodeConfig::Fallback(config) => crate::nodes::fallback::execute(config, ctx, input).await,
         NodeConfig::Retry(config) => crate::nodes::retry::execute(config, ctx, input).await,
+        NodeConfig::Custom(cfg) => {
+            let executor = registry.get(&cfg.kind).ok_or_else(|| {
+                NodeError::Internal(format!("no registered executor for kind '{}'", cfg.kind))
+            })?;
+            executor.execute(ctx, input).await
+        }
     }
 }

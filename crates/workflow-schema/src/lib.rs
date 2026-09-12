@@ -64,6 +64,9 @@ pub enum NodeKind {
     Fallback,
     /// Retries a downstream node's execution with configurable policy.
     Retry,
+    /// An externally registered node kind (dispatched via the runtime's
+    /// `NodeRegistry` by the kind string inside `CustomConfig`).
+    Custom,
 }
 
 /// Configuration for a node. Variants correspond to `NodeKind`.
@@ -80,6 +83,7 @@ pub enum NodeConfig {
     Skill(SkillConfig),
     Fallback(FallbackConfig),
     Retry(RetryConfig),
+    Custom(CustomConfig),
 }
 
 /// Configuration for an Input node.
@@ -223,9 +227,14 @@ pub struct SkillConfig {
 pub struct FallbackConfig {
     /// Ordered list of provider lane ids to try.
     pub providers: Vec<FallbackProvider>,
-    /// Stop retrying after this many consecutive failures (per provider).
-    #[serde(default = "default_max_retries")]
-    pub max_retries: u32,
+    /// How many times the whole provider list is cycled for transient
+    /// failures. `0` means try each provider exactly once.
+    #[serde(default = "fallback_default_rounds")]
+    pub rounds: u32,
+}
+
+fn fallback_default_rounds() -> u32 {
+    1
 }
 
 /// A single provider entry in a fallback chain.
@@ -235,10 +244,9 @@ pub struct FallbackProvider {
     pub lane_id: String,
     /// Model override.
     pub model: String,
-}
-
-fn default_max_retries() -> u32 {
-    1
+    /// Optional protocol override. If unset, defaults to OpenAI Chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 /// Configuration for a Retry node.
@@ -255,10 +263,24 @@ pub struct RetryConfig {
     /// Retry on provider errors (5xx / connection).
     #[serde(default = "default_true")]
     pub on_provider_error: bool,
+
+    /// The LLM node configuration this retry re-invokes. Replaces the
+    /// hard-coded "default" lane the previous implementation invented.
+    pub target: LlmConfig,
 }
 
 fn default_retry_delay_ms() -> u64 {
     1000
+}
+
+/// Configuration for an externally registered (custom) node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomConfig {
+    /// The kind string the runtime's `NodeRegistry` uses to find this node.
+    pub kind: String,
+    /// Opaque configuration passed through to the registered executor.
+    #[serde(default)]
+    pub payload: serde_json::Value,
 }
 
 // ─── Port model ─────────────────────────────────────────────────────────────

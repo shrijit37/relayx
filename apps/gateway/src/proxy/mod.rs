@@ -121,8 +121,6 @@ async fn proxy_handler_inner(
     tracing::Span::current().record("request_id", request_id.as_str());
 
     // ── 1. Match route ──────────────────────────────────────────────────────
-    // Extract all route data we need up front and drop the borrows on
-    // state.config before we potentially move `state` into the workflow path.
     let (route_id, lane_id, src_proto, tgt_proto, workflow_id) = {
         let (route, lane) = state.config.match_route(&method, &path).ok_or_else(|| {
             GatewayError::InvalidRequest {
@@ -130,9 +128,15 @@ async fn proxy_handler_inner(
                 message: format!("no route matches {method} {path}"),
             }
         })?;
+
+        // A workflow route carries no lane; a normal route always does.
+        let lane_id = match lane {
+            Some(l) => l.id.clone(),
+            None => String::new(),
+        };
         (
             route.id.clone(),
-            lane.id.clone(),
+            lane_id,
             route.source_protocol,
             route.target_protocol,
             route.workflow_id.clone(),
@@ -455,7 +459,15 @@ async fn workflow_route_request(
         })?
         .to_bytes();
 
-    crate::execution::execute_workflow(snapshot, plan, body_bytes, workflow_id, request_id).await
+    crate::execution::execute_workflow(
+        snapshot,
+        plan,
+        body_bytes,
+        workflow_id,
+        request_id,
+        state.client.clone(),
+    )
+    .await
 }
 
 #[cfg(test)]

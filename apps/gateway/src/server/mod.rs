@@ -12,9 +12,11 @@ use crate::proxy::proxy_handler;
 /// Shared gateway state, immutable after startup.
 pub struct AppState {
     pub config: Arc<ConfigSnapshot>,
-    pub client: hyper_util::client::legacy::Client<
-        hyper_util::client::legacy::connect::HttpConnector,
-        Body,
+    pub client: Arc<
+        hyper_util::client::legacy::Client<
+            hyper_util::client::legacy::connect::HttpConnector,
+            Body,
+        >,
     >,
     /// Per-request overall timeout deadline.
     pub timeout: Duration,
@@ -31,11 +33,22 @@ pub struct GatewayServer {
     config: Arc<ConfigSnapshot>,
     server_config: crate::config::ServerConfig,
     metrics_handle: metrics_exporter_prometheus::PrometheusHandle,
+    /// Compiled workflow snapshot, when the deployment executes workflows.
+    workflow_snapshot: Option<Arc<workflow_runtime::RuntimeSnapshot>>,
 }
 
 impl GatewayServer {
     /// Create a new server from a parsed config.
     pub fn new(raw_config: crate::config::GatewayConfig) -> Result<Self, anyhow::Error> {
+        Self::with_snapshot(raw_config, None)
+    }
+
+    /// Create a new server that also carries a compiled workflow snapshot,
+    /// enabling `workflow_id` routes to execute plans.
+    pub fn with_snapshot(
+        raw_config: crate::config::GatewayConfig,
+        workflow_snapshot: Option<Arc<workflow_runtime::RuntimeSnapshot>>,
+    ) -> Result<Self, anyhow::Error> {
         let server_config = raw_config.server.clone();
         let config = raw_config.compile()?;
 
@@ -46,6 +59,7 @@ impl GatewayServer {
             config: Arc::new(config),
             server_config,
             metrics_handle,
+            workflow_snapshot,
         })
     }
 
@@ -56,10 +70,10 @@ impl GatewayServer {
 
         let state = Arc::new(AppState {
             config: self.config.clone(),
-            client,
+            client: Arc::new(client),
             timeout: Duration::from_millis(self.server_config.total_timeout_ms),
             frame_timeout: Duration::from_secs(60), // Default; per-lane override in Phase 3
-            snapshot: None, // Workflow snapshots are published by the control plane
+            snapshot: self.workflow_snapshot.clone(),
         });
 
         // ── Proxy listener ────────────────────────────────────────────────

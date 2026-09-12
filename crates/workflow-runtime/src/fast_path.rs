@@ -9,7 +9,6 @@ use crate::context::ExecutionContext;
 use crate::error::WorkflowError;
 use crate::execution::PlanClassification;
 use crate::nodes::{NodeInput, NodeOutput};
-use workflow_schema::LlmConfig;
 
 /// Execute a plan via the fast path if possible.
 ///
@@ -37,16 +36,9 @@ pub async fn execute_fast_path(
         }
     };
 
-    let llm_config = LlmConfig {
-        protocol: None,
-        model: Some(meta.model.clone()),
-        temperature: None,
-        max_tokens: None,
-        stream: false,
-        lane_id: Some(meta.lane_id.clone()),
-    };
-
-    crate::nodes::llm::execute(&llm_config, ctx, input)
+    // Use the real LLM config from the plan — same protocol, streaming flag,
+    // lane, and model as the interpreter path. No fabricated defaults.
+    crate::nodes::llm::execute(&meta.llm_config, ctx, input)
         .await
         .map_err(|e| WorkflowError::Runtime {
             node_id: meta.llm_node_id.clone(),
@@ -135,6 +127,26 @@ mod tests {
         };
         assert_eq!(plan.classification(), PlanClassification::FastPathSimple);
         assert!(plan.fast_path().is_some());
+    }
+
+    #[test]
+    fn fast_path_metadata_preserves_llm_config() {
+        let wf = llm_only_workflow();
+        let plan = match ExecutionPlan::compile(&wf) {
+            Ok(p) => p,
+            Err(e) => panic!("compile failed: {e}"),
+        };
+        let meta = match plan.fast_path() {
+            Some(m) => m,
+            None => panic!("fast path metadata present"),
+        };
+
+        // The meta carries the *real* config — crucially `stream: true` here,
+        // so the fast path must NOT silently downgrade to non-streaming.
+        assert_eq!(meta.llm_node_id, "llm1");
+        assert!(meta.llm_config.stream);
+        assert_eq!(meta.llm_config.model.as_deref(), Some("test"));
+        assert_eq!(meta.llm_config.lane_id.as_deref(), Some("test-lane"));
     }
 
     #[test]

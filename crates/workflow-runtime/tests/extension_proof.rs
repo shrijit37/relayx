@@ -12,6 +12,7 @@ use workflow_runtime::Capabilities;
 use workflow_runtime::NodeExecutor;
 use workflow_runtime::context::{ExecutionContext, LaneEntry, LaneRegistry};
 use workflow_runtime::error::NodeError;
+use workflow_runtime::execution::ExecutionPlan;
 use workflow_runtime::nodes::{NodeInput, NodeOutput, NodeRegistry, RuntimeValue};
 
 // ─── A foreign node implementation ─────────────────────────────────────────
@@ -53,21 +54,24 @@ impl NodeExecutor for UppercaseNode {
 // ─── Extension proof: node ─────────────────────────────────────────────────
 
 #[tokio::test]
-async fn foreign_node_executes_via_registry_without_core_changes() {
+async fn foreign_node_executes_via_engine_without_core_changes() {
     let mut registry = NodeRegistry::new();
     registry.register(UppercaseNode);
 
-    // The registry is the only extension point — the scheduler's match arms
-    // inside execution.rs were NOT modified to know about "uppercase".
-    let executor = match registry.get("uppercase") {
-        Some(e) => e,
-        None => panic!("uppercase node not registered"),
+    // Build a workflow with an Input → Custom → Output shape. The only
+    // extension point is the NodeRegistry passed to compile_with_registry;
+    // the engine's built-in match arms were NOT modified to know "uppercase".
+    let wf = custom_node_workflow();
+    let plan = match ExecutionPlan::compile_with_registry(&wf, Arc::new(registry)) {
+        Ok(p) => p,
+        Err(e) => panic!("compile failed: {e}"),
     };
 
     let lanes = Arc::new(LaneRegistry::new());
     let ctx = ExecutionContext::new("wf".into(), "run".into(), lanes);
+    let runtime = workflow_runtime::NodeRuntime::new(plan);
 
-    let output = match executor
+    let output = match runtime
         .execute(
             &ctx,
             NodeInput::message(RuntimeValue::String("hello".into())),
@@ -75,9 +79,73 @@ async fn foreign_node_executes_via_registry_without_core_changes() {
         .await
     {
         Ok(o) => o,
-        Err(e) => panic!("uppercase node failed: {e}"),
+        Err(e) => panic!("engine execution failed: {e}"),
     };
     assert_eq!(output.value, RuntimeValue::String("HELLO".into()));
+}
+
+/// A workflow whose middle node is `Custom { kind: "uppercase" }`.
+fn custom_node_workflow() -> workflow_schema::Workflow {
+    use workflow_schema::*;
+    Workflow {
+        id: "custom-wf".into(),
+        name: "custom".into(),
+        version: 1,
+        nodes: vec![
+            Node {
+                id: "in".into(),
+                kind: NodeKind::Input,
+                config: NodeConfig::Input(InputConfig::default()),
+                inputs: vec![],
+                outputs: vec![PortDef {
+                    name: "out".into(),
+                    port_type: PortType::Message,
+                }],
+            },
+            Node {
+                id: "up".into(),
+                kind: NodeKind::Custom,
+                config: NodeConfig::Custom(CustomConfig {
+                    kind: "uppercase".into(),
+                    payload: serde_json::Value::Null,
+                }),
+                inputs: vec![PortDef {
+                    name: "in".into(),
+                    port_type: PortType::Message,
+                }],
+                outputs: vec![PortDef {
+                    name: "out".into(),
+                    port_type: PortType::Message,
+                }],
+            },
+            Node {
+                id: "out".into(),
+                kind: NodeKind::Output,
+                config: NodeConfig::Output(OutputConfig::default()),
+                inputs: vec![PortDef {
+                    name: "in".into(),
+                    port_type: PortType::Message,
+                }],
+                outputs: vec![],
+            },
+        ],
+        edges: vec![
+            Edge {
+                source_node: "in".into(),
+                source_port: "out".into(),
+                target_node: "up".into(),
+                target_port: "in".into(),
+                condition: None,
+            },
+            Edge {
+                source_node: "up".into(),
+                source_port: "out".into(),
+                target_node: "out".into(),
+                target_port: "in".into(),
+                condition: None,
+            },
+        ],
+    }
 }
 
 // ─── Extension proof: provider ─────────────────────────────────────────────

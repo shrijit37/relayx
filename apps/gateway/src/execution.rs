@@ -14,17 +14,23 @@ use workflow_runtime::execution::{ExecutionPlan, PlanClassification};
 use workflow_runtime::nodes::{NodeInput, RuntimeValue};
 use workflow_runtime::{ExecutionContext, RuntimeSnapshot};
 
+/// Type alias for the gateway's shared HTTP client.
+pub type GatewayClient =
+    hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
+
 /// Execute a workflow plan in-process and return the result as an HTTP response.
 ///
 /// The snapshot supplies the lane registry and the pre-compiled plan. The
 /// request body is decoded as JSON and wrapped in a `RuntimeValue::Json`.
-/// The plan's output is serialized back as `application/json`.
+/// The provided HTTP client is injected into the execution context so LLM
+/// nodes can reach their upstream providers.
 pub async fn execute_workflow(
     snapshot: &Arc<RuntimeSnapshot>,
     plan: &ExecutionPlan,
     request_body: Bytes,
     workflow_id: &str,
     request_id: &str,
+    client: Arc<GatewayClient>,
 ) -> Result<axum::response::Response<Body>, GatewayError> {
     // Decode request body.
     let input_json: serde_json::Value =
@@ -35,12 +41,13 @@ pub async fn execute_workflow(
 
     let input = NodeInput::message(RuntimeValue::Json(input_json));
 
-    // Build execution context.
-    let ctx = ExecutionContext::new(
+    // Build execution context with the real HTTP client.
+    let mut ctx = ExecutionContext::new(
         workflow_id.to_string(),
         request_id.to_string(),
         snapshot.lanes_arc(),
     );
+    ctx.upstream_client = Some(client);
 
     // Dispatch to the appropriate execution path.
     let output = match plan.classification() {
