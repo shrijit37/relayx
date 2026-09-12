@@ -8,12 +8,22 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchWorkflowVersions, fetchWorkflows, publishWorkflow, type VersionInfo } from "@/lib/api";
+import {
+  fetchWorkflowLatestVersion,
+  fetchWorkflowVersions,
+  fetchWorkflows,
+  publishWorkflow,
+  saveWorkflowVersion,
+  validateWorkflow,
+  type VersionInfo,
+  type VersionRow,
+} from "@/lib/api";
 import type { WorkflowJson } from "@/lib/workflow-serializer";
 
 export const publicationKeys = {
   all: ["publication"] as const,
   versions: (workflowId: string) => ["versions", workflowId] as const,
+  latest: (workflowId: string) => ["latest-version", workflowId] as const,
   workflows: ["workflows"] as const,
 };
 
@@ -49,5 +59,35 @@ export function useWorkflows() {
   return useQuery({
     queryKey: publicationKeys.workflows,
     queryFn: fetchWorkflows,
+  });
+}
+
+/** Fetch the latest immutable version for the editor's workflow. */
+export function useWorkflowLatestVersion(workflowId: string) {
+  return useQuery({
+    queryKey: publicationKeys.latest(workflowId),
+    queryFn: () => fetchWorkflowLatestVersion(workflowId),
+  });
+}
+
+/** Save a new immutable version of the editor state. */
+export function useSaveWorkflowMutation(workflowId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<VersionRow, Error, WorkflowJson>({
+    mutationFn: (workflow) => saveWorkflowVersion(workflowId, workflow),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: publicationKeys.versions(workflowId) });
+      queryClient.invalidateQueries({ queryKey: publicationKeys.latest(workflowId) });
+      queryClient.invalidateQueries({ queryKey: publicationKeys.workflows });
+    },
+  });
+}
+
+/** Validate + compile the current editor state against the control plane.
+ *  `validateWorkflow` resolves the backend row via `workflow.id`; the caller
+ *  must set `workflow.id` to match the editor's workflowId before calling. */
+export function useValidateMutation() {
+  return useMutation<{ plan_hash: string | null; status: string }, Error, WorkflowJson>({
+    mutationFn: (workflow) => validateWorkflow(workflow),
   });
 }

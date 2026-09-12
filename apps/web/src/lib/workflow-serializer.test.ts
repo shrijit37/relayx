@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Edge } from "@xyflow/react";
 import type { RelayNode } from "@/components/relay/workflow/nodes";
-import { serializeWorkflow } from "@/lib/workflow-serializer";
+import { deserializeWorkflow, serializeWorkflow } from "@/lib/workflow-serializer";
 
 function node(id: string, kind: RelayNode["data"]["kind"], title = id): RelayNode {
   return {
@@ -96,5 +96,96 @@ describe("serializeWorkflow", () => {
     // Rejecting the editor state is the honest outcome.
     expect(result.workflow).toBeNull();
     expect(result.errors.join()).toContain("condition");
+  });
+
+  test("deserializes simple input → output workflow", () => {
+    const wf = {
+      id: "simple",
+      name: "Simple",
+      version: 1,
+      nodes: [
+        { id: "input", kind: "input" as const, config: { kind: "input" as const }, inputs: [{ name: "in", port_type: "message" }], outputs: [{ name: "out", port_type: "message" }] },
+        { id: "output", kind: "output" as const, config: { kind: "output" as const }, inputs: [{ name: "in", port_type: "message" }], outputs: [{ name: "out", port_type: "message" }] },
+      ],
+      edges: [{ source_node: "input", source_port: "out", target_node: "output", target_port: "in" }],
+    };
+    const result = deserializeWorkflow(wf);
+    expect(result.warnings).toEqual([]);
+    expect(result.nodes.map((n) => n.id)).toEqual(["input", "output"]);
+    expect(result.edges).toHaveLength(1);
+    expect(result.edges[0]!.source).toBe("input");
+    expect(result.edges[0]!.target).toBe("output");
+  });
+
+  test("unfold lane_id back into synthetic lane node", () => {
+    const wf = {
+      id: "lane-test",
+      name: "Lane test",
+      version: 1,
+      nodes: [
+        { id: "in", kind: "input" as const, config: { kind: "input" as const }, inputs: [], outputs: [] },
+        { id: "provider", kind: "llm" as const, config: { kind: "llm" as const, model: "claude-sonnet", stream: true, lane_id: "us-vpn" }, inputs: [], outputs: [] },
+        { id: "out", kind: "output" as const, config: { kind: "output" as const }, inputs: [], outputs: [] },
+      ],
+      edges: [
+        { source_node: "in", source_port: "out", target_node: "provider", target_port: "in" },
+        { source_node: "provider", source_port: "out", target_node: "out", target_port: "in" },
+      ],
+    };
+    const result = deserializeWorkflow(wf);
+    expect(result.warnings).toEqual([]);
+    const lane = result.nodes.find((n) => n.data.kind === "lane");
+    expect(lane).toBeDefined();
+    expect(lane!.data.title).toBe("us-vpn");
+    expect(lane!.data.lines.some((l) => l.includes("claude-sonnet"))).toBe(true);
+  });
+
+  test("deserializes node config kinds correctly", () => {
+    const wf = {
+      id: "kinds",
+      name: "Kinds",
+      version: 1,
+      nodes: [
+        { id: "input", kind: "input" as const, config: { kind: "input" as const }, inputs: [], outputs: [] },
+        { id: "router", kind: "router" as const, config: { kind: "router" as const, strategy: "round_robin" as const }, inputs: [], outputs: [] },
+        { id: "retry", kind: "retry" as const, config: { kind: "retry" as const, max_attempts: 3, delay_ms: 500, on_timeout: true, on_provider_error: true, target: { kind: "llm" as const, stream: false } }, inputs: [], outputs: [] },
+        { id: "out", kind: "output" as const, config: { kind: "output" as const }, inputs: [], outputs: [] },
+      ],
+      edges: [
+        { source_node: "input", source_port: "out", target_node: "router", target_port: "in" },
+        { source_node: "router", source_port: "out", target_node: "retry", target_port: "in" },
+        { source_node: "retry", source_port: "out", target_node: "out", target_port: "in" },
+      ],
+    };
+    const result = deserializeWorkflow(wf);
+    const kinds = result.nodes.map((n) => [n.id, n.data.kind]);
+    expect(kinds).toEqual([["input", "input"], ["router", "route"], ["retry", "retry"], ["out", "output"]]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  test("round-trip: deserialize(serialize(nodes)) preserves nodes and edges", () => {
+    const original: RelayNode[] = [
+      node("in", "input", "HTTP Request"),
+      node("provider", "provider", "Model · claude-sonnet"),
+      node("lane", "lane", "anthropic-us"),
+      node("out", "output", "SSE Response"),
+    ];
+    const origEdges: Edge[] = [
+      edge("e1", "in", "provider"),
+      edge("e2", "lane", "provider"),
+      edge("e3", "provider", "out"),
+    ];
+    const ser = serializeWorkflow(original, origEdges, { id: "roundtrip", name: "Round trip", version: 1 });
+    expect(ser.workflow).not.toBeNull();
+    const deser = deserializeWorkflow(ser.workflow!);
+    expect(deser.warnings).toEqual([]);
+    const ids = deser.nodes.map((n) => n.id);
+    expect(ids).toContain("in");
+    expect(ids).toContain("out");
+    expect(ids).toContain("provider");
+    // The lane node was unfolded back from lane_id
+    expect(ids.some((id) => id.startsWith("lane-"))).toBe(true);
+    expect(deser.edges.some((e) => e.source === "in" && e.target === "provider")).toBe(true);
+    expect(deser.edges.some((e) => e.source === "provider" && e.target === "out")).toBe(true);
   });
 });

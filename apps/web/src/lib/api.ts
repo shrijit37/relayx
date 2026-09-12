@@ -33,7 +33,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** The control-plane API shapes (mirror of the Fastify routes). */
-type WorkflowRow = {
+export type WorkflowRow = {
   id: string;
   name: string;
   status: string;
@@ -41,7 +41,7 @@ type WorkflowRow = {
   created_at: string;
 };
 
-type VersionRow = {
+export type VersionRow = {
   id: string;
   workflow_id: string;
   version: number;
@@ -126,6 +126,29 @@ export async function fetchLanes(projectId = "proj_default"): Promise<
   return req(`/lanes?project_id=${projectId}`);
 }
 
+/** Fetch the latest version row for a workflow (sorted descending). */
+export async function fetchWorkflowLatestVersion(workflowId: string): Promise<VersionRow | null> {
+  const rows = await req<VersionRow[]>(`/workflows/${workflowId}/versions`);
+  if (!rows.length) return null;
+  return rows.reduce((a, b) => (a.version > b.version ? a : b));
+}
+
+/** Persist the editor state as a new immutable version (public). */
+export async function saveWorkflowVersion(workflowId: string, workflow: WorkflowJson): Promise<VersionRow> {
+  return req<VersionRow>(`/workflows/${workflowId}/versions`, {
+    method: "POST",
+    body: JSON.stringify({ workflow_json: workflow }),
+  });
+}
+
+/** Create a new workflow row in the control plane. */
+export async function createWorkflow(name: string, projectId = "proj_default"): Promise<WorkflowRow> {
+  return req<WorkflowRow>("/workflows", {
+    method: "POST",
+    body: JSON.stringify({ name, project_id: projectId }),
+  });
+}
+
 /** Validate + compile without publishing; returns the real plan hash. */
 export async function validateWorkflow(
   workflow: WorkflowJson,
@@ -159,10 +182,7 @@ async function ensureWorkflow(workflow: WorkflowJson): Promise<WorkflowRow> {
   return created;
 }
 
-/** Persist the exact editor state as a new immutable version. */
+/** Persist the exact editor state as a new immutable version (publish convenience). */
 async function createImmutableVersion(workflowId: string, workflow: WorkflowJson): Promise<void> {
-  await req<VersionRow>(`/workflows/${workflowId}/versions`, {
-    method: "POST",
-    body: JSON.stringify({ workflow_json: workflow }),
-  });
+  await saveWorkflowVersion(workflowId, workflow);
 }

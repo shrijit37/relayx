@@ -20,10 +20,11 @@ export const Route = createFileRoute("/workflows/$workflowId/")({
 });
 
 function WorkflowEditorPage() {
+  const { workflowId } = Route.useParams();
   return (
     <AppShell flush>
       <div className="h-full min-h-0">
-        <WorkflowBuilder />
+        <WorkflowBuilder workflowId={workflowId} />
       </div>
     </AppShell>
   );

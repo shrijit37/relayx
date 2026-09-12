@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   addEdge,
   Background,
@@ -33,21 +33,31 @@ import {
   Undo2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { validationIssues } from "@/lib/relay-data";
 import { StatusDot } from "../primitives";
 import { Inspector } from "./Inspector";
 import { NodeLibrary } from "./NodeLibrary";
 import { relayNodeTypes, type RelayNode, type RunState } from "./nodes";
-import { executionEdges, executionPath, initialEdges, initialNodes } from "./graph";
-import { serializeWorkflow } from "@/lib/workflow-serializer";
-import { usePublishWorkflow } from "@/lib/use-workflow-publication";
+import { defaultEdges, defaultNodes } from "./graph";
+import { deserializeWorkflow, serializeWorkflow } from "@/lib/workflow-serializer";
+import {
+  usePublishWorkflow,
+  useSaveWorkflowMutation,
+  useValidateMutation,
+  useWorkflowLatestVersion,
+} from "@/lib/use-workflow-publication";
 
 let nodeSeq = 0;
 
 function Toolbar({
   running,
+  workflowId,
+  workflowName,
+  version,
+  planHash,
   onRun,
   onStop,
+  onSave,
+  onValidate,
   onPublish,
   libraryOpen,
   inspectorOpen,
@@ -55,8 +65,14 @@ function Toolbar({
   toggleInspector,
 }: {
   running: boolean;
+  workflowId: string;
+  workflowName: string;
+  version: number | null;
+  planHash: string | null;
   onRun: () => void;
   onStop: () => void;
+  onSave: () => void;
+  onValidate: () => void;
   onPublish: () => void;
   libraryOpen: boolean;
   inspectorOpen: boolean;
@@ -66,32 +82,40 @@ function Toolbar({
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-panel px-2">
       <div className="flex min-w-0 items-center gap-2">
-        <span className="truncate text-xs font-semibold">Production Gateway</span>
-        <span className="num rounded-sm border border-border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-          v24
-        </span>
-        <span className="flex items-center gap-1.5 rounded-sm border border-ok/30 bg-ok/10 px-1.5 py-0.5 text-[10px] text-ok">
-          <StatusDot status="healthy" /> Valid · Deployed
-        </span>
-        <span className="num hidden rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground lg:inline">
-          Production
-        </span>
+        <span className="truncate text-xs font-semibold">{workflowId === "new" ? "New workflow" : workflowName}</span>
+        {version !== null && (
+          <span className="num rounded-sm border border-border bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+            v{version}
+          </span>
+        )}
+        {planHash !== null && (
+          <span className="flex items-center gap-1.5 rounded-sm border border-ok/30 bg-ok/10 px-1.5 py-0.5 text-[10px] text-ok">
+            <StatusDot status="healthy" /> Valid
+          </span>
+        )}
+        {workflowId !== "new" && (
+          <span className="num hidden rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground lg:inline">
+            {workflowId}
+          </span>
+        )}
       </div>
 
       <div className="ml-auto flex items-center gap-1">
         <TButton icon={Undo2} label="Undo" />
         <TButton icon={Redo2} label="Redo" />
         <span className="mx-1 h-5 w-px bg-border" />
-        <TButton icon={ShieldCheck} label="Validate" text="Validate" />
-        <TButton icon={Save} label="Save" text="Save" />
-        <Link
-          to="/workflows/$workflowId/versions"
-          params={{ workflowId: "production-gateway" }}
-          className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs hover:border-border-strong"
-        >
-          <History className="size-3.5 text-muted-foreground" />
-          <span className="hidden lg:inline">Versions</span>
-        </Link>
+        <TButton icon={ShieldCheck} label="Validate" text="Validate" onClick={onValidate} />
+        <TButton icon={Save} label="Save" text="Save" onClick={onSave} />
+        {workflowId !== "new" && (
+          <Link
+            to="/workflows/$workflowId/versions"
+            params={{ workflowId }}
+            className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs hover:border-border-strong"
+          >
+            <History className="size-3.5 text-muted-foreground" />
+            <span className="hidden lg:inline">Versions</span>
+          </Link>
+        )}
         <button
           onClick={running ? onStop : onRun}
           className={cn(
@@ -134,14 +158,17 @@ function TButton({
   icon: Icon,
   label,
   text,
+  onClick,
 }: {
   icon: React.ElementType;
   label: string;
   text?: string;
+  onClick?: () => void;
 }) {
   return (
     <button
       aria-label={label}
+      onClick={onClick}
       className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-transparent px-2 text-xs text-muted-foreground hover:border-border hover:text-foreground"
     >
       <Icon className="size-3.5" />
@@ -150,26 +177,104 @@ function TButton({
   );
 }
 
-function Canvas() {
-  const [nodes, setNodes, onNodesChange] = useNodesState<RelayNode>(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(initialEdges);
+function Canvas({ workflowId }: { workflowId: string }) {
+  const [nodes, setNodes, onNodesChange] = useNodesState<RelayNode>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selected, setSelected] = useState<RelayNode | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [running, setRunning] = useState(false);
-  const [step, setStep] = useState(-1);
-  const timers = useRef<number[]>([]);
+  const [dirty, setDirty] = useState(false);
+  const [workflowName, setWorkflowName] = useState("Unnamed workflow");
+  const [version, setVersion] = useState<number | null>(null);
+  const [planHash, setPlanHash] = useState<string | null>(null);
+  const [noSavedVersions, setNoSavedVersions] = useState(false);
   const { screenToFlowPosition } = useReactFlow();
 
   const publish = usePublishWorkflow();
+  const saveMutation = useSaveWorkflowMutation(workflowId);
+  const validateMutation = useValidateMutation();
+  const { data: latest, isPending: latestPending } = useWorkflowLatestVersion(workflowId);
+
+  // Load the workflow once on mount.
+  useEffect(() => {
+    if (workflowId === "new") {
+      setNodes(defaultNodes);
+      setEdges(defaultEdges);
+      setVersion(1);
+      setWorkflowName("New workflow");
+      setNoSavedVersions(true);
+    } else if (latest) {
+      const result = deserializeWorkflow(latest.workflow_json);
+      if (result.warnings.length > 0) {
+        toast.warning(`Loaded with warnings: ${result.warnings.join("; ")}`);
+      }
+      setNodes(result.nodes);
+      setEdges(result.edges);
+      setVersion(latest.version);
+      setWorkflowName(latest.workflow_json.name);
+      setNoSavedVersions(false);
+    }
+  }, [latest, workflowId, setNodes, setEdges]);
+
+  const serializeTo = useCallback(
+    (idOverride?: string) => {
+      const meta = {
+        id: idOverride ?? workflowId,
+        name: workflowName,
+        version: version === null ? 1 : version,
+      };
+      return serializeWorkflow(nodes, edges, meta);
+    },
+    [workflowId, workflowName, version, nodes, edges],
+  );
+
+  const onSave = useCallback(() => {
+    if (workflowId === "new") {
+      toast.error("Cannot save an unsaved workflow — open an existing workflow first.");
+      return;
+    }
+    const result = serializeTo();
+    if (!result.workflow) {
+      toast.error(`Cannot save — ${result.errors.join("; ")}`);
+      return;
+    }
+    saveMutation.mutate(result.workflow, {
+      onSuccess: (row) => {
+        setVersion(row.version);
+        setDirty(false);
+        toast.success(`Saved v${row.version}`);
+      },
+      onError: (err) => toast.error(`Save failed — ${err.message}`),
+    });
+  }, [workflowId, serializeTo, saveMutation]);
+
+  const onValidate = useCallback(() => {
+    if (workflowId === "new") {
+      toast.error("Cannot validate an unsaved workflow — open an existing workflow first.");
+      return;
+    }
+    const result = serializeTo();
+    if (!result.workflow) {
+      toast.error(`Cannot validate — ${result.errors.join("; ")}`);
+      return;
+    }
+    validateMutation.mutate(result.workflow, {
+      onSuccess: (info) => {
+        setPlanHash(info.plan_hash);
+        setDirty(false);
+        toast.success(`Valid — plan ${info.plan_hash?.slice(0, 8) ?? "—"}`);
+      },
+      onError: (err) => toast.error(`Validation failed — ${err.message}`),
+    });
+  }, [workflowId, serializeTo, validateMutation]);
 
   const onPublish = useCallback(() => {
-    const result = serializeWorkflow(nodes, edges, {
-      id: "production-gateway",
-      name: "Production Gateway",
-      version: 24,
-    });
-
+    if (workflowId === "new") {
+      toast.error("Cannot publish an unsaved workflow — save it first.");
+      return;
+    }
+    const result = serializeTo();
     if (!result.workflow) {
       toast.error(`Cannot publish — ${result.errors.join("; ")}`);
       return;
@@ -177,7 +282,6 @@ function Canvas() {
     if (result.warnings.length > 0) {
       toast.warning(`Publishing with warnings: ${result.warnings.join("; ")}`);
     }
-
     publish.mutate(
       { workflow: result.workflow, lanes: result.lanes },
       {
@@ -185,7 +289,7 @@ function Canvas() {
         onError: (err) => toast.error(`Publish failed — ${err.message}`),
       },
     );
-  }, [nodes, edges, publish]);
+  }, [workflowId, serializeTo, publish]);
 
   const onConnect = useCallback(
     (c: Connection) => setEdges((eds) => addEdge({ ...c }, eds)),
@@ -195,11 +299,6 @@ function Canvas() {
   const onSelectionChange = useCallback((p: OnSelectionChangeParams) => {
     setSelected((p.nodes[0] as RelayNode) ?? null);
   }, []);
-
-  const clearTimers = () => {
-    timers.current.forEach((t) => window.clearTimeout(t));
-    timers.current = [];
-  };
 
   const applyRunStates = useCallback(
     (states: Record<string, RunState>) => {
@@ -211,50 +310,22 @@ function Canvas() {
   );
 
   const stop = useCallback(() => {
-    clearTimers();
     setRunning(false);
-    setStep(-1);
     applyRunStates({});
     setEdges((es) => es.map((e) => ({ ...e, className: e.className?.replace("edge-active", "").trim() ?? "" })));
   }, [applyRunStates, setEdges]);
 
+  // Run is a real backend operation in a later phase (Phase 6.5 §10). Until
+  // the gateway exposed an execution contract the frontend can drive, running
+  // is disabled — no fabricated execution state is shown.
   const run = useCallback(() => {
-    clearTimers();
-    setRunning(true);
-    const states: Record<string, RunState> = {};
-    executionPath.forEach((p) => (states[p.id] = "queued"));
-    applyRunStates({ ...states });
+    toast.error("Run is not available yet — the gateway execution contract is not wired. Save, validate, and publish instead.");
+  }, []);
 
-    executionPath.forEach((p, i) => {
-      const t = window.setTimeout(() => {
-        setStep(i);
-        executionPath.slice(0, i).forEach((prev) => (states[prev.id] = "completed"));
-        states[p.id] = p.id === "output" ? "streaming" : "running";
-        applyRunStates({ ...states });
-        setEdges((es) =>
-          es.map((e) => ({
-            ...e,
-            className: executionEdges.slice(0, i + 1).includes(e.id)
-              ? cn(e.className?.replace("edge-active", ""), "edge-active")
-              : (e.className?.replace("edge-active", "").trim() ?? ""),
-          })),
-        );
-      }, 500 + i * 620);
-      timers.current.push(t);
-    });
-
-    const done = window.setTimeout(
-      () => {
-        executionPath.forEach((p) => (states[p.id] = "completed"));
-        applyRunStates({ ...states });
-        setRunning(false);
-      },
-      500 + executionPath.length * 620 + 700,
-    );
-    timers.current.push(done);
-  }, [applyRunStates, setEdges]);
-
-  useEffect(() => clearTimers, []);
+  const markDirty = useCallback(() => {
+    setDirty(true);
+    setPlanHash(null);
+  }, []);
 
   const onDrop = useCallback(
     (event: React.DragEvent) => {
@@ -276,14 +347,10 @@ function Canvas() {
         },
       };
       setNodes((ns) => [...ns, newNode]);
+      markDirty();
     },
-    [screenToFlowPosition, setNodes],
+    [screenToFlowPosition, setNodes, markDirty],
   );
-
-  const errorCount = validationIssues.filter((i) => i.level === "error").length;
-  const warnCount = validationIssues.filter((i) => i.level === "warn").length;
-
-  const currentStep = step >= 0 ? executionPath[step] : undefined;
 
   const inspectorNode = useMemo(() => nodes.find((n) => n.id === selected?.id), [nodes, selected]);
 
@@ -291,8 +358,14 @@ function Canvas() {
     <div className="flex min-h-0 flex-1 flex-col">
       <Toolbar
         running={running}
+        workflowId={workflowId}
+        workflowName={workflowName}
+        version={version}
+        planHash={planHash}
         onRun={run}
         onStop={stop}
+        onSave={onSave}
+        onValidate={onValidate}
         onPublish={onPublish}
         libraryOpen={libraryOpen}
         inspectorOpen={inspectorOpen}
@@ -316,9 +389,22 @@ function Canvas() {
           <ReactFlow
             nodes={nodes}
             edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
+            onNodesChange={(changes) => {
+              onNodesChange(changes);
+              if (changes.some((c) => c.type === "position" || c.type === "add" || c.type === "remove" || c.type === "replace")) {
+                markDirty();
+              }
+            }}
+            onEdgesChange={(changes) => {
+              onEdgesChange(changes);
+              if (changes.some((c) => c.type === "add" || c.type === "remove" || c.type === "replace")) {
+                markDirty();
+              }
+            }}
+            onConnect={(c) => {
+              onConnect(c);
+              markDirty();
+            }}
             onSelectionChange={onSelectionChange}
             nodeTypes={relayNodeTypes}
             snapToGrid
@@ -345,24 +431,23 @@ function Canvas() {
             />
           </ReactFlow>
 
-          {running || currentStep ? (
+          {latestPending ? (
             <div className="pointer-events-none absolute top-2 left-1/2 z-10 -translate-x-1/2">
               <div className="flex items-center gap-2 rounded-sm border border-border bg-panel/95 px-2.5 py-1.5 shadow-panel">
-                <StatusDot status={running ? "running" : "completed"} />
-                <span className="num text-[11px]">
-                  {running ? `Executing ${currentStep?.label ?? "…"}` : "Run completed"}
-                </span>
-                <span className="num text-[11px] text-muted-foreground">{currentStep?.ms}</span>
-                <Link
-                  to="/runs/$runId"
-                  params={{ runId: "8F31A2" }}
-                  className="pointer-events-auto num text-[11px] text-primary hover:underline"
-                >
-                  open run →
-                </Link>
+                <StatusDot status="loading" />
+                <span className="num text-[11px]">loading workflow…</span>
               </div>
             </div>
           ) : null}
+
+          {noSavedVersions && !latestPending && (
+            <div className="pointer-events-none absolute top-2 left-1/2 z-10 -translate-x-1/2">
+              <div className="flex items-center gap-2 rounded-sm border border-warn/40 bg-panel/95 px-2.5 py-1.5 shadow-panel">
+                <AlertTriangle className="size-3 text-warn" />
+                <span className="num text-[11px]">no saved versions yet — this workflow has never been persisted</span>
+              </div>
+            </div>
+          )}
         </div>
 
         {inspectorOpen && (
@@ -378,20 +463,27 @@ function Canvas() {
       <footer className="flex h-8 shrink-0 items-center gap-3 border-t border-border bg-panel px-3 text-[11px]">
         <span className="flex items-center gap-1.5 text-fail">
           <CircleSlash className="size-3" />
-          <span className="num">{errorCount} errors</span>
+          <span className="num">{version !== null ? version : 0} errors</span>
         </span>
         <span className="flex items-center gap-1.5 text-warn">
           <AlertTriangle className="size-3" />
-          <span className="num">{warnCount} warnings</span>
+          <span className="num">{planHash !== null ? planHash.slice(0, 8) : 0} warnings</span>
         </span>
         <span className="h-4 w-px bg-border" />
         <span className="num hidden text-muted-foreground sm:inline">{nodes.length} nodes · {edges.length} edges</span>
         <span className="h-4 w-px bg-border sm:inline" />
-        <span className="num hidden text-muted-foreground md:inline">plan_8f31a2 · compiled 14.2 KB</span>
+        <span className="num hidden text-muted-foreground md:inline">
+          {planHash ? `plan ${planHash.slice(0, 8)}` : "not compiled"}
+        </span>
         <span className="ml-auto flex items-center gap-3">
-          <span className="num hidden text-muted-foreground lg:inline">snap 16px</span>
-          <span className="num flex items-center gap-1.5 text-ok">
-            <Check className="size-3" /> saved 12s ago
+          <span className="num flex items-center gap-1.5">
+            {dirty ? (
+              <span className="text-warn">unsaved changes</span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-ok">
+                <Check className="size-3" /> saved
+              </span>
+            )}
           </span>
         </span>
       </footer>
@@ -399,7 +491,7 @@ function Canvas() {
   );
 }
 
-export function WorkflowBuilder() {
+export function WorkflowBuilder({ workflowId = "production-gateway" }: { workflowId?: string }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
@@ -414,7 +506,7 @@ export function WorkflowBuilder() {
   return (
     <ReactFlowProvider>
       <div className="flex h-full min-h-0 flex-col">
-        <Canvas />
+        <Canvas workflowId={workflowId} />
       </div>
     </ReactFlowProvider>
   );

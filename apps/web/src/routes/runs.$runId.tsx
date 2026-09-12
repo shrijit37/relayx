@@ -3,7 +3,6 @@ import { ArrowLeft } from "lucide-react";
 import { AppShell } from "@/components/relay/AppShell";
 import { KV, Metric, PageHeader, Panel, StatusText, Tag } from "@/components/relay/primitives";
 import { waterfall } from "@/lib/relay-data";
-import { executionPath } from "@/components/relay/workflow/graph";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/runs/$runId")({
@@ -24,6 +23,14 @@ function RunDetail() {
   const { runId } = Route.useParams();
   const total = waterfall.reduce((a, b) => a + b.ms, 0);
   let cursor = 0;
+  const executionPath = [
+    { id: "input", label: "Input", ms: "0.2 ms" },
+    { id: "route", label: "Route", ms: "0.1 ms" },
+    { id: "lane-us", label: "Lane", ms: "0.3 ms" },
+    { id: "transform", label: "Protocol translation", ms: "1.2 ms" },
+    { id: "provider", label: "Anthropic", ms: "420 ms TTFB" },
+    { id: "output", label: "Streaming", ms: "1.39 s" },
+  ];
 
   return (
     <AppShell>
