@@ -299,6 +299,8 @@ The hot path adds one `ArcSwap load_full` (a pointer read + Arc clone). No locks
 5. Multi-gateway fan-out through the publish seam; gateway registration + bundle push.
 6. AuthN on the control API (API keys per project), closing the §14 tenant gap.
 7. Streamed-loss enforcement from the canonical decode into the per-event encoder.
+8. **Cross-system atomicity (gateway swap vs DB ACTIVE pointer)** — the gateway `/publish` swap is HTTP and the `recordPublished` transaction is DB; they cannot be 2PC'd in Phase 6. A crash between the two leaves a transient divergence (gateway serves v2, DB still v1) that the next rehydrate silently resolves to v1. This is documented behavior, not a bug, but a production control plane should either (a) record a `publications.pending` row before the swap and reconcile on boot, or (b) drive rehydrate from the gateway's actual snapshot rather than `workflow_active`.
+9. **Frontend client-side validation gap** — `validateLocally` was removed when the publish path switched to the control plane; the editor no longer rejects a node-less graph locally. Restore a thin structural check (exactly one Input/Output, known edge refs) before round-tripping to `/publish`.
 
 ---
 
