@@ -34,10 +34,14 @@ export async function runSqlFile(pool: Pool, path: string): Promise<void> {
 }
 
 /**
- * Apply all migration files in `src/db/` in lexical order (idempotent against
- * a `schema_migrations` ledger). Failure stops the run.
+ * Apply all migration files in the `src/db/` directory (lexical order,
+ * idempotent against a `schema_migrations` ledger). Failure stops the run.
+ *
+ * The directory is resolved from this file's location (never cwd), so the
+ * control plane boots from any working directory.
  */
-export async function migrate(pool: Pool, dir = "src/db"): Promise<string[]> {
+export async function migrate(pool: Pool, dir?: string): Promise<string[]> {
+  const migrationsDir = (dir ?? `${import.meta.dir}/`).replace(/\/$/, "");
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       filename TEXT PRIMARY KEY,
@@ -45,15 +49,17 @@ export async function migrate(pool: Pool, dir = "src/db"): Promise<string[]> {
     )
   `);
 
-  const entries = (await Array.fromAsync(
-    new Bun.Glob("*.sql").scan({ cwd: dir, absolute: false }),
-  )).sort();
+  const entries = (
+    await Array.fromAsync(
+      new Bun.Glob("*.sql").scan({ cwd: migrationsDir, absolute: false }),
+    )
+  ).sort();
 
   const applied: string[] = [];
   for (const file of entries) {
     const has = await pool.query("SELECT 1 FROM schema_migrations WHERE filename = $1", [file]);
     if ((has.rowCount ?? 0) > 0) continue;
-    await runSqlFile(pool, `${dir}/${file}`);
+    await runSqlFile(pool, `${migrationsDir}/${file}`);
     await pool.query("INSERT INTO schema_migrations (filename) VALUES ($1)", [file]);
     applied.push(file);
   }

@@ -68,14 +68,28 @@
 - [x] integration tests: snapshot publication, hot-swap, workflow e2e, context capabilities
 - [x] performance benchmarks for snapshot publication + reader path
 
-## Phase 5b — Control plane (durable state, not started this phase)
+## Phase 5b — Control plane (durable state) — COMPLETE (Phase 6)
 
-- [ ] PostgreSQL-backed control plane (workflow/provider/lane CRUD)
-- [ ] workflow lifecycle DB (DRAFT → VALIDATED → COMPILED → PUBLISHED → ACTIVE)
-- [ ] admin REST endpoints beyond `/publish` (fetch/validate/compile)
-- [ ] credential references (never raw secrets in workflow JSON)
+- [x] PostgreSQL-backed control plane (workflow/provider/lane CRUD)
+- [x] workflow lifecycle DB (DRAFT → VALIDATED → COMPILED → PUBLISHED → ACTIVE)
+- [x] admin REST endpoints beyond `/publish` (fetch/validate/compile/rollback)
+- [x] credential references (never raw secrets in workflow JSON)
 
-## Phase 6 — MCP and Skills
+## Phase 6 — Durable configuration + compilation + coherent runtime publication (COMPLETE)
+
+- [x] `RuntimeSnapshotBundle` — snapshot + lane pools acquired atomically per request
+- [x] PostgreSQL control-plane persistence (projects, providers, lanes, workflows, workflow_versions, publications, workflow_active)
+- [x] immutable workflow versions (new edits create new versions; never mutate active)
+- [x] publish pipeline (validate → compile → atomic publish → persist publication record)
+- [x] rollback = republish a previous validated version
+- [x] credential references resolved to lane `Authorization` at publish time
+- [x] gateway `/validate` compile-only endpoint (deterministic plan hash before commit)
+- [x] control-plane boot rehydrates the last ACTIVE version of every workflow
+- [x] frontend wired to real control-plane lifecycle (versions index, publish, status)
+- [x] full E2E: control plane → WireSnapshot → gateway atomic publish → request → provider → stream
+- [x] hot path free of PostgreSQL/control-plane/compile (67 ns bundle lookup, memory-only)
+
+## Phase 7 — MCP and Skills
 
 - [ ] MCP registry
 - [ ] metadata index
@@ -85,7 +99,7 @@
 - [ ] progressive loading
 - [ ] retrieval evaluation suite
 
-## Phase 7 — Production security
+## Phase 8 — Production security
 
 - [ ] secret manager integration
 - [ ] tenant isolation
@@ -94,7 +108,7 @@
 - [ ] sandboxed tool workers
 - [ ] audit log
 
-## Phase 8 — Advanced routing
+## Phase 9 — Advanced routing
 
 - [ ] latency-aware routing
 - [ ] cost-aware routing

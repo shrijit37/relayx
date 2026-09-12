@@ -2,7 +2,20 @@
 
 ## Status
 
-**Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 3 (lanes/routing) PARTIAL (lanes exist, no health/WireGuard). Phase 4 (workflow compiler) COMPLETE. Phase 5 (runtime publication & frontend wiring) COMPLETE.**
+**Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 3 (lanes/routing) PARTIAL (lanes exist, no health/WireGuard). Phase 4 (workflow compiler) COMPLETE. Phase 5 (runtime publication & frontend wiring) COMPLETE. Phase 6 (control plane & durable configuration) COMPLETE.**
+
+### Phase 6 — Control plane & durable configuration (COMPLETE)
+
+See [`PHASE6_REPORT.md`](../PHASE6_REPORT.md) for the full completion report. Highlights:
+
+- **Durable control plane** — `apps/control-plane/` (TypeScript/Fastify) persists workflows, versions, providers, lanes, policies, and publications to PostgreSQL; the gateway data plane stays entirely memory-resident.
+- **Atomic publish pipeline** — the control plane builds a `WireSnapshot` (lanes as `WireLane` with resolved authorization), `POST`s to gateway `/validate` (compile-only, deterministic plan hash recorded), then `/publish` (atomic snapshot + lane-pool swap). A failed publish leaves the previous runtime active.
+- **Credential references** — lanes store `credential_ref` (env/vault), resolved to an `Authorization` header at publish time; raw secrets never appear in workflow JSON, API responses, logs, or metrics.
+- **Workflow lifecycle** — `draft → validated → compiled → published → active`; versions immutable; rollback republishes a previous validated version.
+- **Frontend wired to real backend** — versions page + workflows index fetch from the control plane; publish returns backend-authoritative version/plan-hash.
+- **Gateway restart preservation** — the control plane rehydrates the last ACTIVE version of every workflow on boot.
+
+**Test count (Phase 6): Rust 269 passing, zero failures.** Baseline 267 → +2 (control-plane e2e). **Control plane: 9 integration tests** against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 5 serializer tests, production build clean.**
 
 ### Phase 5 — Runtime publication & frontend wiring (COMPLETE)
 

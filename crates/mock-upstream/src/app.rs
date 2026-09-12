@@ -94,6 +94,19 @@ async fn chat_completions(
         .lock()
         .unwrap_or_else(|p| p.into_inner()) = Some(body_str);
 
+    // Capture lower-cased headers so tests can assert per-lane credential
+    // propagation (authorization) without exposing the body's contents.
+    let mut captured: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (name, value) in &headers {
+        if let Ok(v) = value.to_str() {
+            captured.insert(name.as_str().to_ascii_lowercase(), v.to_owned());
+        }
+    }
+    *app.state
+        .last_request_headers
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some(captured);
+
     app.state
         .requests_served
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
