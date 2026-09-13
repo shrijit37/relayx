@@ -22,7 +22,7 @@ import {
   Waypoints,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { workspace } from "@/lib/relay-data";
+import { useSystemHealth } from "@/lib/use-workflow-publication";
 import { CommandPalette } from "./CommandPalette";
 import { StatusDot } from "./primitives";
 
@@ -50,6 +50,24 @@ export function AppShell({ children, flush = false }: { children: ReactNode; flu
   const [collapsed, setCollapsed] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const { data: health } = useSystemHealth();
+
+  // Real gateway readiness, feigned nowhere: the dot reflects the live probe
+  // (or "unknown" when the control plane is unreachable).
+  const healthStatus = health
+    ? health.gateway.ready.status === "ready" && health.gateway.healthz.status === "ok"
+      ? "healthy"
+      : "degraded"
+    : "unknown";
+  const healthLabel =
+    health?.gateway.ready.status === "ready" && health?.gateway.healthz.status === "ok"
+      ? "Gateway ready"
+      : health
+        ? "Gateway degraded"
+        : "Gateway unknown";
+  const healthGatewayLine = health
+    ? `gateway /healthz=${health.gateway.healthz.status} /ready=${health.gateway.ready.status}`
+    : "control plane unreachable";
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -68,8 +86,8 @@ export function AppShell({ children, flush = false }: { children: ReactNode; flu
 
   const isActive = (to: string) => (to === "/" ? pathname === "/" : pathname.startsWith(to));
 
-  return (
-    <div className="flex h-screen w-full overflow-hidden bg-background">
+    return (
+         <div className="flex h-screen w-full overflow-hidden bg-background">
       <aside
         className={cn(
           "hidden shrink-0 flex-col border-r border-sidebar-border bg-sidebar md:flex",
@@ -77,8 +95,8 @@ export function AppShell({ children, flush = false }: { children: ReactNode; flu
         )}
       >
         <div className="flex h-11 items-center gap-2 border-b border-sidebar-border px-3">
-          <span className="grid size-5 shrink-0 place-items-center rounded-[4px] bg-primary text-[11px] font-bold text-primary-foreground">
-            R
+          <span className="grid size-5 shrink-0 place-items-center overflow-hidden rounded-[4px] bg-black">
+            <img src="/logo.svg" alt="relay-x" className="size-full" />
           </span>
           {!collapsed && (
             <span className="text-[13px] font-semibold tracking-tight">
@@ -120,25 +138,28 @@ export function AppShell({ children, flush = false }: { children: ReactNode; flu
             <div className="space-y-1.5">
               <button className="focus-ring flex h-7 w-full items-center gap-2 rounded-sm px-1.5 text-xs hover:bg-sidebar-accent">
                 <Layers className="size-3.5 text-muted-foreground" />
-                <span className="truncate">{workspace.name}</span>
+                <span className="truncate">local development</span>
               </button>
-              <button className="focus-ring flex h-7 w-full items-center gap-2 rounded-sm border border-sidebar-border px-1.5 text-xs hover:bg-sidebar-accent">
-                <StatusDot status="healthy" />
-                <span className="truncate">Production</span>
+              <button
+                title={healthGatewayLine}
+                className="focus-ring flex h-7 w-full items-center gap-2 rounded-sm border border-sidebar-border px-1.5 text-xs hover:bg-sidebar-accent"
+              >
+                <StatusDot status={healthStatus} />
+                <span className="truncate">{healthLabel}</span>
                 <Gauge className="ml-auto size-3.5 text-muted-foreground" />
               </button>
               <button className="focus-ring flex h-8 w-full items-center gap-2 rounded-sm px-1.5 hover:bg-sidebar-accent">
                 <span className="grid size-5 place-items-center rounded-full bg-panel-raised text-[9px] font-semibold">
-                  {workspace.user.initials}
+                  {"dev"}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-left text-xs">{workspace.user.name}</span>
+                <span className="min-w-0 flex-1 truncate text-left text-xs">local user</span>
               </button>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-2">
-              <StatusDot status="healthy" />
+              <StatusDot status={healthStatus} />
               <span className="grid size-6 place-items-center rounded-full bg-panel-raised text-[9px] font-semibold">
-                {workspace.user.initials}
+                {"dv"}
               </span>
             </div>
           )}
@@ -154,8 +175,8 @@ export function AppShell({ children, flush = false }: { children: ReactNode; flu
 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-panel px-3 md:hidden">
-          <span className="grid size-5 place-items-center rounded-[4px] bg-primary text-[11px] font-bold text-primary-foreground">
-            R
+          <span className="grid size-5 shrink-0 place-items-center overflow-hidden rounded-[4px] bg-black">
+            <img src="/logo.svg" alt="relay-x" className="size-full" />
           </span>
           <span className="text-[13px] font-semibold">relay-x</span>
           <button

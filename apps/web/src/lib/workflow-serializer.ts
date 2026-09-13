@@ -221,6 +221,227 @@ function withLaneId(
  * Any folded lane missing from it produces a warning and an empty URL in
  * `result.lanes` — the caller must resolve it before publishing.
  */
+// ── Deserializer ────────────────────────────────────────────────────────
+
+/** Reverse map: schema node kind → editor node kind. */
+const KIND_REVERSE: Record<SchemaNodeKind, EditorKind | null> = {
+  input: "input",
+  output: "output",
+  llm: "provider",
+  router: "route",
+  transform: "transform",
+  condition: "condition",
+  mcp: "mcp",
+  skill: "skill",
+  fallback: "fallback",
+  retry: "retry",
+  custom: null,
+};
+
+const SEQUENCE_GAP = 280;
+
+/** Derive a display title from a schema node config. */
+function titleFromConfig(node: SchemaNode): string {
+  const c = node.config;
+  switch (c.kind) {
+    case "llm": return c.model ? `Model · ${c.model}` : "LLM";
+    case "router": return "Model Router";
+    case "transform": return "Transform";
+    case "condition": return "Condition";
+    case "mcp": return c.server_ref || "MCP";
+    case "skill": return c.skill_ref || "Skill";
+    case "fallback": return "Fallback";
+    case "retry": return `Retry · ${c.max_attempts} attempts`;
+    case "input": return "HTTP Request";
+    case "output": return "Streaming Response";
+    default: return "Node";
+  }
+}
+
+/** Derive display lines from a schema node config. */
+function linesFromConfig(node: SchemaNode): string[] {
+  const c = node.config;
+  switch (c.kind) {
+    case "llm": {
+      const parts: string[] = [];
+      if (c.protocol) parts.push(c.protocol);
+      if (c.stream) parts.push("streaming");
+      if (c.lane_id) parts.push(`lane: ${c.lane_id}`);
+      return parts.length ? parts : ["llm"];
+    }
+    case "router": return c.strategy ? [`strategy: ${c.strategy}`] : ["router"];
+    case "transform": return c.operation ? [`operation: ${c.operation}`] : ["transform"];
+    case "condition": return [`${c.field} ${c.operator} ${c.value}`];
+    case "mcp": return [c.tool_name, c.deferred ? "deferred" : "immediate"];
+    case "skill": return [c.progressive ? "progressive" : "direct"];
+    case "fallback": return [`${c.providers.length} fallback(s)`, `${c.rounds} round(s)`];
+    case "retry": return [`delay: ${c.delay_ms}ms`, `on timeout: ${c.on_timeout}`];
+    case "input": return ["ingress"];
+    case "output": return ["egress"];
+    default: return [];
+  }
+}
+
+function laneConfig(laneId: string, nodes: SchemaNode[]): { kind: "lane"; title: string; lines: string[] } {
+  const lane = nodes.find((n) => n.config.kind === "llm" && n.config.lane_id === laneId);
+  const model = lane && lane.config.kind === "llm" ? lane.config.model : undefined;
+  return { kind: "lane", title: laneId, lines: model ? [`feeds ${model}`] : [] };
+}
+
+export interface DeserializeResult {
+  nodes: RelayNode[];
+  edges: Edge[];
+  warnings: string[];
+}
+
+/**
+ * Convert canonical Workflow JSON back into React Flow nodes + edges.
+ *
+ * Unfolds `lane_id` from LLM configs back into synthetic lane nodes.
+ * Positions are computed from a topological left-to-right layout.
+ * Unknown or unmappable kinds produce warnings and are skipped.
+ */
+export function deserializeWorkflow(wf: WorkflowJson): DeserializeResult {
+  const warnings: string[] = [];
+  const nodes: RelayNode[] = [];
+  const edges: Edge[] = [];
+
+  // Collect lane ids referenced by any LLM config.
+  const referencedLanes = new Set<string>();
+  for (const sn of wf.nodes) {
+    if (sn.config.kind === "llm" && sn.config.lane_id) referencedLanes.add(sn.config.lane_id);
+  }
+
+  // Assign layout columns via topological sort.
+  const adj = new Map<string, string[]>();
+  const inDeg = new Map<string, number>();
+  for (const n of wf.nodes) {
+    adj.set(n.id, []);
+    inDeg.set(n.id, 0);
+  }
+  for (const e of wf.edges) {
+    adj.get(e.source_node)?.push(e.target_node);
+    inDeg.set(e.target_node, (inDeg.get(e.target_node) ?? 0) + 1);
+  }
+  const queue: string[] = [];
+  for (const [id, deg] of inDeg) { if (deg === 0) queue.push(id); }
+  const topoOrder: string[] = [];
+  while (queue.length) {
+    const id = queue.shift()!;
+    topoOrder.push(id);
+    for (const next of adj.get(id) ?? []) {
+      const d = (inDeg.get(next) ?? 1) - 1;
+      inDeg.set(next, d);
+      if (d === 0) queue.push(next);
+    }
+  }
+  // Any remaining nodes not reachable from sources get appended.
+  const inTopo = new Set(topoOrder);
+  for (const n of wf.nodes) {
+    if (!inTopo.has(n.id)) topoOrder.push(n.id);
+  }
+
+  // Compute column per node from topological order (sources before targets),
+  // so depth is exact regardless of the node array's storage order.
+  const col = new Map<string, number>();
+  for (const id of topoOrder) {
+    const srcCols = wf.edges.filter((e) => e.target_node === id).map((e) => col.get(e.source_node) ?? -1);
+    col.set(id, srcCols.length ? 1 + Math.max(...srcCols) : 0);
+  }
+  const maxCol = Math.max(0, ...col.values());
+
+  // Track y offset per column.
+  const yOffset = new Map<number, number>();
+
+  // Create a synthetic lane node.
+  function makeLaneNode(laneId: string, feedCount: number): RelayNode {
+    const info = laneConfig(laneId, wf.nodes);
+    const c = maxCol + 1; // place lanes one column right of the rightmost schema node
+    const y = yOffset.get(c) ?? 0;
+    yOffset.set(c, y + SEQUENCE_GAP);
+    return {
+      id: `lane-${laneId}`,
+      type: "relay",
+      position: { x: c * SEQUENCE_GAP, y },
+      data: { kind: "lane", title: info.title, lines: info.lines, status: "healthy", metaLeft: `feeds ${feedCount} node(s)` },
+    };
+  }
+
+  const laneNodeCreated = new Set<string>();
+
+  // Create schema nodes.
+  const nodesById = new Map<string, SchemaNode>();
+  for (const sn of wf.nodes) nodesById.set(sn.id, sn);
+
+  for (const id of topoOrder) {
+    const sn = nodesById.get(id);
+    if (!sn) continue;
+    // Only fall back to the config-kind when the node is a KNOWN schema kind
+    // (the config kind is the same discriminator). An unknown `kind` is
+    // skipped with a warning — never silently rendered as an editable node.
+    if (!(sn.kind in KIND_REVERSE)) {
+      warnings.push(`skipped unmappable node '${id}' (kind: ${sn.kind})`);
+      continue;
+    }
+    const ek = KIND_REVERSE[sn.kind];
+    if (ek === null) {
+      warnings.push(`skipped unmappable node '${id}' (kind: ${sn.kind})`);
+      continue;
+    }
+    const c = col.get(id) ?? 0;
+    const y = yOffset.get(c) ?? 0;
+    yOffset.set(c, y + SEQUENCE_GAP);
+    nodes.push({
+      id: sn.id,
+      type: "relay",
+      position: { x: c * SEQUENCE_GAP, y },
+      data: {
+        kind: ek,
+        title: titleFromConfig(sn),
+        lines: linesFromConfig(sn),
+        metaLeft: sn.kind,
+      },
+    });
+
+    // Emit synthetic lane node + edge if this node references a lane.
+    if (sn.config.kind === "llm" && sn.config.lane_id) {
+      const lid = sn.config.lane_id;
+      if (!laneNodeCreated.has(lid)) {
+        laneNodeCreated.add(lid);
+        const feedCount = wf.nodes.filter((n) => n.config.kind === "llm" && n.config.lane_id === lid).length;
+        const laneNode = makeLaneNode(lid, feedCount);
+        nodes.push(laneNode);
+        // Edge from lane node → this node.
+        edges.push({ id: `lane-e-${lid}-${sn.id}`, source: laneNode.id, target: sn.id });
+      }
+    }
+  }
+
+  // Map schema edges → React Flow edges.
+  for (const se of wf.edges) {
+    // Skip edges to/from nodes we didn't emit (unmapped kinds, lanes).
+    if (!nodesById.has(se.source_node) || !nodesById.has(se.target_node)) continue;
+    const srcSchema = nodesById.get(se.source_node)!;
+    const tgtSchema = nodesById.get(se.target_node)!;
+    const srcKind = KIND_REVERSE[srcSchema.kind];
+    const tgtKind = KIND_REVERSE[tgtSchema.kind];
+    if (!srcKind || !tgtKind) continue;
+    if (srcKind === "lane" || tgtKind === "lane") continue;
+    const newEdge: Edge = {
+      id: `e-${se.source_node}-${se.source_port}-${se.target_node}`,
+      source: se.source_node,
+      target: se.target_node,
+    };
+    if (se.source_port !== "out") {
+      newEdge.sourceHandle = se.source_port;
+      newEdge.label = se.source_port;
+    }
+    edges.push(newEdge);
+  }
+
+  return { nodes, edges, warnings };
+}
+
 export function serializeWorkflow(
   nodes: RelayNode[],
   edges: Edge[],

@@ -6,7 +6,8 @@
 .
 ├── apps/
 │   ├── gateway/                # Rust data plane (Phase 1 complete)
-│   └── web/                    # React/React Flow visual editor (TanStack Start, mock data)
+│   ├── control-plane/          # TypeScript/Fastify control plane + PostgreSQL (Phase 6 complete)
+│   └── web/                    # React/React Flow visual editor (TanStack Start, backend-authoritative)
 ├── crates/
 │   ├── mock-upstream/          # Configurable mock LLM for tests/benchmarks
 │   ├── test-harness/           # In-process gateway+mock spawn helpers
@@ -47,6 +48,16 @@ cd apps/web
 bun install
 bun run dev       # Vite dev server with TanStack Start SSR
 bun run build     # Production build to .output/
+bun test          # Serializer + run-state reducer tests
+```
+
+### Control plane (apps/control-plane)
+
+```bash
+cd apps/control-plane
+bun install
+bun run dev       # Fastify API on :9091 (needs Postgres, see infra/docker/compose.dev.yml)
+bun test          # Integration tests (real Postgres + in-process mock gateway)
 ```
 
 ## Local development
@@ -54,7 +65,8 @@ bun run build     # Production build to .output/
 ### Prerequisites
 
 - Rust stable (1.88+) via `rustup`
-- No external services required for Phase 1
+- Postgres 16 for the control plane (infra/docker/compose.dev.yml)
+- `scripts/dev.sh` brings up mock upstream + gateway + control plane + Postgres
 
 ### Build
 
@@ -71,6 +83,32 @@ cargo run -p mock-upstream -- --port 8101 --mode sse --chunks 10
 # Start the gateway (routes to mock on 8101)
 cargo run -p relay-gateway -- --config apps/gateway/config/gateway.toml
 ```
+
+### Local dev flow (frontend + backend)
+
+The editor talks to the control plane (`:9091`); the control plane talks to the
+gateway admin API (`:9090` for `/validate`, `/publish`, `/run`) for publication
+and execution:
+
+1. Start Postgres + mock upstream + gateway + control plane (`scripts/dev.sh`).
+2. `cd apps/web && bun run dev` → editor on `:5173`.
+3. **Create** a workflow in the editor (Save in `new` mode creates the durable
+   workflow row, then navigates to `/workflows/<real-id>`).
+4. **Load** — the editor deserializes `latest.workflow_json` from the control
+   plane into the React Flow canvas.
+5. **Save** — `POST /workflows/:id/versions` (immutable version).
+6. **Validate** — `POST /workflows/:id/validate` → gateway `/validate` →
+   deterministic plan hash; invalid workflows return real errors.
+7. **Publish** — `POST /workflows/:id/publish` → atomic gateway publication;
+   version becomes ACTIVE.
+8. **Run** — `POST /workflows/:id/run` (control plane) → `POST /run` (gateway
+   admin) → workflow runtime → provider. The response is a JSON envelope:
+   `{ status:"ok", request_id, workflow_id, snapshot_version, plan_hash, output }`.
+   An unpublished workflow returns a real **409** ("Workflow must be published
+   before it can be run") — Run never silently executes unsaved drafts. The
+   client contract is JSON; the LLM node consumes upstream provider SSE
+   internally (real streaming, bounded memory) — no per-token SSE is invented
+   for the run panel.
 
 ### Run tests
 

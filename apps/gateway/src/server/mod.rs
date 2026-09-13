@@ -124,16 +124,18 @@ impl GatewayServer {
         });
 
         // ── Proxy listener ────────────────────────────────────────────────
-        let proxy_router = Router::new().fallback(any(proxy_handler)).with_state(state);
+        let proxy_router = Router::new()
+            .fallback(any(proxy_handler))
+            .with_state(state.clone());
 
         let proxy_listener = TcpListener::bind(self.server_config.listen).await?;
         tracing::info!(addr = %self.server_config.listen, "proxy listener started");
 
         // ── Admin listener ────────────────────────────────────────────────
         let admin_router = match &publication_state {
-            Some(state) => crate::observability::admin_router_with_publication(
+            Some(ps) => crate::observability::admin_router_with_publication(
                 self.metrics_handle.clone(),
-                Some(state.clone()),
+                Some(ps.clone()),
             ),
             None => crate::observability::admin_router(self.metrics_handle.clone()),
         };

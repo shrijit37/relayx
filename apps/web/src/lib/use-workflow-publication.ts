@@ -8,12 +8,29 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchWorkflowVersions, fetchWorkflows, publishWorkflow, type VersionInfo } from "@/lib/api";
+import {
+  createProvider,
+  fetchLanes,
+  fetchProviders,
+  fetchSystemHealth,
+  fetchWorkflowLatestVersion,
+  fetchWorkflowVersions,
+  fetchWorkflows,
+  publishWorkflow,
+  runWorkflow,
+  saveWorkflowVersion,
+  validateWorkflow,
+  type ProviderRow,
+  type RunResult,
+  type VersionInfo,
+  type VersionRow,
+} from "@/lib/api";
 import type { WorkflowJson } from "@/lib/workflow-serializer";
 
 export const publicationKeys = {
   all: ["publication"] as const,
   versions: (workflowId: string) => ["versions", workflowId] as const,
+  latest: (workflowId: string) => ["latest-version", workflowId] as const,
   workflows: ["workflows"] as const,
 };
 
@@ -49,5 +66,97 @@ export function useWorkflows() {
   return useQuery({
     queryKey: publicationKeys.workflows,
     queryFn: fetchWorkflows,
+  });
+}
+
+/** Fetch the latest immutable version for the editor's workflow. */
+export function useWorkflowLatestVersion(workflowId: string) {
+  return useQuery({
+    queryKey: publicationKeys.latest(workflowId),
+    queryFn: () => fetchWorkflowLatestVersion(workflowId),
+  });
+}
+
+/** Save a new immutable version of the editor state. */
+export function useSaveWorkflowMutation(workflowId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<VersionRow, Error, WorkflowJson>({
+    mutationFn: (workflow) => saveWorkflowVersion(workflowId, workflow),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: publicationKeys.versions(workflowId) });
+      queryClient.invalidateQueries({ queryKey: publicationKeys.latest(workflowId) });
+      queryClient.invalidateQueries({ queryKey: publicationKeys.workflows });
+    },
+  });
+}
+
+/** Validate + compile the current editor state against the control plane.
+ *  `validateWorkflow` resolves the backend row via `workflow.id`; the caller
+ *  must set `workflow.id` to match the editor's workflowId before calling. */
+export function useValidateMutation() {
+  return useMutation<{ plan_hash: string | null; status: string }, Error, WorkflowJson>({
+    mutationFn: (workflow) => validateWorkflow(workflow),
+  });
+}
+
+/** Run the workflow's ACTIVE (published) version through the real gateway.
+ *  The mutation's status is the only execution-state source: pending →
+ *  running, success → completed (real output), error → failed/cancelled (real
+ *  backend envelope). No fabricated states. */
+export function useRunWorkflowMutation() {
+  return useMutation<
+    RunResult,
+    Error,
+    { workflowId: string; body: unknown; signal?: AbortSignal }
+  >({
+    mutationFn: ({ workflowId, body, signal }) => runWorkflow(workflowId, body, signal),
+  });
+}
+
+/** Real persisted provider rows (config only — no fabricated health). */
+export function useProviders() {
+  return useQuery({
+    queryKey: ["providers"],
+    queryFn: fetchProviders,
+  });
+}
+
+/** Create a real provider record. */
+export function useCreateProviderMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<ProviderRow, Error, Parameters<typeof createProvider>[0]>({
+    mutationFn: createProvider,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["providers"] });
+    },
+  });
+}
+
+/** Real persisted lane rows. */
+export function useLanes() {
+  return useQuery({
+    queryKey: ["lanes"],
+    queryFn: () => fetchLanes(),
+  });
+}
+
+/** Real control-plane + gateway health probe. */
+export function useSystemHealth() {
+  return useQuery({
+    queryKey: ["system-health"],
+    queryFn: fetchSystemHealth,
+    refetchInterval: 15_000,
+  });
+}
+
+/** Latest persisted version row for the editor's workflow (durable truth). */
+export function useWorkflowRow(workflowId: string) {
+  return useQuery({
+    queryKey: ["workflow-row", workflowId],
+    queryFn: async () => {
+      const rows = await fetchWorkflowVersions(workflowId);
+      return rows.length > 0 ? rows[0] : null;
+    },
+    enabled: workflowId !== "new",
   });
 }

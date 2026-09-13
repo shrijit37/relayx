@@ -89,6 +89,40 @@
 - [x] full E2E: control plane → WireSnapshot → gateway atomic publish → request → provider → stream
 - [x] hot path free of PostgreSQL/control-plane/compile (67 ns bundle lookup, memory-only)
 
+## Phase 6.5 — Frontend/Backend Reality & Integration Hardening (AUDIT COMPLETE, IMPLEMENTATION COMPLETE)
+
+**Why this phase exists:** The Phase 6.5 reality audit ([phase-6.5-reality-audit.md](phase-6.5-reality-audit.md)) found that the Rust backend and control plane are real, but the frontend presents a high-fidelity mock: 13 of 15 pages render fabricated data, the Run button is a `setTimeout` animation, the editor cannot load saved workflows, and the Save/Validate buttons are non-functional. The backend correctly rejects invalid workflows, but the frontend never asks it.
+
+**Confirmed gaps → implementation status (all closed):**
+- Run button was entirely fabricated (setTimeout animation, zero API calls) → **REAL**: control-plane `POST /workflows/:id/run` → gateway admin `/run` → workflow runtime → provider, with the real envelope (request id, snapshot version, plan hash, output) shown in the UI; AbortController cancels the real request
+- Invalid/empty workflows appeared to execute successfully → **REAL errors**: no ACTIVE version → 409 "must be published"; draft/invalid canvas rejected honestly
+- 13 of 15 frontend pages rendered static/mock data from `relay-data.ts` (505 lines) and inline fixtures → **deleted**: `relay-data.ts` removed; every page fetches real backend rows or shows an honest "not available yet" state
+- Workflow editor started from a hardcoded 14-node demo graph → **removed**: `graph.ts` is a 2-node empty starter
+- No editor load/deserialize path (one-directional persistence) → **real load**: `deserializeWorkflow(latest.workflow_json)` reconstructs the canvas from the backend
+- Save and Validate toolbar buttons had no onClick handler → **wired**: Save creates an immutable version (create-then-navigate for new workflows), Validate returns the real plan hash / real rejection
+- Run detail page ignored the URL parameter → **honest**: `/runs` have no backend → "run history is not available yet" state, no fabricated waterfall
+- AppShell rendered hardcoded workspace name, user, and status → **neutral** "local development" identity + real gateway health from control-plane `/system/health`
+- Observability charts used Math.sin/cos fabricated time series → **honest** "No telemetry available" state
+- `fetchLanes()` and `validateWorkflow()` defined in api.ts but never called → **wired**: lanes page lists persisted lanes; Validate button calls the real endpoint
+
+**Success criteria — all met (see [PHASE6.5_IMPLEMENTATION_REPORT.md](../PHASE6.5_IMPLEMENTATION_REPORT.md)):**
+- Every frontend page that shows domain data fetches it from the backend (no `relay-data.ts` in production code paths) ✅
+- The Run button calls the real gateway execution path and surfaces actual results/errors ✅
+- The workflow editor loads a saved workflow version and reconstructs the React Flow canvas ✅
+- Empty/invalid workflows are rejected with a clear error (backed by the real `/validate` endpoint) ✅
+- Execution displays real results, not simulated progress (the workflow contract is a JSON envelope — per-token SSE is a proxy-route feature, not a workflow-run feature, and is not invented) ✅
+- Documentation accurately reflects the real/unavailable split ✅
+
+**What this phase does NOT include (deferred to Phase 7+):**
+- MCP/Skills runtime implementation (registry, discovery, tool execution)
+- Policy engine enforcement
+- Authentication/authorization on gateway or control-plane APIs
+- Tenant isolation / multi-project support
+- Network lane health checks / WireGuard
+- Secret manager integration (vault)
+- Observability backend (Prometheus/OTLP integration)
+- Run-history/execution-trace backend (the `/runs` pages stay honestly unavailable until one exists)
+
 ## Phase 7 — MCP and Skills
 
 - [ ] MCP registry

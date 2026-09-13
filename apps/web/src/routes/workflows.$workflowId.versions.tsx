@@ -1,18 +1,16 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { AlertTriangle, ArrowLeft, Check, GitCompare, RotateCcw } from "lucide-react";
+import { AlertTriangle, ArrowLeft, GitCompare, RotateCcw } from "lucide-react";
 import { AppShell } from "@/components/relay/AppShell";
 import { KV, PageHeader, Panel, StatusText, TableShell, Td } from "@/components/relay/primitives";
-import { compileStages, validationIssues } from "@/lib/relay-data";
 import { useWorkflowVersions } from "@/lib/use-workflow-publication";
-import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/workflows/$workflowId/versions")({
   head: () => ({
     meta: [
       { title: "Compilation & versions — relay-x" },
-      { name: "description", content: "Compile a React Flow graph into a validated, policy-compiled, versioned execution plan." },
+      { name: "description", content: "Versioned execution plans from a validated workflow graph." },
       { property: "og:title", content: "Compilation & versions — relay-x" },
-      { property: "og:description", content: "Schema, semantic, capability, policy and lane validation before publish." },
+      { property: "og:description", content: "Versioned, validated execution plans." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -22,7 +20,7 @@ export const Route = createFileRoute("/workflows/$workflowId/versions")({
 
 function VersionsPage() {
   const { workflowId } = Route.useParams();
-  const { data: liveVersions, isPending } = useWorkflowVersions(workflowId);
+  const { data: liveVersions, isPending, isError, error } = useWorkflowVersions(workflowId);
   const active = liveVersions?.find((v) => v.status === "active");
 
   return (
@@ -56,61 +54,44 @@ function VersionsPage() {
       />
 
       <div className="grid gap-3 p-4 xl:grid-cols-3">
-        <Panel title="Compilation pipeline" className="xl:col-span-2">
-          <ol className="space-y-0">
-            {compileStages.map((s, i) => (
-              <li key={s.name} className="flex items-start gap-3">
-                <div className="flex flex-col items-center">
-                  <span
-                    className={cn(
-                      "mt-1 grid size-4 place-items-center rounded-full border",
-                      s.state === "warn" ? "border-warn text-warn" : "border-ok text-ok",
-                    )}
-                  >
-                    {s.state === "warn" ? <AlertTriangle className="size-2.5" /> : <Check className="size-2.5" />}
-                  </span>
-                  {i < compileStages.length - 1 && <span className="my-0.5 h-6 w-px bg-border" />}
-                </div>
-                <div className="flex min-w-0 flex-1 items-baseline justify-between gap-3 pb-1">
-                  <div className="min-w-0">
-                    <div className="text-xs font-medium">{s.name}</div>
-                    <div className="num truncate text-[11px] text-muted-foreground">{s.detail}</div>
-                  </div>
-                  <span className="num text-[11px] text-muted-foreground">{s.ms}</span>
-                </div>
-              </li>
-            ))}
-          </ol>
+        <Panel title="Lifecycle" className="xl:col-span-2">
+          <div className="space-y-px">
+            <KV k="Draft" v="editor state serialized" />
+            <KV k="Validated / Compiled" v="gateway compile succeeds → deterministic plan hash" />
+            <KV k="Active" v="published to the data plane (atomic snapshot swap)" />
+          </div>
+          <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+            The backend exposes one compile path for /validate and /compile; the version list below is
+            backend truth. Detailed per-stage compilation timings are not retained by the backend.
+          </p>
         </Panel>
 
         <div className="grid content-start gap-3">
           <Panel title="Plan artifact">
             <KV k="Plan hash" v={active?.plan_hash ?? "—"} />
-            <KV k="Snapshot version" v={String(active?.version ?? "—")} />
+            <KV k="Status" v={active?.status ?? "—"} />
             <KV k="Workflow" v={workflowId} />
           </Panel>
           <Panel title="Validation">
-            <ul className="space-y-2">
-              {validationIssues.map((v) => (
-                <li key={v.code} className="flex gap-2">
-                  <AlertTriangle className={cn("mt-px size-3.5 shrink-0", v.level === "error" ? "text-fail" : "text-warn")} />
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-medium">{v.title}</span>
-                      <span className="num text-[10px] text-muted-foreground">{v.code}</span>
-                    </div>
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">{v.detail}</p>
-                    <span className="num text-[10px] text-muted-foreground">on {v.node}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
+            {active ? (
+              <div className="flex items-center gap-2 text-xs text-ok">
+                <AlertTriangle className="size-3.5" />
+                {active.plan_hash ? `Active version is compiled (plan ${shortHash(active.plan_hash)}).` : "Active version is published."}
+              </div>
+            ) : (
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                No active version yet. When a version is compiled, its real plan hash is recorded here;
+                per-issue validation details are not retained by the backend.
+              </p>
+            )}
           </Panel>
         </div>
 
         <Panel title="Version history" className="xl:col-span-3" dense>
           {isPending ? (
             <div className="p-4 text-xs text-muted-foreground">loading versions…</div>
+          ) : isError ? (
+            <div className="p-4 text-xs text-fail">control plane unreachable — {String(error)}</div>
           ) : liveVersions && liveVersions.length > 0 ? (
             <TableShell head={["Version", "Status", "Plan", "When", ""]}>
               {liveVersions.map((v) => (

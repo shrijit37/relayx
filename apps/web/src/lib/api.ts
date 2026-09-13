@@ -33,7 +33,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** The control-plane API shapes (mirror of the Fastify routes). */
-type WorkflowRow = {
+export type WorkflowRow = {
   id: string;
   name: string;
   status: string;
@@ -41,7 +41,7 @@ type WorkflowRow = {
   created_at: string;
 };
 
-type VersionRow = {
+export type VersionRow = {
   id: string;
   workflow_id: string;
   version: number;
@@ -120,10 +120,56 @@ export async function fetchWorkflows(): Promise<
 }
 
 /** Load lane records so the editor can show real lane URLs/config. */
-export async function fetchLanes(projectId = "proj_default"): Promise<
-  Array<{ id: string; base_url: string; egress: string; credential_ref: { ref: string } | null }>
-> {
+export type LaneRow = {
+  id: string;
+  project_id: string;
+  provider_id: string | null;
+  endpoint: string;
+  base_url: string;
+  egress: string;
+  policies: string[];
+  credential_ref: { ref: string; provider: string } | null;
+  created_at: string;
+};
+
+export async function fetchLanes(projectId = "proj_default"): Promise<LaneRow[]> {
   return req(`/lanes?project_id=${projectId}`);
+}
+
+/** Create a lane via the control plane (real persisted row). */
+export async function createLane(input: {
+  id?: string;
+  name: string;
+  project_id: string;
+  endpoint: string;
+  base_url: string;
+  egress?: string;
+  policies?: string[];
+}): Promise<LaneRow> {
+  return req(`/lanes`, { method: "POST", body: JSON.stringify(input) });
+}
+
+/** Fetch the latest version row for a workflow (sorted descending). */
+export async function fetchWorkflowLatestVersion(workflowId: string): Promise<VersionRow | null> {
+  const rows = await req<VersionRow[]>(`/workflows/${workflowId}/versions`);
+  if (!rows.length) return null;
+  return rows.reduce((a, b) => (a.version > b.version ? a : b));
+}
+
+/** Persist the editor state as a new immutable version (public). */
+export async function saveWorkflowVersion(workflowId: string, workflow: WorkflowJson): Promise<VersionRow> {
+  return req<VersionRow>(`/workflows/${workflowId}/versions`, {
+    method: "POST",
+    body: JSON.stringify({ workflow_json: workflow }),
+  });
+}
+
+/** Create a new workflow row in the control plane. */
+export async function createWorkflow(name: string, projectId = "proj_default"): Promise<WorkflowRow> {
+  return req<WorkflowRow>("/workflows", {
+    method: "POST",
+    body: JSON.stringify({ name, project_id: projectId }),
+  });
 }
 
 /** Validate + compile without publishing; returns the real plan hash. */
@@ -135,6 +181,73 @@ export async function validateWorkflow(
     method: "POST",
     body: JSON.stringify({ workflow_json: workflow }),
   });
+}
+
+/** The real run envelope returned by the control plane after the gateway
+ *  executes the workflow's ACTIVE (published) version. Every field is
+ *  backend-truth: request_id, the executed workflow_version/snapshot, the
+ *  plan hash of the executed plan, and the actual execution output. */
+export type RunResult = {
+  status: "ok";
+  request_id: string;
+  workflow_id: string;
+  workflow_version: number;
+  snapshot_version: number;
+  plan_hash: string;
+  output: unknown;
+};
+
+/** Execute the published ACTIVE version of a workflow through the real
+ *  control-plane → gateway run path. The control plane 409s when the
+ *  workflow has no ACTIVE version (must be published first). */
+export async function runWorkflow(
+  workflowId: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<RunResult> {
+  const init: RequestInit = {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  };
+  if (signal !== undefined) init.signal = signal;
+  return req<RunResult>(`/workflows/${workflowId}/run`, init);
+}
+
+/** Real control-plane + gateway health probe (both /healthz and /ready). */
+export type SystemHealth = {
+  control_plane: { status: string; service?: string };
+  gateway: {
+    healthz: { status: string; detail?: string };
+    ready: { status: string; detail?: string };
+  };
+};
+
+export async function fetchSystemHealth(): Promise<SystemHealth> {
+  return req<SystemHealth>("/system/health");
+}
+
+/** Real provider rows from the control plane (persisted config only). */
+export type ProviderRow = {
+  id: string;
+  name: string;
+  protocol: string;
+  base_url: string;
+  model: string;
+  created_at: string;
+};
+
+export async function fetchProviders(): Promise<ProviderRow[]> {
+  return req(`/providers`);
+}
+
+/** Create a provider via the control plane (real persisted row). */
+export async function createProvider(input: {
+  name: string;
+  protocol: string;
+  base_url: string;
+  model: string;
+}): Promise<ProviderRow> {
+  return req(`/providers`, { method: "POST", body: JSON.stringify(input) });
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────
@@ -159,10 +272,7 @@ async function ensureWorkflow(workflow: WorkflowJson): Promise<WorkflowRow> {
   return created;
 }
 
-/** Persist the exact editor state as a new immutable version. */
+/** Persist the exact editor state as a new immutable version (publish convenience). */
 async function createImmutableVersion(workflowId: string, workflow: WorkflowJson): Promise<void> {
-  await req<VersionRow>(`/workflows/${workflowId}/versions`, {
-    method: "POST",
-    body: JSON.stringify({ workflow_json: workflow }),
-  });
+  await saveWorkflowVersion(workflowId, workflow);
 }

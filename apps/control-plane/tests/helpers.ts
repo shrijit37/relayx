@@ -37,6 +37,7 @@ export async function mockGateway(opts: {
   mustValidate: boolean;
   failPublishWith?: string;
   failValidateWith?: string;
+  failRunWith?: string;
 }) {
   const app = Fastify();
 
@@ -65,6 +66,19 @@ export async function mockGateway(opts: {
         plan_hash: `sha256:${JSON.stringify(w.workflow).length}`,
         version: 1,
       })),
+    };
+  });
+
+  app.post("/run", async (req, reply) => {
+    if (opts.failRunWith) return reply.code(400).send({ status: "error", error: opts.failRunWith });
+    const body = req.body as { workflow_id?: string; body?: unknown };
+    return {
+      status: "ok",
+      request_id: "req_run_1",
+      workflow_id: body.workflow_id,
+      snapshot_version: 7,
+      plan_hash: "sha256:mock-run-plan",
+      output: { ok: true, echoed: body.body },
     };
   });
 

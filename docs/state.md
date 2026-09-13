@@ -2,7 +2,9 @@
 
 ## Status
 
-**Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 3 (lanes/routing) PARTIAL (lanes exist, no health/WireGuard). Phase 4 (workflow compiler) COMPLETE. Phase 5 (runtime publication & frontend wiring) COMPLETE. Phase 6 (control plane & durable configuration) COMPLETE.**
+**Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 3 (lanes/routing) PARTIAL (lanes exist, no health/WireGuard). Phase 4 (workflow compiler) COMPLETE. Phase 5 (runtime publication & frontend wiring) COMPLETE. Phase 6 (control plane & durable configuration) COMPLETE. Phase 6.5 (reality audit) COMPLETE — see [phase-6.5-reality-audit.md](../docs/phase-6.5-reality-audit.md) for the evidence-based reality baseline. Phase 6.5 implementation COMPLETE — see [PHASE6.5_IMPLEMENTATION_REPORT.md](../PHASE6.5_IMPLEMENTATION_REPORT.md).**
+
+> **Reality-check summary (Phase 6.5 complete):** The frontend is no longer a mock. The workflow editor loads persisted workflows from the backend, Save/Validate/Publish are real control-plane operations, and the Run path executes the published ACTIVE version through the real gateway (control-plane `/run` → gateway admin `/run` → workflow runtime → provider, with the real envelope shown in the UI). All fabricated data (`relay-data.ts`, inline fixtures, `Math.sin` time series) is gone: every page either fetches real backend rows or displays an honest "not available yet" state. Run history, telemetry, MCP/Skills/policies/secrets remain UNAVAILABLE (no backend) and are presented as such — never fabricated.
 
 ### Phase 6 — Control plane & durable configuration (COMPLETE)
 
@@ -12,10 +14,10 @@ See [`PHASE6_REPORT.md`](../PHASE6_REPORT.md) for the full completion report. Hi
 - **Atomic publish pipeline** — the control plane builds a `WireSnapshot` (lanes as `WireLane` with resolved authorization), `POST`s to gateway `/validate` (compile-only, deterministic plan hash recorded), then `/publish` (atomic snapshot + lane-pool swap). A failed publish leaves the previous runtime active.
 - **Credential references** — lanes store `credential_ref` (env/vault), resolved to an `Authorization` header at publish time; raw secrets never appear in workflow JSON, API responses, logs, or metrics.
 - **Workflow lifecycle** — `draft → validated → compiled → published → active`; versions immutable; rollback republishes a previous validated version.
-- **Frontend wired to real backend** — versions page + workflows index fetch from the control plane; publish returns backend-authoritative version/plan-hash.
+- **Frontend wired to real backend** — versions page + workflows index fetch from the control plane; publish returns backend-authoritative version/plan-hash. **Phase 6.5 closes the mock gap:** the editor loads persisted versions into the canvas, Save/Validate are wired end-to-end, and a real Run contract (control-plane → gateway → provider) executes the published ACTIVE version with the real envelope shown in the UI. Management pages show real persisted rows or honest unavailable states; `relay-data.ts` is deleted.
 - **Gateway restart preservation** — the control plane rehydrates the last ACTIVE version of every workflow on boot.
 
-**Test count (Phase 6): Rust 269 passing, zero failures.** Baseline 267 → +2 (control-plane e2e). **Control plane: 9 integration tests** against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 5 serializer tests, production build clean.**
+**Test count (Phase 6): Rust 270 passing, zero failures.** Baseline 267 → +3 (control-plane e2e, gateway `/run`). **Control plane: 12 integration tests** against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 19 serializer+run-state tests, production build clean.**
 
 ### Phase 5 — Runtime publication & frontend wiring (COMPLETE)
 
@@ -108,12 +110,26 @@ Execution engine (52 tests: unit + integration + extension-proof + context capab
 
 React 19 + TanStack Start + TanStack Router + React Flow + Vite (scaffolded via Lovable.dev).
 
-- 15 pages across 16 route files (Workflows, Providers, Lanes, MCP, Skills, Policies, Secrets, Runs, Observability, Health, Settings, Versions)
-- Workflow editor: React Flow canvas with 16 node kind variants, drag-and-drop, edge connections, Inspector panel, execution simulation
-- **Workflow serialization** — `workflow-serializer.ts` maps React Flow state → canonical Workflow JSON (lane folding, condition validation, reject-on-invalid)
-- **API boundary** — `api.ts` (publish, local validate) + `usePublishWorkflow` (React Query) wiring the editor's Publish button to the gateway admin `/publish`
-- Non-workflow pages (providers/lanes/mcp/skills/policies/…) still render mock data + **0 `fetch()` calls** — control-plane CRUD is Phase 6
-- **5 tests** (`bun test` on the serializer), TS clean, production build clean
+**Pages (15 user-facing routes) — backend-driven or honest unavailable (Phase 6.5):**
+- **Fully real:** `/workflows` (list from control plane) ✅
+- **Real:** `/workflows/$workflowId` (load latest version → canvas, Save/Validate/Publish/Run all real) ✅
+- **Real:** `/workflows/$workflowId/versions` (version list + plan hash from control plane) ✅
+- **Real (persisted rows):** `/providers`, `/lanes`, `/health` (via control-plane `/system/health` probe) ✅
+- **Backend-driven overview:** `/` (workflows/lanes/providers counts + real health; KPIs honestly unavailable) ✅
+- **Honest unavailable (no backend yet):** `/runs`, `/runs/$runId`, `/observability`, `/mcp`, `/skills`, `/policies`, `/secrets` ✅ (no fabricated data)
+
+**Workflow editor:**
+- Full React Flow canvas with 16 node kind variants, drag-and-drop, edge connections, Inspector panel
+- **Workflow serialization + deserialization** — `workflow-serializer.ts` maps React Flow ↔ canonical Workflow JSON (lane folding, condition validation, reject-on-invalid, unknown-kind skip-with-warning)
+- **API boundary** — `api.ts` (publish, validate, save, run, fetch, system-health) + React Query hooks wiring the editor to the control plane
+- **Load** — `deserializeWorkflow(latest.workflow_json)` reconstructs the canvas from the backend's latest version
+- **Save** — creates an immutable version (`POST /workflows/:id/versions`); in `new` mode it creates the workflow row first, then navigates to the durable id
+- **Validate** — real `POST /workflows/:id/validate` → real plan hash / real rejection
+- **Run** — real control-plane `POST /workflows/:id/run` → gateway admin `/run` → workflow runtime → provider; the UI shows the real execution envelope (request id, snapshot version, plan hash, output) and surfaces real errors (409 unpublished, 404 unknown, provider 5xx). Abort cancels the real request.
+
+**No fabricated data:** `relay-data.ts` is deleted; `graph.ts` holds only a 2-node empty starter; inline page fixtures (secrets/health/lanes/policies/settings) are gone; `Math.sin` time series are gone.
+
+**Tests:** serializer + run-state reducer tests (`bun test`, `apps/web`), control-plane run integration tests, gateway `/run` integration test. TS clean, production build clean.
 
 ## Current decisions
 
