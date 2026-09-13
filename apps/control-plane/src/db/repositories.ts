@@ -76,6 +76,11 @@ export type WorkflowActiveRow = {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/** Update SQL uses only these columns, regardless of what a caller passes.
+ *  Unknown fields are silently ignored rather than interpolated into SQL. */
+const ALLOWED_PROVIDER_UPDATE_FIELDS = new Set(["name", "protocol", "base_url", "model"]);
+const ALLOWED_LANE_UPDATE_FIELDS = new Set(["provider_id", "endpoint", "base_url", "egress", "policies", "credential_ref"]);
+
 const newId = (): string => crypto.randomUUID();
 
 // ── Workflows ──────────────────────────────────────────────────────────
@@ -215,7 +220,8 @@ export const providers = {
     const fields: string[] = [];
     const values: unknown[] = [id];
     let idx = 2;
-    for (const [k, v] of Object.entries(data)) {
+    const allowed = ALLOWED_PROVIDER_UPDATE_FIELDS;
+    for (const [k, v] of Object.entries(data).filter(([k]) => allowed.has(k))) {
       if (v !== undefined) {
         fields.push(`${k} = $${idx}`);
         values.push(v);
@@ -272,7 +278,8 @@ export const lanes = {
     const fields: string[] = [];
     const values: unknown[] = [id];
     let idx = 2;
-    for (const [k, v] of Object.entries(data)) {
+    const allowed = ALLOWED_LANE_UPDATE_FIELDS;
+    for (const [k, v] of Object.entries(data).filter(([k]) => allowed.has(k))) {
       if (v !== undefined) {
         fields.push(`${k} = $${idx}`);
         values.push(v);

@@ -25,6 +25,8 @@ pub type GatewayClient =
 /// decoded as JSON and wrapped in a `RuntimeValue::Json`. The provided HTTP
 /// client is injected so LLM nodes can reach their upstream providers;
 /// `lane_clients` (when present) resolves a per-lane pool for each lane.
+// ponytail: 8 params is at the ceiling; group into a RequestSpec struct if another is added.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_workflow(
     snapshot: &Arc<RuntimeSnapshot>,
     plan: &ExecutionPlan,
@@ -33,6 +35,7 @@ pub async fn execute_workflow(
     request_id: &str,
     client: Arc<GatewayClient>,
     lane_clients: Option<Arc<dyn workflow_runtime::AsLaneClient>>,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<axum::response::Response<Body>, GatewayError> {
     // Decode request body.
     let input_json: serde_json::Value =
@@ -52,6 +55,7 @@ pub async fn execute_workflow(
     ctx.upstream_client = Some(client);
     ctx.lane_clients = lane_clients;
     ctx.snapshot = Some(snapshot.clone());
+    ctx.deadline = deadline; // NEW: propagate execution deadline
     ctx.metadata = workflow_runtime::ExecutionMetadata::from_snapshot(snapshot, workflow_id);
     ctx.reporter = Arc::new(GatewayMilestones);
 

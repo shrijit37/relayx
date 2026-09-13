@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::response::IntoResponse;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -215,7 +216,11 @@ pub fn increment_lane_selected(lane_id: &str) {
 }
 
 /// Build an axum router for the admin listener (health + metrics).
-pub fn admin_router(handle: PrometheusHandle) -> axum::Router {
+///
+/// Accepts `api_key` for signature consistency with
+/// [`admin_router_with_publication`]; this router exposes no mutating
+/// endpoints, so the key is not enforced here.
+pub fn admin_router(handle: PrometheusHandle, _api_key: Option<String>) -> axum::Router {
     use axum::routing::get;
 
     axum::Router::new()
@@ -361,12 +366,24 @@ impl PublicationState {
 /// `publication` is the shared publication state — the admin handler
 /// publishes directly into it, and data-plane workers read from the same
 /// `Arc`. Pure-proxy deployments pass `None`.
+///
+/// When `api_key` is `Some`, mutating endpoints (`/publish`, `/validate`,
+/// `/run`) require `Authorization: Bearer <key>`. Read-only endpoints
+/// (`/healthz`, `/ready`, `/metrics`) are always unauthenticated.
 pub fn admin_router_with_publication(
     handle: PrometheusHandle,
     publication: Option<Arc<PublicationState>>,
+    api_key: Option<String>,
 ) -> axum::Router {
     use axum::extract::State;
     use axum::routing::{get, post};
+
+    /// Combined admin state: publication seam + auth key.
+    #[derive(Clone)]
+    struct AdminState {
+        publication: Option<Arc<PublicationState>>,
+        api_key: Option<String>,
+    }
 
     /// Shared envelope builder for both /publish and /validate: renders the
     /// real versioned plan identity (workflow_id / plan_hash / snapshot
@@ -392,44 +409,90 @@ pub fn admin_router_with_publication(
         }))
     }
 
+    /// Validate `Authorization: Bearer <key>` against the configured key.
+    /// Returns `Err(StatusCode)` on failure; `Ok(())` if valid or unconfigured.
+    fn check_auth(
+        headers: &http::HeaderMap,
+        expected: &Option<String>,
+    ) -> Result<(), http::StatusCode> {
+        if let Some(expected) = expected {
+            let provided = headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "));
+            if provided != Some(expected.as_str()) {
+                return Err(http::StatusCode::UNAUTHORIZED);
+            }
+        }
+        Ok(())
+    }
+
     async fn publish(
-        State(publication): State<Option<Arc<PublicationState>>>,
+        State(state): State<AdminState>,
+        headers: http::HeaderMap,
         axum::Json(wire): axum::Json<WireSnapshot>,
-    ) -> axum::Json<serde_json::Value> {
-        let Some(publication) = publication else {
+    ) -> impl axum::response::IntoResponse {
+        if let Err(status) = check_auth(&headers, &state.api_key) {
+            return (
+                status,
+                axum::Json(serde_json::json!({
+                    "status": "error",
+                    "error": "invalid or missing API key"
+                })),
+            )
+                .into_response();
+        }
+
+        let Some(publication) = state.publication else {
             return axum::Json(serde_json::json!({
                 "status": "error",
                 "error": "workflow execution not configured"
-            }));
+            }))
+            .into_response();
         };
 
         match publication.publish_workflows(wire) {
-            Ok(snapshot) => plan_response("published", &snapshot),
+            Ok(snapshot) => plan_response("published", &snapshot).into_response(),
             Err(e) => axum::Json(serde_json::json!({
                 "status": "error",
                 "error": e
-            })),
+            }))
+            .into_response(),
         }
     }
 
     async fn validate(
-        State(publication): State<Option<Arc<PublicationState>>>,
+        State(state): State<AdminState>,
+        headers: http::HeaderMap,
         axum::Json(wire): axum::Json<WireSnapshot>,
-    ) -> axum::Json<serde_json::Value> {
-        let Some(publication) = publication else {
+    ) -> impl axum::response::IntoResponse {
+        if let Err(status) = check_auth(&headers, &state.api_key) {
+            return (
+                status,
+                axum::Json(serde_json::json!({
+                    "status": "error",
+                    "error": "invalid or missing API key"
+                })),
+            )
+                .into_response();
+        }
+
+        let Some(publication) = state.publication else {
             return axum::Json(serde_json::json!({
                 "status": "error",
                 "error": "workflow execution not configured"
-            }));
+            }))
+            .into_response();
         };
 
         // Compile-only: the active runtime is never mutated.
         match publication.validate_workflows(&wire) {
-            Ok(snapshot) => plan_response("validated", &snapshot),
+            Ok(snapshot) => plan_response("validated", &snapshot).into_response(),
             Err(e) => axum::Json(serde_json::json!({
                 "status": "error",
                 "error": e
-            })),
+            }))
+            .into_response(),
         }
     }
 
@@ -450,10 +513,18 @@ pub fn admin_router_with_publication(
     /// runtime failure (provider error, timeout, invalid plan) maps through
     /// the gateway's typed error → HTTP mapping to real 4xx/5xx.
     async fn run(
-        State(publication): State<Option<Arc<PublicationState>>>,
+        State(state): State<AdminState>,
+        headers: http::HeaderMap,
         axum::Json(req): axum::Json<RunRequest>,
     ) -> Result<axum::Json<serde_json::Value>, crate::errors::GatewayError> {
-        let Some(publication) = publication else {
+        if check_auth(&headers, &state.api_key).is_err() {
+            return Err(crate::errors::GatewayError::InvalidRequest {
+                status: http::StatusCode::UNAUTHORIZED,
+                message: "invalid or missing API key".into(),
+            });
+        }
+
+        let Some(publication) = state.publication else {
             return Err(crate::errors::GatewayError::Internal(
                 "workflow execution not configured".into(),
             ));
@@ -494,6 +565,10 @@ pub fn admin_router_with_publication(
                 .build(hyper_util::client::legacy::connect::HttpConnector::new()),
         );
 
+        // 120s hard deadline for admin-triggered runs — prevents orphaned
+        // workflow executions from running indefinitely.
+        let deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(120));
+
         let response = crate::execution::execute_workflow(
             &snapshot,
             plan,
@@ -502,6 +577,7 @@ pub fn admin_router_with_publication(
             &request_id,
             client,
             None,
+            deadline,
         )
         .await?;
 
@@ -560,5 +636,8 @@ pub fn admin_router_with_publication(
         .route("/publish", post(publish))
         .route("/run", post(run))
         .layer(axum::Extension(handle))
-        .with_state(publication)
+        .with_state(AdminState {
+            publication,
+            api_key,
+        })
 }

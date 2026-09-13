@@ -135,6 +135,14 @@ pub struct RouterConfig {
     /// Routing strategy.
     #[serde(default)]
     pub strategy: RouterStrategy,
+    /// Number of output ports, derived from the graph at compile time.
+    /// Round-robin cycles through these; must be ≥ 1.
+    #[serde(default = "default_output_ports")]
+    pub output_ports: usize,
+}
+
+fn default_output_ports() -> usize {
+    2
 }
 
 /// How a Router node selects its downstream path.

@@ -495,19 +495,148 @@ workflow_id = "echo-wf"
     assert_eq!(run["output"]["hello"], "world");
 
     // Run an unknown/unpublished workflow → real 404.
-    let (status, _body) = match post_hyper(
-        &url,
-        r#"{"workflow_id":"missing","body":{}}"#,
-        &[],
-    )
-    .await
-    {
-        Ok(t) => t,
-        Err(e) => panic!("admin run 404 post failed: {e}"),
-    };
+    let (status, _body) =
+        match post_hyper(&url, r#"{"workflow_id":"missing","body":{}}"#, &[]).await {
+            Ok(t) => t,
+            Err(e) => panic!("admin run 404 post failed: {e}"),
+        };
     assert_eq!(
         status,
         http::StatusCode::NOT_FOUND,
         "unknown workflow is a real 404"
     );
+}
+
+/// Boot a gateway server with `admin_api_key` set and the echo workflow
+/// published, waiting for the admin listener.
+async fn gateway_with_admin_api_key() -> (String, String) {
+    let proxy_port = free_port();
+    let admin_port = free_port();
+
+    let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
+        r#"
+snapshot_version = 1
+
+[server]
+listen = "127.0.0.1:{proxy_port}"
+admin_listen = "127.0.0.1:{admin_port}"
+admin_api_key = "test-admin-key"
+total_timeout_ms = 5000
+graceful_shutdown_ms = 500
+
+[[routes]]
+id = "workflow-route"
+path_prefix = "/v1/workflow"
+methods = ["POST"]
+workflow_id = "echo-wf"
+"#
+    ))
+    .expect("valid workflow config");
+
+    let publication = Arc::new(PublicationState::new(
+        Arc::new(InMemoryPublisher::new()),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+    ));
+    publication.publish(snapshot_at(3));
+
+    let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
+        Ok(s) => s,
+        Err(e) => panic!("server build failed: {e}"),
+    };
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let up = tokio::net::TcpStream::connect(("127.0.0.1", admin_port))
+            .await
+            .is_ok();
+        if up {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("gateway admin did not become ready");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    (
+        format!("http://127.0.0.1:{admin_port}/run"),
+        format!("http://127.0.0.1:{admin_port}/publish"),
+    )
+}
+
+#[tokio::test]
+async fn mutating_admin_endpoints_require_api_key() {
+    let (run_url, publish_url) = gateway_with_admin_api_key().await;
+    let wire = serde_json::json!({
+        "snapshot_version": 4,
+        "workflows": [{
+            "id": "echo-wf",
+            "workflow": passthrough_workflow(),
+            "lanes": {}
+        }]
+    })
+    .to_string();
+
+    // No key → 401 on /publish.
+    let (status, _) = match post_hyper(&publish_url, &wire, &[]).await {
+        Ok(t) => t,
+        Err(e) => panic!("publish without key failed: {e}"),
+    };
+    assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+
+    // Wrong key → 401 on /publish.
+    let (status, _) =
+        match post_hyper(&publish_url, &wire, &[("authorization", "Bearer wrong")]).await {
+            Ok(t) => t,
+            Err(e) => panic!("publish with wrong key failed: {e}"),
+        };
+    assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+
+    // Correct key → 200.
+    let (status, body) = match post_hyper(
+        &publish_url,
+        &wire,
+        &[("authorization", "Bearer test-admin-key")],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("publish with key failed: {e}"),
+    };
+    assert_eq!(status, http::StatusCode::OK, "publish accepted with key");
+    let resp: serde_json::Value = serde_json::from_slice(&body).expect("publish response JSON");
+    assert_eq!(resp["status"], "published");
+
+    // /run without a key → 401.
+    let (status, _) = match post_hyper(
+        &run_url,
+        r#"{"workflow_id":"echo-wf","body":{"hello":"auth"}}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("run without key failed: {e}"),
+    };
+    assert_eq!(status, http::StatusCode::UNAUTHORIZED);
+
+    // /run with the correct key → 200 (workflow actually executes).
+    let (status, body) = match post_hyper(
+        &run_url,
+        r#"{"workflow_id":"echo-wf","body":{"hello":"auth"}}"#,
+        &[("authorization", "Bearer test-admin-key")],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("run with key failed: {e}"),
+    };
+    assert_eq!(status, http::StatusCode::OK, "run accepted with key");
+    let run: serde_json::Value = serde_json::from_slice(&body).expect("run response JSON");
+    assert_eq!(run["status"], "ok");
+    assert_eq!(run["output"]["hello"], "auth");
 }

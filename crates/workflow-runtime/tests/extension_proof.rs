@@ -148,45 +148,6 @@ fn custom_node_workflow() -> workflow_schema::Workflow {
     }
 }
 
-// ─── Extension proof: provider ─────────────────────────────────────────────
-
-/// A foreign provider record. Declared with its capabilities, protocol,
-/// endpoint, model, and lane. Adding it never touches the core.
-fn register_foreign_provider() -> workflow_runtime::ProviderRegistry {
-    let base_url = match Url::parse("https://ai.example.com") {
-        Ok(u) => u,
-        Err(e) => panic!("bad test url: {e}"),
-    };
-    let mut registry = workflow_runtime::ProviderRegistry::new();
-    registry.register(workflow_runtime::ProviderEntry {
-        id: "example-llm".into(),
-        protocol: protocol_core::canonical::Protocol::OpenAiChatCompletions,
-        base_url,
-        model: "example-1".into(),
-        capabilities: Capabilities {
-            streaming: true,
-            tools: true,
-            structured_output: true,
-            ..Default::default()
-        },
-        lane_id: "example-lane".into(),
-    });
-    registry
-}
-
-#[test]
-fn foreign_provider_registers_and_resolves() {
-    let registry = register_foreign_provider();
-    let provider = match registry.get("example-llm") {
-        Some(p) => p,
-        None => panic!("provider missing"),
-    };
-    assert_eq!(provider.id, "example-llm");
-    assert_eq!(provider.model, "example-1");
-    assert!(provider.capabilities.streaming);
-    assert!(provider.capabilities.structured_output);
-}
-
 // ─── Foreign registry feeds the LaneRegistry used by the compiler ──────────
 
 #[test]

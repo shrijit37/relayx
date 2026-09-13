@@ -214,6 +214,7 @@ async fn passthrough_proxy_request(
         .ok_or_else(|| GatewayError::Internal(format!("unknown lane: {lane_id}")))?;
 
     let upstream_req = build_upstream_request(&lane.base_url, req, &path)?;
+    let frame_timeout = lane.frame_timeout;
 
     forward_upstream(
         state,
@@ -223,6 +224,7 @@ async fn passthrough_proxy_request(
         request_id,
         start,
         None,
+        frame_timeout,
     )
     .await
 }
@@ -323,10 +325,8 @@ async fn translate_proxy_request(
 
     // ── Translate response ───────────────────────────────────────────────────
     if is_stream {
-        let response_body = engine.stream_response(
-            Body::new(upstream_response.into_body()),
-            state.frame_timeout,
-        )?;
+        let response_body =
+            engine.stream_response(Body::new(upstream_response.into_body()), lane.frame_timeout)?;
 
         axum::response::Response::builder()
             .status(status)
@@ -355,6 +355,8 @@ async fn translate_proxy_request(
 
 /// Forward an upstream request and stream the response back.
 /// When `override_body` is Some, that body replaces the upstream response.
+// ponytail: 8 params; group into a ForwardSpec struct if another is added.
+#[allow(clippy::too_many_arguments)]
 async fn forward_upstream(
     state: Arc<AppState>,
     upstream_req: HttpRequest<Body>,
@@ -363,6 +365,7 @@ async fn forward_upstream(
     request_id: &str,
     start: Instant,
     override_body: Option<Body>,
+    frame_timeout: Duration,
 ) -> Result<axum::response::Response<Body>, GatewayError> {
     let connect_start = Instant::now();
     let upstream_response = state.client.request(upstream_req).await.map_err(|e| {
@@ -403,7 +406,7 @@ async fn forward_upstream(
             );
             std::io::Error::other(e.to_string())
         });
-        Body::from_stream(FrameTimeoutStream::new(mapped_body, state.frame_timeout))
+        Body::from_stream(FrameTimeoutStream::new(mapped_body, frame_timeout))
     };
 
     axum::response::Response::builder()
@@ -491,6 +494,10 @@ async fn workflow_route_request(
         })?
         .to_bytes();
 
+    // The outer `proxy_handler` wraps this in `tokio::time::timeout(state.timeout, ...)`;
+    // mirror that deadline into the context so workflow-level deadline checks fire.
+    let deadline = Some(tokio::time::Instant::now() + state.timeout);
+
     crate::execution::execute_workflow(
         &snapshot,
         plan,
@@ -499,6 +506,7 @@ async fn workflow_route_request(
         request_id,
         state.client.clone(),
         Some(state.clone()),
+        deadline,
     )
     .await
 }

@@ -19,6 +19,7 @@ import { buildCoherentWire, listActiveWorkflows, nextSnapshotVersion } from "./d
 
 const PORT = Number(Bun.env["RELAYX_CONTROL_PORT"] ?? 9091);
 const GATEWAY_ADMIN = Bun.env["RELAYX_GATEWAY_ADMIN_URL"] ?? "http://127.0.0.1:9090";
+const GATEWAY_API_KEY = Bun.env["RELAYX_GATEWAY_API_KEY"];
 
 const pool = createPool(dbConfigFromEnv());
 
@@ -32,7 +33,7 @@ await pool.query(
   "INSERT INTO projects (id, name) VALUES ('proj_default','default') ON CONFLICT (id) DO NOTHING",
 );
 
-const gateway = new GatewayClient(GATEWAY_ADMIN);
+const gateway = new GatewayClient(GATEWAY_ADMIN, GATEWAY_API_KEY);
 const app = await buildApp({ pool, gateway });
 
 // Re-hydrate the data plane from the last ACTIVE version of every workflow.

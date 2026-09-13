@@ -27,15 +27,29 @@ fn evaluate_condition(config: &ConditionConfig, value: &RuntimeValue) -> bool {
         (None, workflow_schema::ConditionOp::IsEmpty) => true,
         (None, _) => false,
         (Some(rv), op) => match op {
-            workflow_schema::ConditionOp::Equal => rv.to_json() == config.value,
-            workflow_schema::ConditionOp::NotEqual => rv.to_json() != config.value,
+            workflow_schema::ConditionOp::Equal => match (rv, &config.value) {
+                (RuntimeValue::Integer(a), serde_json::Value::Number(n)) => n.as_i64() == Some(*a),
+                (RuntimeValue::Number(a), serde_json::Value::Number(n)) => n.as_f64() == Some(*a),
+                _ => rv.to_json() == config.value,
+            },
+            workflow_schema::ConditionOp::NotEqual => match (rv, &config.value) {
+                (RuntimeValue::Integer(a), serde_json::Value::Number(n)) => n.as_i64() != Some(*a),
+                (RuntimeValue::Number(a), serde_json::Value::Number(n)) => n.as_f64() != Some(*a),
+                _ => rv.to_json() != config.value,
+            },
             workflow_schema::ConditionOp::GreaterThan => {
-                let a = rv.to_json().as_f64().unwrap_or(0.0);
+                let a = match rv {
+                    RuntimeValue::Integer(i) => *i as f64,
+                    _ => rv.to_json().as_f64().unwrap_or(0.0),
+                };
                 let b = config.value.as_f64().unwrap_or(0.0);
                 a > b
             }
             workflow_schema::ConditionOp::LessThan => {
-                let a = rv.to_json().as_f64().unwrap_or(0.0);
+                let a = match rv {
+                    RuntimeValue::Integer(i) => *i as f64,
+                    _ => rv.to_json().as_f64().unwrap_or(0.0),
+                };
                 let b = config.value.as_f64().unwrap_or(0.0);
                 a < b
             }

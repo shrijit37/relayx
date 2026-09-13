@@ -30,7 +30,7 @@ pub use execution::{
 };
 pub use milestone::{MilestoneReporter, NoopReporter};
 pub use nodes::{NodeExecutor, NodeInput, NodeKind, NodeOutput, NodeRegistry, RuntimeValue};
-pub use provider::{ProviderEntry, ProviderRegistry};
+pub use provider::ProviderEntry;
 pub use publish::{InMemoryPublisher, SnapshotPublisher, SnapshotReader};
 pub use runner::{build_snapshot, compile_workflow_with_lanes};
 pub use snapshot::{RuntimeSnapshot, RuntimeSnapshotBuilder};
