@@ -250,20 +250,12 @@ pub fn admin_router(handle: PrometheusHandle) -> axum::Router {
         .layer(axum::Extension(handle))
 }
 
-/// Wire format for a workflow publication: workflow JSON + the lanes it may
-/// reference (name → base URL). The gateway compiles the workflow here — on
-/// the publication/control-plane cadence, never on the request hot path.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct WireWorkflow {
-    /// Workflow id (route `workflow_id`).
-    pub id: String,
-    /// The workflow graph as schema `Workflow` JSON.
-    pub workflow: workflow_schema::Workflow,
-    /// Lane name → base URL the workflow references.
-    pub lanes: std::collections::HashMap<String, String>,
-}
-
 /// Snapshot publication payload from the control plane.
+///
+/// Lanes are keyed by name; the optional `authorization` value (resolved
+/// from a control-plane `credential_ref` at publish time) becomes the
+/// lane's static `Authorization` header at runtime. Never put raw
+/// credentials into workflow JSON — the wire snapshot is the seam.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WireSnapshot {
     /// Monotonic snapshot version.
@@ -272,22 +264,43 @@ pub struct WireSnapshot {
     pub workflows: Vec<WireWorkflow>,
 }
 
+/// A lane's runtime configuration within a `WireSnapshot`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WireLane {
+    /// Upstream base URL.
+    pub base_url: String,
+    /// Resolved `Authorization` header value, if the lane has credentials.
+    #[serde(default)]
+    pub authorization: Option<String>,
+}
+
+/// Modified `WireWorkflow`: `lanes` is now a map of lane name → `WireLane`
+/// so credentials can be carried out of band from the workflow JSON.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WireWorkflow {
+    /// Workflow id (route `workflow_id`).
+    pub id: String,
+    /// The workflow graph as schema `Workflow` JSON.
+    pub workflow: workflow_schema::Workflow,
+    /// Lane name → runtime lane config (base URL + optional auth header).
+    pub lanes: std::collections::HashMap<String, WireLane>,
+}
+
 impl PublicationState {
-    /// Compile + publish a set of workflows atomically.
+    /// Compile a set of workflows into a snapshot WITHOUT publishing it.
     ///
-    /// Returns per-workflow compile failures WITHOUT publishing anything
-    /// (atomicity: a bad plan never sees traffic). Lanes referenced by any
-    /// workflow are registered in the snapshot's lane registry (union across
-    /// workflows), so LLM/Fallback/Retry nodes resolve them at run time.
-    pub fn publish_workflows(&self, wire: WireSnapshot) -> Result<Arc<RuntimeSnapshot>, String> {
+    /// Shared by `validate_workflows` and `publish_workflows`. On any
+    /// per-workflow compile failure the whole set is rejected (the caller
+    /// publishes nothing), so a bad plan never reaches the data plane.
+    fn compile_snapshot(&self, wire: &WireSnapshot) -> Result<Arc<RuntimeSnapshot>, String> {
         let mut builder = workflow_runtime::RuntimeSnapshotBuilder::new(wire.snapshot_version);
 
-        // Union of lane name → base URL across every workflow in this publish.
+        // Union of lane name → runtime lane config across every workflow.
         let mut lane_registry = workflow_runtime::context::LaneRegistry::new();
         for wf in &wire.workflows {
-            for (name, url_str) in &wf.lanes {
+            for (name, lane_cfg) in &wf.lanes {
                 if lane_registry.get(name).is_none() {
-                    let base_url = url::Url::parse(url_str).map_err(|e| {
+                    let base_url = url::Url::parse(&lane_cfg.base_url).map_err(|e| {
                         format!(
                             "workflow '{}': lane '{name}' has invalid base_url: {e}",
                             wf.id
@@ -296,6 +309,7 @@ impl PublicationState {
                     lane_registry.register(workflow_runtime::context::LaneEntry {
                         id: name.clone(),
                         base_url,
+                        authorization: lane_cfg.authorization.clone(),
                     });
                 }
             }
@@ -307,7 +321,7 @@ impl PublicationState {
                 &wf.workflow,
                 &wf.lanes
                     .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .map(|(k, v)| (k.clone(), v.base_url.clone()))
                     .collect::<Vec<_>>(),
             )
             .map_err(|e| format!("workflow '{}' failed to compile: {e}", wf.id))?;
@@ -316,7 +330,27 @@ impl PublicationState {
                 .with_plan(wf.id.clone(), plan);
         }
 
-        let snapshot = Arc::new(builder.build());
+        Ok(Arc::new(builder.build()))
+    }
+
+    /// Validate + compile a set of workflows without publishing anything.
+    ///
+    /// The control plane calls this during the publish pipeline so a workflow
+    /// version records its deterministic plan hash *before* commit. The
+    /// gateway stays the only compiler; this endpoint never changes the
+    /// active runtime.
+    pub fn validate_workflows(&self, wire: &WireSnapshot) -> Result<Arc<RuntimeSnapshot>, String> {
+        self.compile_snapshot(wire)
+    }
+
+    /// Compile + publish a set of workflows atomically.
+    ///
+    /// Returns per-workflow compile failures WITHOUT publishing anything
+    /// (atomicity: a bad plan never sees traffic). Lanes referenced by any
+    /// workflow are registered in the snapshot's lane registry (union across
+    /// workflows), so LLM/Fallback/Retry nodes resolve them at run time.
+    pub fn publish_workflows(&self, wire: WireSnapshot) -> Result<Arc<RuntimeSnapshot>, String> {
+        let snapshot = self.compile_snapshot(&wire)?;
         self.publish(snapshot.clone());
         Ok(snapshot)
     }
@@ -334,6 +368,30 @@ pub fn admin_router_with_publication(
     use axum::extract::State;
     use axum::routing::{get, post};
 
+    /// Shared envelope builder for both /publish and /validate: renders the
+    /// real versioned plan identity (workflow_id / plan_hash / snapshot
+    /// version) so no handler re-implements the response shape (review).
+    fn plan_response(
+        status: &str,
+        snapshot: &Arc<RuntimeSnapshot>,
+    ) -> axum::Json<serde_json::Value> {
+        let plans: serde_json::Value = snapshot
+            .workflow_ids()
+            .map(|id| {
+                serde_json::json!({
+                    "workflow_id": id,
+                    "plan_hash": snapshot.plan_hash_for(id).unwrap_or_default(),
+                    "version": snapshot.version(),
+                })
+            })
+            .collect();
+        axum::Json(serde_json::json!({
+            "status": status,
+            "snapshot_version": snapshot.version(),
+            "workflows": plans,
+        }))
+    }
+
     async fn publish(
         State(publication): State<Option<Arc<PublicationState>>>,
         axum::Json(wire): axum::Json<WireSnapshot>,
@@ -346,30 +404,134 @@ pub fn admin_router_with_publication(
         };
 
         match publication.publish_workflows(wire) {
-            Ok(snapshot) => {
-                // Surface the real versioned plan identity so the client can
-                // cache server truth, not a fabricated value.
-                let plans: serde_json::Value = snapshot
-                    .workflow_ids()
-                    .map(|id| {
-                        serde_json::json!({
-                            "workflow_id": id,
-                            "plan_hash": snapshot.plan_hash_for(id).unwrap_or_default(),
-                            "version": snapshot.version(),
-                        })
-                    })
-                    .collect();
-                axum::Json(serde_json::json!({
-                    "status": "published",
-                    "snapshot_version": snapshot.version(),
-                    "workflows": plans,
-                }))
-            }
+            Ok(snapshot) => plan_response("published", &snapshot),
             Err(e) => axum::Json(serde_json::json!({
                 "status": "error",
                 "error": e
             })),
         }
+    }
+
+    async fn validate(
+        State(publication): State<Option<Arc<PublicationState>>>,
+        axum::Json(wire): axum::Json<WireSnapshot>,
+    ) -> axum::Json<serde_json::Value> {
+        let Some(publication) = publication else {
+            return axum::Json(serde_json::json!({
+                "status": "error",
+                "error": "workflow execution not configured"
+            }));
+        };
+
+        // Compile-only: the active runtime is never mutated.
+        match publication.validate_workflows(&wire) {
+            Ok(snapshot) => plan_response("validated", &snapshot),
+            Err(e) => axum::Json(serde_json::json!({
+                "status": "error",
+                "error": e
+            })),
+        }
+    }
+
+    /// Run payload from the control plane: the workflow id + the raw JSON
+    /// request body fed to the workflow's Input node.
+    #[derive(serde::Deserialize)]
+    struct RunRequest {
+        workflow_id: String,
+        body: serde_json::Value,
+    }
+
+    /// Execute a workflow from the CURRENT published snapshot (compile-time
+    /// validation, never a live draft). This is the frontend's Run contract:
+    /// it reuses `execute_workflow` — the same path the proxy's workflow
+    /// routes take — so results, per-lane pools, cancellation and typed
+    /// errors are identical to production traffic. A request for a workflow
+    /// that is not in the snapshot (unpublished or unknown) is a 404; a
+    /// runtime failure (provider error, timeout, invalid plan) maps through
+    /// the gateway's typed error → HTTP mapping to real 4xx/5xx.
+    async fn run(
+        State(publication): State<Option<Arc<PublicationState>>>,
+        axum::Json(req): axum::Json<RunRequest>,
+    ) -> Result<axum::Json<serde_json::Value>, crate::errors::GatewayError> {
+        let Some(publication) = publication else {
+            return Err(crate::errors::GatewayError::Internal(
+                "workflow execution not configured".into(),
+            ));
+        };
+        let snapshot = publication
+            .snapshot()
+            .ok_or_else(|| crate::errors::GatewayError::Internal("no published snapshot".into()))?;
+
+        let plan = snapshot.get_plan(&req.workflow_id).ok_or_else(|| {
+            crate::errors::GatewayError::InvalidRequest {
+                status: http::StatusCode::NOT_FOUND,
+                message: format!("no published workflow named '{}'", req.workflow_id),
+            }
+        })?;
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        // Encode the JSON body exactly as `workflow_route_request` does so the
+        // run path observes identical bytes.
+        let body_bytes: bytes::Bytes = match serde_json::to_vec(&req.body) {
+            Ok(b) => b.into(),
+            Err(e) => {
+                return Err(crate::errors::GatewayError::InvalidRequest {
+                    status: http::StatusCode::BAD_REQUEST,
+                    message: format!("invalid request body json: {e}"),
+                });
+            }
+        };
+
+        // ponytail: per-run Hyper client (human-paced UI runs). The shared
+        // proxy client lives on AppState and isn't reachable from the admin
+        // router's state type; thread it through if run throughput ever needs
+        // connection reuse.
+        let client = std::sync::Arc::new(
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_idle_timeout(std::time::Duration::from_secs(90))
+                .pool_max_idle_per_host(64)
+                .build(hyper_util::client::legacy::connect::HttpConnector::new()),
+        );
+
+        let response = crate::execution::execute_workflow(
+            &snapshot,
+            plan,
+            body_bytes,
+            &req.workflow_id,
+            &request_id,
+            client,
+            None,
+        )
+        .await?;
+
+        // Stream the full body (bounded workflow output — the LLM response
+        // has already been folded server-side) into the run envelope.
+        let body_bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .map_err(|e| {
+                crate::errors::GatewayError::Internal(format!(
+                    "failed to read workflow output: {e}"
+                ))
+            })?
+            .to_bytes();
+        let output: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(crate::errors::GatewayError::Internal(format!(
+                    "workflow returned non-JSON output: {e}"
+                )));
+            }
+        };
+
+        Ok(axum::Json(serde_json::json!({
+            "status": "ok",
+            "request_id": request_id,
+            "workflow_id": req.workflow_id,
+            "snapshot_version": snapshot.version(),
+            "plan_hash": snapshot.plan_hash_for(&req.workflow_id).unwrap_or_default(),
+            "output": output,
+        })))
     }
 
     axum::Router::new()
@@ -394,7 +556,9 @@ pub fn admin_router_with_publication(
                 },
             ),
         )
+        .route("/validate", post(validate))
         .route("/publish", post(publish))
+        .route("/run", post(run))
         .layer(axum::Extension(handle))
         .with_state(publication)
 }

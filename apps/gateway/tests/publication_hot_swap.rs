@@ -134,6 +134,7 @@ fn lanes_with(url: &str) -> Arc<LaneRegistry> {
             Ok(u) => u,
             Err(e) => panic!("invalid lane url: {e}"),
         },
+        authorization: None,
     });
     Arc::new(lanes)
 }
@@ -213,6 +214,116 @@ async fn publication_state_compiles_and_publishes_wire_snapshot() {
     };
     assert_eq!(snap.version(), 7);
     assert!(snap.get_plan("echo-wf").is_some());
+}
+
+#[tokio::test]
+async fn validate_compiles_but_does_not_publish() {
+    let publisher = Arc::new(InMemoryPublisher::new());
+    let publication = Arc::new(PublicationState::new(
+        publisher.clone(),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+    ));
+
+    // Seed a v1 runtime so there is something to verify "unchanged".
+    publication.publish(snapshot_at(1));
+
+    // Validate a v7 wire snapshot — compiles, does NOT touch the active runtime.
+    let validated = publication
+        .validate_workflows(&wire_snapshot(7))
+        .map_err(|e| panic!("validate failed: {e}"))
+        .expect("valid wire snapshot validates");
+    assert_eq!(validated.version(), 7);
+    // Plan hashes are deterministic and present even before publish.
+    assert!(
+        !validated
+            .plan_hash_for("echo-wf")
+            .unwrap_or_default()
+            .is_empty()
+    );
+
+    // The active runtime is still v1.
+    let active = match publication.snapshot() {
+        Some(s) => s,
+        None => panic!("v1 should still be active"),
+    };
+    assert_eq!(active.version(), 1, "validate must not publish");
+}
+
+#[tokio::test]
+async fn published_lanes_carry_resolved_authorization() {
+    let publisher = Arc::new(InMemoryPublisher::new());
+    let publication = Arc::new(PublicationState::new(
+        publisher.clone(),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+    ));
+
+    let wire = WireSnapshot {
+        snapshot_version: 1,
+        workflows: vec![WireWorkflow {
+            id: "echo-wf".into(),
+            workflow: passthrough_workflow(),
+            lanes: std::collections::HashMap::from([(
+                "lane-a".into(),
+                relay_gateway::observability::WireLane {
+                    base_url: "http://127.0.0.1:9001".into(),
+                    authorization: Some("Bearer sk-test-123".into()),
+                },
+            )]),
+        }],
+    };
+
+    publication
+        .publish_workflows(wire)
+        .map_err(|e| panic!("publish failed: {e}"))
+        .expect("publish with credential should succeed");
+
+    let snap = match publication.snapshot() {
+        Some(s) => s,
+        None => panic!("snapshot published"),
+    };
+    let lane = snap
+        .lanes()
+        .get("lane-a")
+        .ok_or("lane-a missing from snapshot")
+        .expect("lane registered");
+    assert_eq!(
+        lane.authorization.as_deref(),
+        Some("Bearer sk-test-123"),
+        "resolved credential carried on the lane entry"
+    );
+
+    // The default (test-only) path must NOT leak a credential by accident.
+    let plain = WireSnapshot {
+        snapshot_version: 2,
+        workflows: vec![WireWorkflow {
+            id: "echo-wf".into(),
+            workflow: passthrough_workflow(),
+            lanes: std::collections::HashMap::from([(
+                "lane-a".into(),
+                relay_gateway::observability::WireLane {
+                    base_url: "http://127.0.0.1:9001".into(),
+                    authorization: None,
+                },
+            )]),
+        }],
+    };
+    publication
+        .publish_workflows(plain)
+        .map_err(|e| panic!("publish failed: {e}"))
+        .expect("publish without credential");
+    let snap = match publication.snapshot() {
+        Some(s) => s,
+        None => panic!("snapshot published"),
+    };
+    assert_eq!(
+        snap.lanes()
+            .get("lane-a")
+            .and_then(|l| l.authorization.clone()),
+        None,
+        "no fallback credential is invented"
+    );
 }
 
 #[tokio::test]
@@ -303,5 +414,100 @@ workflow_id = "echo-wf"
         snap.version(),
         2,
         "gateway observed the hot-swapped snapshot"
+    );
+}
+
+#[tokio::test]
+async fn gateway_admin_run_executes_published_workflow() {
+    let proxy_port = free_port();
+    let admin_port = free_port();
+
+    let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
+        r#"
+snapshot_version = 1
+
+[server]
+listen = "127.0.0.1:{proxy_port}"
+admin_listen = "127.0.0.1:{admin_port}"
+total_timeout_ms = 5000
+graceful_shutdown_ms = 500
+
+[[routes]]
+id = "workflow-route"
+path_prefix = "/v1/workflow"
+methods = ["POST"]
+workflow_id = "echo-wf"
+"#
+    ))
+    .expect("valid workflow config");
+
+    let publication = Arc::new(PublicationState::new(
+        Arc::new(InMemoryPublisher::new()),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+    ));
+
+    // Publish the echo workflow (Input → Output, no provider needed).
+    publication.publish(snapshot_at(3));
+
+    let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
+        Ok(s) => s,
+        Err(e) => panic!("server build failed: {e}"),
+    };
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let up = tokio::net::TcpStream::connect(("127.0.0.1", admin_port))
+            .await
+            .is_ok();
+        if up {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("gateway admin did not become ready");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Run a published workflow → real execution envelope.
+    let url = format!("http://127.0.0.1:{admin_port}/run");
+    let (status, body) = match post_hyper(
+        &url,
+        r#"{"workflow_id":"echo-wf","body":{"hello":"world"}}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("admin run post failed: {e}"),
+    };
+    assert_eq!(status, http::StatusCode::OK, "published workflow runs");
+    let run: serde_json::Value = serde_json::from_slice(&body).expect("run response JSON");
+    assert_eq!(run["status"], "ok");
+    assert_eq!(run["workflow_id"], "echo-wf");
+    assert_eq!(run["snapshot_version"], 3);
+    assert!(!run["plan_hash"].as_str().unwrap_or_default().is_empty());
+    // The echo workflow's Output node returns its Input — real execution
+    // proves the run path, not a fabricated body.
+    assert_eq!(run["output"]["hello"], "world");
+
+    // Run an unknown/unpublished workflow → real 404.
+    let (status, _body) = match post_hyper(
+        &url,
+        r#"{"workflow_id":"missing","body":{}}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("admin run 404 post failed: {e}"),
+    };
+    assert_eq!(
+        status,
+        http::StatusCode::NOT_FOUND,
+        "unknown workflow is a real 404"
     );
 }

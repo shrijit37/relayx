@@ -71,6 +71,8 @@ impl Default for MockConfig {
 /// (e.g., "connections were reused"). `last_request_body` captures the
 /// most recently received request body so protocol-translation tests can
 /// verify that the gateway emitted the correct wire format.
+/// `last_request_headers` captures the last request's headers so tests can
+/// assert per-lane credential propagation (never the secret inside a body).
 #[derive(Debug, Default)]
 pub struct MockState {
     pub requests_served: std::sync::atomic::AtomicU64,
@@ -78,6 +80,8 @@ pub struct MockState {
     pub bytes_sent: std::sync::atomic::AtomicU64,
     /// Body of the most recently received LLM request, for test assertions.
     pub last_request_body: std::sync::Mutex<Option<String>>,
+    /// Headers of the most recently received LLM request (lower-cased names).
+    pub last_request_headers: std::sync::Mutex<Option<std::collections::HashMap<String, String>>>,
 }
 
 impl MockState {

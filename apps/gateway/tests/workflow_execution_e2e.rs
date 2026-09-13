@@ -186,7 +186,18 @@ workflow_id = "{workflow_id}"
         workflows: vec![WireWorkflow {
             id: workflow_id.into(),
             workflow,
-            lanes: lanes.iter().cloned().collect(),
+            lanes: lanes
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        relay_gateway::observability::WireLane {
+                            base_url: v.clone(),
+                            authorization: None,
+                        },
+                    )
+                })
+                .collect(),
         }],
     };
     publication

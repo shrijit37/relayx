@@ -39,6 +39,10 @@ struct Cli {
     /// Delay between chunks (ms).
     #[arg(long, default_value_t = 0)]
     chunk_delay_ms: u64,
+
+    /// Response body for JSON mode (defaults to a valid chat completion).
+    #[arg(long)]
+    json_body: Option<String>,
 }
 
 #[tokio::main]
@@ -59,6 +63,10 @@ async fn main() -> anyhow::Result<()> {
         chunk_size: cli.chunk_size,
         ttfb: Duration::from_millis(cli.ttfb_ms),
         chunk_delay: Duration::from_millis(cli.chunk_delay_ms),
+        json_body: cli.json_body.unwrap_or_else(|| {
+            r#"{"id":"chatcmpl-1","object":"chat.completion","created":1234567890,"model":"gpt-4","choices":[{"index":0,"message":{"role":"assistant","content":"Hello from the Phase 6 live stack"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}"#
+                .into()
+        }),
         ..Default::default()
     };
 

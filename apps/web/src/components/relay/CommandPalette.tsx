@@ -12,21 +12,12 @@ import {
 type Cmd = { label: string; to?: string; shortcut?: string; group: string };
 
 const commands: Cmd[] = [
-  { label: "Create workflow", to: "/workflows", shortcut: "⌘N", group: "Workflow" },
-  { label: "Validate workflow", to: "/workflows/production-gateway", shortcut: "⌘⇧V", group: "Workflow" },
-  { label: "Publish workflow", to: "/workflows/production-gateway/versions", shortcut: "⌘⇧P", group: "Workflow" },
-  { label: "Run workflow (test)", to: "/workflows/production-gateway", shortcut: "⌘↵", group: "Workflow" },
-  { label: "Open version history", to: "/workflows/production-gateway/versions", group: "Workflow" },
-  { label: "Add provider", to: "/providers", group: "Infrastructure" },
-  { label: "Add lane", to: "/lanes", group: "Infrastructure" },
-  { label: "Add MCP discovery", to: "/mcp", group: "Infrastructure" },
-  { label: "Search tools", to: "/mcp", group: "Infrastructure" },
-  { label: "Open observability", to: "/observability", shortcut: "⌘⇧O", group: "Telemetry" },
-  { label: "Open runs", to: "/runs", group: "Telemetry" },
-  { label: "Open latest run", to: "/runs/8F31A2", group: "Telemetry" },
-  { label: "Open policies", to: "/policies", group: "Governance" },
-  { label: "Open secrets", to: "/secrets", group: "Governance" },
-  { label: "System health", to: "/health", group: "Governance" },
+  { label: "Create workflow", to: "/workflows", group: "Workflow" },
+  { label: "Open workflows", to: "/workflows", group: "Workflow" },
+  { label: "Open providers", to: "/providers", group: "Infrastructure" },
+  { label: "Open lanes", to: "/lanes", group: "Infrastructure" },
+  { label: "Open system health", to: "/health", group: "System" },
+  { label: "Open settings", to: "/settings", group: "System" },
 ];
 
 export function CommandPalette({

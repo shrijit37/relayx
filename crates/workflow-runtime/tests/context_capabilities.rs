@@ -21,6 +21,7 @@ fn lane(id: &str, url: &str) -> LaneEntry {
             Ok(u) => u,
             Err(e) => panic!("invalid lane url: {e}"),
         },
+        authorization: None,
     }
 }
 

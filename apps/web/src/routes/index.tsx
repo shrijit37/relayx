@@ -1,8 +1,16 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ArrowUpRight } from "lucide-react";
 import { AppShell } from "@/components/relay/AppShell";
-import { EmptyState, KV, Metric, Panel, PageHeader, StatusText, Tag, TableShell, Td } from "@/components/relay/primitives";
-import { kpis, lanes, providers, runs, workflows } from "@/lib/relay-data";
+import {
+  EmptyState,
+  KV,
+  Panel,
+  PageHeader,
+  StatusText,
+  TableShell,
+  Td,
+} from "@/components/relay/primitives";
+import { useLanes, useProviders, useSystemHealth, useWorkflows } from "@/lib/use-workflow-publication";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -26,6 +34,11 @@ export const Route = createFileRoute("/")({
 });
 
 function Overview() {
+  const { data: workflows, isPending: wfPending, isError: wfError, error: wfErr } = useWorkflows();
+  const { data: lanes } = useLanes();
+  const { data: providers } = useProviders();
+  const { data: health } = useSystemHealth();
+
   return (
     <AppShell>
       <PageHeader
@@ -33,14 +46,20 @@ function Overview() {
         subtitle="Control plane snapshot · data plane serving from compiled execution plans"
         meta={
           <>
-            <StatusText status="healthy" />
-            <span className="num text-xs text-muted-foreground">4 workflows · 4 lanes · 3 active providers</span>
+            {health ? (
+              <StatusText status={health.gateway.ready.status === "ready" ? "healthy" : health.gateway.ready.status} />
+            ) : (
+              <StatusText status="unknown" />
+            )}
+            <span className="num text-xs text-muted-foreground">
+              {workflows ? `${workflows.length} workflows · ${lanes?.length ?? "—"} lanes · ${providers?.length ?? "—"} providers` : "loading…"}
+            </span>
           </>
         }
         actions={
           <Link
             to="/workflows/$workflowId"
-            params={{ workflowId: "production-gateway" }}
+            params={{ workflowId: "new" }}
             className="focus-ring flex h-7 items-center gap-1.5 rounded-sm bg-primary px-2.5 text-xs font-medium text-primary-foreground hover:opacity-90"
           >
             Open workflow editor
@@ -49,15 +68,25 @@ function Overview() {
       />
 
       <div className="space-y-3 p-4">
-        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4 2xl:grid-cols-8">
-          {kpis.map((k) => (
-            <Metric key={k.label} {...k} />
-          ))}
-        </div>
+        <Panel title="Backend status" dense>
+          <div className="space-y-px">
+            <KV k="Control plane" v={health?.control_plane.status ?? "unreachable"} tone={health?.control_plane.status === "ok" ? "ok" : "warn"} />
+            <KV k="Gateway /healthz" v={health?.gateway.healthz.status ?? "unreachable"} tone={health?.gateway.healthz.status === "ok" ? "ok" : "warn"} />
+            <KV k="Gateway /ready" v={health?.gateway.ready.status ?? "unreachable"} tone={health?.gateway.ready.status === "ready" ? "ok" : "warn"} />
+          </div>
+          <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+            KPI telemetry (latency, throughput, error rates) is not available until a metrics/telemetry backend is
+            implemented. This page shows real persisted infrastructure state only.
+          </p>
+        </Panel>
 
-        <div className="grid gap-3 xl:grid-cols-3">
-          <Panel title="Workflows" className="xl:col-span-2" dense>
-            <TableShell head={["Workflow", "Version", "State", "Env", "Nodes", "p95", "rps", "Updated"]}>
+        <Panel title="Workflows" className="xl:col-span-2" dense>
+          {wfPending ? (
+            <div className="p-4 text-xs text-muted-foreground">loading workflows…</div>
+          ) : wfError ? (
+            <div className="p-4 text-xs text-fail">control plane unreachable — {String(wfErr)}</div>
+          ) : workflows && workflows.length > 0 ? (
+            <TableShell head={["Workflow", "Version", "State", "Created"]}>
               {workflows.map((w) => (
                 <tr key={w.id} className="hover:bg-panel-raised/50">
                   <Td>
@@ -69,85 +98,50 @@ function Overview() {
                       {w.name} <ArrowUpRight className="size-3 opacity-50" />
                     </Link>
                   </Td>
-                  <Td className="num">v{w.version}</Td>
+                  <Td className="num">{new Date(w.created_at).toLocaleDateString()}</Td>
                   <Td>
-                    <StatusText status={w.state} />
+                    <StatusText status={w.status === "active" ? "Production" : w.status === "compiled" ? "Staging" : "Draft"} />
                   </Td>
-                  <Td className="num text-muted-foreground">{w.env}</Td>
-                  <Td className="num">{w.nodes}</Td>
-                  <Td className="num">{w.p95}</Td>
-                  <Td className="num">{w.rps}</Td>
-                  <Td className="num text-muted-foreground">{w.updated}</Td>
+                  <Td className="num text-muted-foreground">{w.id}</Td>
                 </tr>
               ))}
             </TableShell>
-          </Panel>
-
-          <Panel title="Control plane / data plane">
-            <div className="space-y-2 text-[11px] leading-relaxed text-muted-foreground">
-              <p>
-                Authoring, compilation and policy evaluation happen in the control plane. The Rust data plane serves
-                requests from an immutable execution plan — no database read in the hot path.
-              </p>
+          ) : (
+            <div className="p-4 text-xs text-muted-foreground">
+              no workflows persisted yet — create one to get started.
             </div>
-            <div className="mt-3 space-y-px">
-              <KV k="Active plan" v="plan_8f31a2 (v24)" />
-              <KV k="Plan propagation" v="112 ms" />
-              <KV k="Config snapshot age" v="2 min" />
-              <KV k="Hot-path DB reads" v="0" tone="ok" />
-              <KV k="Gateway overhead p95" v="3.4 ms" tone="ok" />
-            </div>
-          </Panel>
-        </div>
+          )}
+        </Panel>
 
         <div className="grid gap-3 xl:grid-cols-3">
-          <Panel title="Recent runs" className="xl:col-span-2" dense>
-            <TableShell head={["Run", "Workflow", "Lane", "Provider", "TTFB", "Total", "Gateway", "Status"]}>
-              {runs.slice(0, 5).map((r) => (
-                <tr key={r.id} className="hover:bg-panel-raised/50">
-                  <Td>
-                    <Link to="/runs/$runId" params={{ runId: r.id }} className="num hover:text-primary">
-                      #{r.id}
-                    </Link>
-                  </Td>
-                  <Td className="text-muted-foreground">{r.workflow}</Td>
-                  <Td className="num">{r.lane}</Td>
-                  <Td>{r.provider}</Td>
-                  <Td className="num">{r.ttfb}</Td>
-                  <Td className="num">{r.total}</Td>
-                  <Td className="num text-ok">{r.gateway}</Td>
-                  <Td>
-                    <StatusText status={r.status} />
-                  </Td>
-                </tr>
-              ))}
-            </TableShell>
-          </Panel>
-
-          <div className="grid gap-3">
-            <Panel title="Lane health">
-              <div className="space-y-2">
-                {lanes.map((l) => (
+          <Panel title="Lanes">
+            <div className="space-y-2">
+              {lanes && lanes.length > 0 ? (
+                lanes.map((l) => (
                   <div key={l.id} className="flex items-center gap-2">
-                    <StatusText status={l.health} className="w-[86px] shrink-0" />
                     <span className="num min-w-0 flex-1 truncate text-xs">{l.id}</span>
-                    <span className="num text-xs text-muted-foreground">{l.latency}</span>
+                    <span className="num text-xs text-muted-foreground">{l.egress}</span>
                   </div>
-                ))}
-              </div>
-            </Panel>
-            <Panel title="Providers">
-              <div className="space-y-2">
-                {providers.map((p) => (
+                ))
+              ) : (
+                <p className="text-[11px] text-muted-foreground">no lanes persisted yet.</p>
+              )}
+            </div>
+          </Panel>
+          <Panel title="Providers">
+            <div className="space-y-2">
+              {providers && providers.length > 0 ? (
+                providers.map((p) => (
                   <div key={p.id} className="flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-xs">{p.name}</span>
-                    <Tag>{p.protocol}</Tag>
-                    <span className="num w-16 text-right text-xs text-muted-foreground">{p.latency}</span>
+                    <span className="num text-xs text-muted-foreground">{p.protocol}</span>
                   </div>
-                ))}
-              </div>
-            </Panel>
-          </div>
+                ))
+              ) : (
+                <p className="text-[11px] text-muted-foreground">no providers persisted yet.</p>
+              )}
+            </div>
+          </Panel>
         </div>
 
         <Panel title="Archived workspace" dense>

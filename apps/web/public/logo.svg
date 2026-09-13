@@ -1,0 +1,52 @@
+<svg height="100%" viewBox="0 0 320 320" width="100%" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<filter height="160%" id="pureGlint" width="160%" x="-30%" y="-30%">
+<feGaussianBlur result="blur" stdDeviation="3"></feGaussianBlur>
+<feMerge>
+<feMergeNode in="blur"></feMergeNode>
+<feMergeNode in="SourceGraphic"></feMergeNode>
+</feMerge>
+</filter>
+</defs>
+<style>
+    @keyframes slowHalo {
+      0%, 100% { transform: rotate(0deg); opacity: 0.45; }
+      50% { transform: rotate(180deg); opacity: 0.85; }
+    }
+    @keyframes breatheMark {
+      0%, 100% { transform: scale(1); opacity: 0.96; }
+      50% { transform: scale(1.018); opacity: 1; }
+    }
+    @keyframes pulseNode {
+      0%, 100% { r: 2; opacity: 0.5; }
+      50% { r: 3.2; opacity: 1; }
+    }
+    .halo-ring {
+      animation: slowHalo 32s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+      transform-origin: 160px 160px;
+    }
+    .mark-group {
+      animation: breatheMark 7s ease-in-out infinite;
+      transform-origin: 160px 160px;
+    }
+    .node-pulse {
+      animation: pulseNode 3.5s ease-in-out infinite;
+    }
+  </style>
+<radialGradient cx="50%" cy="50%" id="softVignette" r="50%">
+<stop offset="0%" stop-color="#141822" stop-opacity="0.4"></stop>
+<stop offset="100%" stop-color="#090a0f" stop-opacity="0"></stop>
+</radialGradient>
+<circle cx="160" cy="160" fill="url(#softVignette)" r="140"></circle>
+<circle cx="160" cy="160" fill="none" r="126" stroke="#ffffff" stroke-opacity="0.06" stroke-width="1"></circle>
+<g class="halo-ring">
+<circle cx="160" cy="160" fill="none" r="126" stroke="#38bdf8" stroke-dasharray="18 180 8 90" stroke-linecap="round" stroke-opacity="0.5" stroke-width="1.2"></circle>
+<circle cx="160" cy="34" fill="#38bdf8" filter="url(#pureGlint)" r="2.5"></circle>
+</g>
+<g class="mark-group">
+<line stroke="#f8fafc" stroke-linecap="round" stroke-width="10" x1="102" x2="218" y1="102" y2="218"></line>
+<line stroke="#38bdf8" stroke-linecap="round" stroke-width="10" x1="218" x2="173" y1="102" y2="147"></line>
+<line stroke="#38bdf8" stroke-linecap="round" stroke-width="10" x1="147" x2="102" y1="173" y2="218"></line>
+<circle class="node-pulse" cx="160" cy="160" fill="#ffffff" filter="url(#pureGlint)"></circle>
+</g>
+</svg>

@@ -1,12 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { AppShell } from "@/components/relay/AppShell";
-import { KV, Metric, PageHeader, Panel, StatusText, TableShell, Td } from "@/components/relay/primitives";
+import { KV, PageHeader, Panel, StatusText } from "@/components/relay/primitives";
+import { useSystemHealth } from "@/lib/use-workflow-publication";
 
 export const Route = createFileRoute("/health")({
   head: () => ({
     meta: [
       { title: "System health — relay-x" },
-      { name: "description", content: "Control plane and Rust data plane health, plan propagation and regional node status." },
+      { name: "description", content: "Control plane and Rust data plane live health." },
       { property: "og:title", content: "System health — relay-x" },
       { property: "og:description", content: "Control plane and data plane are separated; serving does not depend on authoring." },
       { property: "og:type", content: "website" },
@@ -16,55 +17,42 @@ export const Route = createFileRoute("/health")({
   component: HealthPage,
 });
 
-const nodes = [
-  { node: "dp-use1-a", region: "us-east-1", plan: "v24", cpu: "38%", mem: "44%", streams: 62, status: "healthy" },
-  { node: "dp-use1-b", region: "us-east-1", plan: "v24", cpu: "41%", mem: "46%", streams: 58, status: "healthy" },
-  { node: "dp-euc1-a", region: "eu-central-1", plan: "v24", cpu: "29%", mem: "37%", streams: 18, status: "healthy" },
-  { node: "dp-apse1-a", region: "ap-southeast-1", plan: "v23", cpu: "71%", mem: "68%", streams: 9, status: "degraded" },
-];
-
 function HealthPage() {
+  const { data: health, isPending, isError, error } = useSystemHealth();
+
   return (
     <AppShell>
       <PageHeader title="Health" subtitle="Control plane (authoring, compilation) is isolated from the Rust data plane (serving)." />
-      <div className="space-y-3 p-4">
-        <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-          <Metric label="Data plane nodes" value="4" hint="3 healthy · 1 degraded" tone="warn" />
-          <Metric label="Plan propagation" value="112" unit="ms" tone="ok" hint="last publish" />
-          <Metric label="Hot-path DB reads" value="0" tone="ok" hint="per request" />
-          <Metric label="Uptime" value="99.98" unit="%" tone="ok" hint="30 days" />
-        </div>
-
-        <div className="grid gap-3 xl:grid-cols-3">
-          <Panel title="Data plane nodes" className="xl:col-span-2" dense>
-            <TableShell head={["Node", "Region", "Plan", "CPU", "Memory", "Streams", "Status"]}>
-              {nodes.map((n) => (
-                <tr key={n.node} className="hover:bg-panel-raised/50">
-                  <Td className="num">{n.node}</Td>
-                  <Td className="num text-muted-foreground">{n.region}</Td>
-                  <Td className="num">{n.plan}</Td>
-                  <Td className="num">{n.cpu}</Td>
-                  <Td className="num">{n.mem}</Td>
-                  <Td className="num">{n.streams}</Td>
-                  <Td>
-                    <StatusText status={n.status} />
-                  </Td>
-                </tr>
-              ))}
-            </TableShell>
-          </Panel>
-          <Panel title="Control plane">
-            <KV k="API" v="healthy" tone="ok" />
-            <KV k="Compiler" v="healthy" tone="ok" />
-            <KV k="Policy service" v="healthy" tone="ok" />
-            <KV k="MCP indexer" v="degraded" tone="warn" />
-            <KV k="Queue depth" v="3" />
-            <KV k="Last compile" v="2 min ago" />
-            <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
-              A control plane outage does not interrupt serving: nodes continue on their last compiled plan.
-            </p>
-          </Panel>
-        </div>
+      <div className="grid gap-3 p-4 xl:grid-cols-3">
+        <Panel title="Control plane" className="xl:col-span-2" dense>
+          {isPending ? (
+            <div className="p-4 text-xs text-muted-foreground">probing…</div>
+          ) : isError ? (
+            <div className="p-4 text-xs text-fail">control plane unreachable — {String(error)}</div>
+          ) : health ? (
+            <div className="space-y-px p-3">
+              <KV k="API /healthz" v={health.control_plane.status} />
+              <KV k="Service" v={health.control_plane.service ?? "relayx-control-plane"} />
+            </div>
+          ) : null}
+        </Panel>
+        <Panel title="Gateway (Rust data plane)">
+          {isPending ? (
+            <div className="p-3 text-[11px] text-muted-foreground">probing…</div>
+          ) : isError || !health ? (
+            <div className="p-3 text-[11px] text-fail">gateway unreachable</div>
+          ) : (
+            <div className="space-y-px">
+              <KV k="/healthz" v={health.gateway.healthz.status} />
+              <KV k="/ready" v={health.gateway.ready.status} />
+              <div className="mt-2 flex items-center gap-2">
+                <StatusText
+                  status={health.gateway.ready.status === "ready" ? "ready" : health.gateway.ready.status}
+                />
+              </div>
+            </div>
+          )}
+        </Panel>
       </div>
     </AppShell>
   );
