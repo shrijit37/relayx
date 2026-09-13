@@ -163,6 +163,70 @@ describe("serializeWorkflow", () => {
     expect(result.warnings).toEqual([]);
   });
 
+  test("malformed workflow JSON: unknown kind is skipped with a warning, input/output retained", () => {
+    const wf = {
+      id: "bad",
+      name: "Bad",
+      version: 1,
+      nodes: [
+        { id: "input", kind: "input" as const, config: { kind: "input" as const }, inputs: [], outputs: [] },
+        { id: "wtf", kind: "quantum" as never, config: { kind: "quantum" as never }, inputs: [], outputs: [] },
+        { id: "output", kind: "output" as const, config: { kind: "output" as const }, inputs: [], outputs: [] },
+      ],
+      edges: [
+        { source_node: "input", source_port: "out", target_node: "wtf", target_port: "in" },
+        { source_node: "wtf", source_port: "out", target_node: "output", target_port: "in" },
+      ],
+    };
+    const result = deserializeWorkflow(wf);
+    // Unmappable node dropped with a warning; the real input/output survive.
+    expect(result.warnings.some((w) => w.includes("quantum"))).toBe(true);
+    const ids = result.nodes.map((n) => n.id);
+    expect(ids).toContain("input");
+    expect(ids).toContain("output");
+    expect(ids).not.toContain("wtf");
+  });
+
+  test("missing fields: empty nodes/edges yields empty canvas, no throw", () => {
+    const result = deserializeWorkflow({ id: "e", name: "E", version: 1, nodes: [], edges: [] });
+    expect(result.warnings).toEqual([]);
+    expect(result.nodes).toEqual([]);
+    expect(result.edges).toEqual([]);
+  });
+
+  test("lane preservation: lane_id survives serialize → deserialize round-trip", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input", "HTTP"),
+      node("provider", "provider", "OpenAI · gpt-4o"),
+      node("lane", "lane", "openai-direct"),
+      node("out", "output", "SSE"),
+    ];
+    const edges: Edge[] = [
+      edge("e1", "in", "provider"),
+      edge("e2", "lane", "provider"),
+      edge("e3", "provider", "out"),
+    ];
+    const ser = serializeWorkflow(nodes, edges, { id: "lane-roundtrip", name: "LR", version: 9 });
+    expect(ser.workflow).not.toBeNull();
+    const deser = deserializeWorkflow(ser.workflow!);
+    const lane = deser.nodes.find((n) => n.data.kind === "lane");
+    expect(lane).toBeDefined();
+    expect(lane!.data.title).toBe("openai-direct");
+    const provider = deser.nodes.find((n) => n.data.kind === "provider");
+    expect(provider).toBeDefined();
+  });
+
+  test("version metadata is preserved through the round-trip", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      node("out", "output"),
+    ];
+    const edges: Edge[] = [edge("e1", "in", "out")];
+    const ser = serializeWorkflow(nodes, edges, { id: "wf-ver", name: "Ver", version: 42 });
+    expect(ser.workflow!.version).toBe(42);
+    expect(ser.workflow!.id).toBe("wf-ver");
+  });
+
   test("round-trip: deserialize(serialize(nodes)) preserves nodes and edges", () => {
     const original: RelayNode[] = [
       node("in", "input", "HTTP Request"),

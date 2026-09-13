@@ -46,6 +46,29 @@ export async function buildApp(opts: {
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
+  // Real system health for the frontend: probes the control plane itself and
+  // the gateway's live admin endpoints (/healthz, /ready). Never fabricated —
+  // each value is a real HTTP probe result.
+  app.get("/system/health", async () => {
+    const probe = async (path: string): Promise<{ status: string; detail?: string }> => {
+      try {
+        const r = await fetch(`${gateway.baseUrl}${path}`, { signal: AbortSignal.timeout(2000) });
+        if (!r.ok) return { status: "degraded", detail: `HTTP ${r.status}` };
+        const j = (await r.json().catch(() => null)) as { status?: string } | null;
+        return { status: j?.status ?? "ok" };
+      } catch (e) {
+        return { status: "unreachable", detail: String(e) };
+      }
+    };
+    return {
+      control_plane: { status: "ok", service: "relayx-control-plane" },
+      gateway: {
+        healthz: await probe("/healthz"),
+        ready: await probe("/ready"),
+      },
+    };
+  });
+
   // ── Workflows ────────────────────────────────────────────────────────
   app.get("/workflows", async () =>
     (await pool.query("SELECT * FROM workflows ORDER BY created_at DESC")).rows,
@@ -179,6 +202,33 @@ export async function buildApp(opts: {
       to_version: previous.version,
       snapshot_version: result.snapshot_version,
       plan_hash: result.plan_hash,
+    };
+  });
+
+  app.post("/workflows/:id/run", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const wf = await repo.workflows.get(pool, id);
+    if (!wf) return reply.code(404).send({ error: "workflow not found" });
+
+    // Run only ever executes the ACTIVE (published) version. A draft/dirty
+    // canvas is never silently published or exec'd (§11). The ACTIVE check is
+    // the authoritative backend gate, not a frontend invention.
+    const active = await repo.workflows.getActiveVersion(pool, id);
+    if (!active) {
+      return reply.code(409).send({ error: "Workflow must be published before it can be run." });
+    }
+
+    const body = ((req.body ?? {}) as { body?: unknown }).body ?? null;
+    const result = await gateway.run({ workflow_id: id, body });
+    if (!result.ok) return reply.code(400).send({ error: result.error });
+    return {
+      status: "ok",
+      request_id: result.request_id,
+      workflow_id: result.workflow_id,
+      workflow_version: active.workflow_version,
+      snapshot_version: result.snapshot_version,
+      plan_hash: result.plan_hash,
+      output: result.output,
     };
   });
 

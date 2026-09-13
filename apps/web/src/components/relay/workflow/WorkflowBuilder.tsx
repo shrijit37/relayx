@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addEdge,
   Background,
@@ -15,7 +15,7 @@ import {
   type OnSelectionChangeParams,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import {
   AlertTriangle,
@@ -31,20 +31,24 @@ import {
   ShieldCheck,
   Square,
   Undo2,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { StatusDot } from "../primitives";
+import { KV, StatusDot } from "../primitives";
 import { Inspector } from "./Inspector";
 import { NodeLibrary } from "./NodeLibrary";
-import { relayNodeTypes, type RelayNode, type RunState } from "./nodes";
+import { relayNodeTypes, type RelayNode } from "./nodes";
 import { defaultEdges, defaultNodes } from "./graph";
 import { deserializeWorkflow, serializeWorkflow } from "@/lib/workflow-serializer";
+import { createWorkflow, saveWorkflowVersion } from "@/lib/api";
 import {
   usePublishWorkflow,
+  useRunWorkflowMutation,
   useSaveWorkflowMutation,
   useValidateMutation,
   useWorkflowLatestVersion,
 } from "@/lib/use-workflow-publication";
+import { runReducer, type RunAction, type RunState } from "@/lib/run-state";
 
 let nodeSeq = 0;
 
@@ -177,6 +181,106 @@ function TButton({
   );
 }
 
+/**
+ * The Run panel — a real execution surface. Every displayed value is
+ * backend-truth: the request-body textarea is user input, the phase comes
+ * from the run-state machine, and the result/error/metadata come from the
+ * control-plane run envelope. Nothing here is simulated (Phase 6.5 §3.1).
+ */
+function RunPanel({
+  phase,
+  result,
+  error = undefined,
+  body,
+  onBodyChange,
+  onSubmit,
+  onCancel,
+  onClose,
+}: {
+  phase: RunState["phase"];
+  result: RunState["result"];
+  error: string | undefined;
+  body: string;
+  onBodyChange: (v: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+  onClose: () => void;
+}) {
+  const running = phase === "running";
+  return (
+    <div className="flex shrink-0 items-start gap-3 border-t border-border bg-panel px-3 py-2">
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        <div className="flex items-center gap-2">
+          <span className="label-xs">Request body</span>
+          <span className="num text-[10px] text-muted-foreground">executes the published ACTIVE version</span>
+        </div>
+        <textarea
+          value={body}
+          onChange={(e) => onBodyChange(e.target.value)}
+          rows={3}
+          spellCheck={false}
+          disabled={running}
+          className="num w-full resize-y rounded-sm border border-border bg-canvas px-2 py-1.5 font-mono text-[11px] outline-none focus:border-primary disabled:opacity-60"
+        />
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        <div className="flex items-center gap-2">
+          <span className="label-xs">Execution state</span>
+          <span className="num text-[10px] uppercase text-muted-foreground">{phase}</span>
+        </div>
+        {phase === "completed" && result ? (
+          <div className="space-y-px">
+            <KV k="Request" v={result.requestId} />
+            <KV k="Workflow" v={`${result.workflowId} · v${result.workflowVersion}`} />
+            <KV k="Snapshot" v={`v${result.snapshotVersion}`} />
+            <KV k="Plan" v={result.planHash.slice(0, 12)} />
+          </div>
+        ) : phase === "failed" ? (
+          <div className="rounded-sm border border-fail/40 bg-fail/8 px-2 py-1.5 text-[11px] text-fail">
+            {error ?? "run failed"}
+          </div>
+        ) : phase === "cancelled" ? (
+          <div className="text-[11px] text-muted-foreground">Run cancelled by the user.</div>
+        ) : phase === "running" ? (
+          <div className="flex items-center gap-1.5 text-[11px] text-info">
+            <StatusDot status="running" />
+            executing on the gateway…
+          </div>
+        ) : (
+          <div className="text-[11px] text-muted-foreground">Not started.</div>
+        )}
+      </div>
+
+      <div className="flex min-w-0 max-w-[50%] flex-1 flex-col gap-1.5">
+        <div className="label-xs">Output</div>
+        <pre className="num max-h-[120px] min-h-0 flex-1 overflow-auto rounded-sm border border-border bg-canvas px-2 py-1.5 font-mono text-[11px]">
+          {phase === "completed" && result ? JSON.stringify(result.output, null, 2) : "—"}
+        </pre>
+      </div>
+
+      <div className="flex shrink-0 flex-col gap-1.5">
+        <button
+          onClick={running ? onCancel : onSubmit}
+          className={cn(
+            "focus-ring flex h-7 items-center justify-center gap-1.5 rounded-sm px-2.5 text-xs font-medium",
+            running ? "bg-fail/15 text-fail hover:bg-fail/25" : "bg-primary text-primary-foreground hover:opacity-90",
+          )}
+        >
+          {running ? <Square className="size-3" /> : <Play className="size-3" />}
+          {running ? "Abort" : "Run"}
+        </button>
+        <button
+          onClick={onClose}
+          className="focus-ring flex h-7 items-center justify-center gap-1.5 rounded-sm border border-border px-2.5 text-xs text-muted-foreground hover:border-border-strong hover:text-foreground"
+        >
+          <X className="size-3" /> Close
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Canvas({ workflowId }: { workflowId: string }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<RelayNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -229,9 +333,32 @@ function Canvas({ workflowId }: { workflowId: string }) {
     [workflowId, workflowName, version, nodes, edges],
   );
 
+  const navigate = useNavigate();
+
+  // Save in "new" mode creates the real workflow row first (same control-plane
+  // POST as the workflow list's Create button), persists the canvas as its
+  // first immutable version, then navigates to the durable id so the editor
+  // reloads from the backend (§4 — no fabricated local persistence).
+  const createAndSave = useCallback(async () => {
+    const result = serializeTo();
+    if (!result.workflow) {
+      toast.error(`Cannot save — ${result.errors.join("; ")}`);
+      return;
+    }
+    const name = result.workflow.name || "New workflow";
+    try {
+      const row = await createWorkflow(name);
+      await saveWorkflowVersion(row.id, { ...result.workflow, id: row.id, version: 1 });
+      toast.success(`Created ${row.id} · v1`);
+      navigate({ to: "/workflows/$workflowId", params: { workflowId: row.id } });
+    } catch (err) {
+      toast.error(`Create failed — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [serializeTo, navigate]);
+
   const onSave = useCallback(() => {
     if (workflowId === "new") {
-      toast.error("Cannot save an unsaved workflow — open an existing workflow first.");
+      void createAndSave();
       return;
     }
     const result = serializeTo();
@@ -247,7 +374,7 @@ function Canvas({ workflowId }: { workflowId: string }) {
       },
       onError: (err) => toast.error(`Save failed — ${err.message}`),
     });
-  }, [workflowId, serializeTo, saveMutation]);
+  }, [workflowId, serializeTo, saveMutation, createAndSave]);
 
   const onValidate = useCallback(() => {
     if (workflowId === "new") {
@@ -300,27 +427,75 @@ function Canvas({ workflowId }: { workflowId: string }) {
     setSelected((p.nodes[0] as RelayNode) ?? null);
   }, []);
 
-  const applyRunStates = useCallback(
-    (states: Record<string, RunState>) => {
-      setNodes((ns) =>
-        ns.map((n) => ({ ...n, data: { ...n.data, runState: states[n.id] ?? "idle" } })) as RelayNode[],
-      );
-    },
-    [setNodes],
+  // ── Real Run ─────────────────────────────────────────────────────────
+  // The execution-state machine is driven exclusively by real mutation
+  // outcomes: submitted → running, resolved → completed (real envelope),
+  // rejected → failed (real backend error), aborted → cancelled. There is no
+  // fake progress, timing, or success path (Phase 6.5 §3.1/§6).
+  const [run, setRun] = useState<RunState>({ phase: "idle" });
+  const [runBody, setRunBody] = useState(
+    JSON.stringify({ messages: [{ role: "user", content: "hello from the run panel" }] }, null, 2),
   );
+  const [runPanelOpen, setRunPanelOpen] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const runMutation = useRunWorkflowMutation();
 
-  const stop = useCallback(() => {
-    setRunning(false);
-    applyRunStates({});
-    setEdges((es) => es.map((e) => ({ ...e, className: e.className?.replace("edge-active", "").trim() ?? "" })));
-  }, [applyRunStates, setEdges]);
-
-  // Run is a real backend operation in a later phase (Phase 6.5 §10). Until
-  // the gateway exposed an execution contract the frontend can drive, running
-  // is disabled — no fabricated execution state is shown.
-  const run = useCallback(() => {
-    toast.error("Run is not available yet — the gateway execution contract is not wired. Save, validate, and publish instead.");
+  const runDispatch = useCallback((action: RunAction) => {
+    setRun((s) => runReducer(s, action));
   }, []);
+
+  const submitRun = useCallback(() => {
+    if (workflowId === "new") {
+      toast.error("Cannot run an unsaved workflow — save and publish it first.");
+      return;
+    }
+    if (dirty) {
+      toast.warning("Run executes the published ACTIVE version — unsaved changes won't be executed. Save & publish to run them.");
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(runBody || "null");
+    } catch {
+      toast.error("Run request body is not valid JSON.");
+      return;
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setRunning(true);
+    runDispatch({ type: "start" });
+    setRunPanelOpen(true);
+    runMutation.mutate(
+      { workflowId, body, signal: controller.signal },
+      {
+        onSuccess: (res) => {
+          setRunning(false);
+          runDispatch({
+            type: "completed",
+            result: {
+              requestId: res.request_id,
+              workflowId: res.workflow_id,
+              workflowVersion: res.workflow_version,
+              snapshotVersion: res.snapshot_version,
+              planHash: res.plan_hash,
+              output: res.output,
+            },
+          });
+        },
+        onError: (err) => {
+          setRunning(false);
+          runDispatch({ type: "failed", error: err.message });
+          toast.error(`Run failed — ${err.message}`);
+        },
+      },
+    );
+  }, [workflowId, dirty, runBody, runDispatch, runMutation]);
+
+  const cancelRun = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setRunning(false);
+    runDispatch({ type: "cancel" });
+  }, [runDispatch]);
 
   const markDirty = useCallback(() => {
     setDirty(true);
@@ -362,8 +537,8 @@ function Canvas({ workflowId }: { workflowId: string }) {
         workflowName={workflowName}
         version={version}
         planHash={planHash}
-        onRun={run}
-        onStop={stop}
+        onRun={() => setRunPanelOpen((o) => !o)}
+        onStop={cancelRun}
         onSave={onSave}
         onValidate={onValidate}
         onPublish={onPublish}
@@ -455,20 +630,41 @@ function Canvas({ workflowId }: { workflowId: string }) {
             className="hidden w-[268px] shrink-0 border-l border-border xl:flex"
             data={inspectorNode?.data ?? undefined}
             nodeId={inspectorNode?.id ?? undefined}
+            planHash={planHash}
             onClose={() => setInspectorOpen(false)}
           />
         )}
       </div>
 
+      {runPanelOpen && (
+        <RunPanel
+          phase={run.phase}
+          result={run.result}
+          error={run.error}
+          onBodyChange={(v) => setRunBody(v)}
+          body={runBody}
+          onSubmit={submitRun}
+          onCancel={cancelRun}
+          onClose={() => {
+            if (run.phase === "running") cancelRun();
+            setRunPanelOpen(false);
+            runDispatch({ type: "reset" });
+          }}
+        />
+      )}
+
       <footer className="flex h-8 shrink-0 items-center gap-3 border-t border-border bg-panel px-3 text-[11px]">
-        <span className="flex items-center gap-1.5 text-fail">
-          <CircleSlash className="size-3" />
-          <span className="num">{version !== null ? version : 0} errors</span>
-        </span>
-        <span className="flex items-center gap-1.5 text-warn">
-          <AlertTriangle className="size-3" />
-          <span className="num">{planHash !== null ? planHash.slice(0, 8) : 0} warnings</span>
-        </span>
+        {planHash ? (
+          <span className="flex items-center gap-1.5 text-ok">
+            <Check className="size-3" />
+            <span className="num">{planHash.slice(0, 8)} — validated</span>
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5 text-muted-foreground">
+            <CircleSlash className="size-3" />
+            <span className="num">not validated</span>
+          </span>
+        )}
         <span className="h-4 w-px bg-border" />
         <span className="num hidden text-muted-foreground sm:inline">{nodes.length} nodes · {edges.length} edges</span>
         <span className="h-4 w-px bg-border sm:inline" />

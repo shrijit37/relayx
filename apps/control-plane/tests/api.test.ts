@@ -223,4 +223,113 @@ describe("REST API", () => {
     const wfAfter = (await (await fetch(`${base()}/workflows/${wf.id}`)).json()) as { status: string };
     expect(wfAfter.status).toBe("active");
   });
+
+  test("run: published workflow returns the real run envelope", async () => {
+    // Seed lane + workflow + version + publish → ACTIVE.
+    await fetch(`${base()}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "lane-a", name: "primary", project_id: "proj_default", endpoint: "/chat", base_url: "http://127.0.0.1:9001", egress: "direct", policies: [] }),
+    });
+    const wfRes = await fetch(`${base()}/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "echo", project_id: "proj_default" }),
+    });
+    const wf = (await wfRes.json()) as { id: string };
+    await fetch(`${base()}/workflows/${wf.id}/versions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: helperWf("lane-a") }),
+    });
+    await fetch(`${base()}/workflows/${wf.id}/publish`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: helperWf("lane-a"), version: 1 }),
+    });
+
+    const runRes = await fetch(`${base()}/workflows/${wf.id}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: { messages: [{ role: "user", content: "hi" }] } }),
+    });
+    expect(runRes.status).toBe(200);
+    const run = (await runRes.json()) as {
+      status: string;
+      request_id: string;
+      workflow_id: string;
+      workflow_version: number;
+      snapshot_version: number;
+      plan_hash: string;
+      output: unknown;
+    };
+    expect(run.status).toBe("ok");
+    expect(run.workflow_id).toBe(wf.id);
+    expect(run.workflow_version).toBe(1);
+    expect(typeof run.snapshot_version).toBe("number");
+    expect(run.plan_hash.length).toBeGreaterThan(0);
+    // Real passthrough of the gateway output (never fabricated).
+    expect((run.output as { ok: boolean }).ok).toBe(true);
+  });
+
+  test("run: unpublished workflow is rejected with 409 (never silently exec'd)", async () => {
+    const wfRes = await fetch(`${base()}/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "draft-only", project_id: "proj_default" }),
+    });
+    const wf = (await wfRes.json()) as { id: string };
+
+    const runRes = await fetch(`${base()}/workflows/${wf.id}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: {} }),
+    });
+    expect(runRes.status).toBe(409);
+    const body = (await runRes.json()) as { error: string };
+    expect(body.error).toContain("published");
+  });
+
+  test("run: gateway run failure surfaces as a real 400 error", async () => {
+    // Fresh gateway that fails /run.
+    await db?.close();
+    await gatewayApp?.close();
+    await app?.close();
+
+    const db2 = await freshDb("api-runfail");
+    const gw2 = await mockGateway({ mustValidate: true, failRunWith: "provider 500" });
+    await gw2.listen({ port: 0, host: "127.0.0.1" });
+    const gw2Base = `http://127.0.0.1:${(gw2.server.address() as { port: number }).port}`;
+    app = await buildApp({ pool: db2.pool, gateway: new GatewayClient(gw2Base) });
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    db = db2;
+    gatewayApp = gw2;
+
+    const wfRes = await fetch(`${base()}/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "echo", project_id: "proj_default" }),
+    });
+    const wf = (await wfRes.json()) as { id: string };
+    await fetch(`${base()}/workflows/${wf.id}/versions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: helperWf("lane-a") }),
+    });
+    // Force ACTIVE without the gateway round-trip by publishing first against
+    // a passing gateway… simpler: insert workflow_active directly.
+    await db!.pool.query(
+      "INSERT INTO workflow_active (workflow_id, workflow_version, plan_hash, snapshot_version) VALUES ($1, 1, 'sha256:test', 1)",
+      [wf.id],
+    );
+
+    const runRes = await fetch(`${base()}/workflows/${wf.id}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: {} }),
+    });
+    expect(runRes.status).toBe(400);
+    const body = (await runRes.json()) as { error: string };
+    expect(body.error).toContain("provider 500");
+  });
 });

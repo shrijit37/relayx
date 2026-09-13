@@ -433,6 +433,107 @@ pub fn admin_router_with_publication(
         }
     }
 
+    /// Run payload from the control plane: the workflow id + the raw JSON
+    /// request body fed to the workflow's Input node.
+    #[derive(serde::Deserialize)]
+    struct RunRequest {
+        workflow_id: String,
+        body: serde_json::Value,
+    }
+
+    /// Execute a workflow from the CURRENT published snapshot (compile-time
+    /// validation, never a live draft). This is the frontend's Run contract:
+    /// it reuses `execute_workflow` — the same path the proxy's workflow
+    /// routes take — so results, per-lane pools, cancellation and typed
+    /// errors are identical to production traffic. A request for a workflow
+    /// that is not in the snapshot (unpublished or unknown) is a 404; a
+    /// runtime failure (provider error, timeout, invalid plan) maps through
+    /// the gateway's typed error → HTTP mapping to real 4xx/5xx.
+    async fn run(
+        State(publication): State<Option<Arc<PublicationState>>>,
+        axum::Json(req): axum::Json<RunRequest>,
+    ) -> Result<axum::Json<serde_json::Value>, crate::errors::GatewayError> {
+        let Some(publication) = publication else {
+            return Err(crate::errors::GatewayError::Internal(
+                "workflow execution not configured".into(),
+            ));
+        };
+        let snapshot = publication
+            .snapshot()
+            .ok_or_else(|| crate::errors::GatewayError::Internal("no published snapshot".into()))?;
+
+        let plan = snapshot.get_plan(&req.workflow_id).ok_or_else(|| {
+            crate::errors::GatewayError::InvalidRequest {
+                status: http::StatusCode::NOT_FOUND,
+                message: format!("no published workflow named '{}'", req.workflow_id),
+            }
+        })?;
+
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        // Encode the JSON body exactly as `workflow_route_request` does so the
+        // run path observes identical bytes.
+        let body_bytes: bytes::Bytes = match serde_json::to_vec(&req.body) {
+            Ok(b) => b.into(),
+            Err(e) => {
+                return Err(crate::errors::GatewayError::InvalidRequest {
+                    status: http::StatusCode::BAD_REQUEST,
+                    message: format!("invalid request body json: {e}"),
+                });
+            }
+        };
+
+        // ponytail: per-run Hyper client (human-paced UI runs). The shared
+        // proxy client lives on AppState and isn't reachable from the admin
+        // router's state type; thread it through if run throughput ever needs
+        // connection reuse.
+        let client = std::sync::Arc::new(
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_idle_timeout(std::time::Duration::from_secs(90))
+                .pool_max_idle_per_host(64)
+                .build(hyper_util::client::legacy::connect::HttpConnector::new()),
+        );
+
+        let response = crate::execution::execute_workflow(
+            &snapshot,
+            plan,
+            body_bytes,
+            &req.workflow_id,
+            &request_id,
+            client,
+            None,
+        )
+        .await?;
+
+        // Stream the full body (bounded workflow output — the LLM response
+        // has already been folded server-side) into the run envelope.
+        let body_bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .map_err(|e| {
+                crate::errors::GatewayError::Internal(format!(
+                    "failed to read workflow output: {e}"
+                ))
+            })?
+            .to_bytes();
+        let output: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(crate::errors::GatewayError::Internal(format!(
+                    "workflow returned non-JSON output: {e}"
+                )));
+            }
+        };
+
+        Ok(axum::Json(serde_json::json!({
+            "status": "ok",
+            "request_id": request_id,
+            "workflow_id": req.workflow_id,
+            "snapshot_version": snapshot.version(),
+            "plan_hash": snapshot.plan_hash_for(&req.workflow_id).unwrap_or_default(),
+            "output": output,
+        })))
+    }
+
     axum::Router::new()
         .route(
             "/healthz",
@@ -457,6 +558,7 @@ pub fn admin_router_with_publication(
         )
         .route("/validate", post(validate))
         .route("/publish", post(publish))
+        .route("/run", post(run))
         .layer(axum::Extension(handle))
         .with_state(publication)
 }

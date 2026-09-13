@@ -17,11 +17,13 @@ export function Inspector({
   nodeId,
   onClose,
   className,
+  planHash,
 }: {
   data?: RelayNodeData | undefined;
   nodeId?: string | undefined;
   onClose?: (() => void) | undefined;
   className?: string | undefined;
+  planHash?: string | null;
 }) {
   if (!data) {
     return (
@@ -31,7 +33,8 @@ export function Inspector({
         </div>
         <div className="flex flex-1 items-center justify-center p-6 text-center">
           <p className="max-w-[190px] text-[11px] leading-relaxed text-muted-foreground">
-            Select a node to inspect its compiled configuration, capabilities and health.
+            Select a node to inspect its serialized configuration. Runtime health/per-node metrics are not shown —
+            there is no per-node telemetry backend yet.
           </p>
         </div>
       </aside>
@@ -75,34 +78,39 @@ export function Inspector({
             <AlertTriangle className={cn("mt-px size-3.5 shrink-0", data.issue === "error" ? "text-fail" : "text-warn")} />
             <div>
               <div className={cn("text-xs font-medium", data.issue === "error" ? "text-fail" : "text-warn")}>
-                {data.issue === "error" ? "Unauthorized tool" : "Capability mismatch"}
+                {data.issue === "error" ? "Configuration error" : "Warning"}
               </div>
               <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
                 {data.issue === "error"
-                  ? "Workflow policy deny-write-tools denies github.write_issue. Remove the tool or add an explicit ALLOW rule."
-                  : "Fallback target OpenAI does not support deferred tool references; the deferred set is dropped on failover."}
+                  ? "This node may not compile into a valid plan — validate before publishing."
+                  : "This node serializes with a warning."}
               </p>
             </div>
           </div>
         ) : null}
 
-        {data.kind === "lane" && <LaneBody title={data.title} />}
-        {data.kind === "mcp" && <McpBody />}
-        {data.kind === "skill" && <SkillBody />}
-        {data.kind === "provider" && <ProviderBody />}
-        {data.kind === "route" && <RouteBody />}
+        <Group label="Configuration">
+          <div className="space-y-0.5">
+            {data.lines.map((l) => (
+              <div key={l} className="num text-[11px] text-muted-foreground">
+                {l}
+              </div>
+            ))}
+            {data.metaLeft ? <div className="num text-[10px] text-muted-foreground">kind: {data.metaLeft}</div> : null}
+          </div>
+        </Group>
 
-        {!["lane", "mcp", "skill", "provider", "route"].includes(data.kind) && (
-          <Group label="Configuration">
-            <div className="space-y-0.5">
-              {data.lines.map((l) => (
-                <div key={l} className="num text-[11px] text-muted-foreground">
-                  {l}
-                </div>
-              ))}
-            </div>
+        {data.kind === "mcp" || data.kind === "skill" || data.kind === "tool" || data.kind === "agent" || data.kind === "policy" || data.kind === "observability" ? (
+          <Group label="Runtime">
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {data.kind === "mcp"
+                ? "MCP execution is Phase 7 — this node is display-only until the MCP backend ships."
+                : data.kind === "skill"
+                  ? "Skill loading is Phase 7 — this node is display-only until the Skill backend ships."
+                  : "This node kind is not executed by the runtime yet."}
+            </p>
           </Group>
-        )}
+        ) : null}
 
         {data.badges?.length ? (
           <Group label="Capabilities">
@@ -111,13 +119,15 @@ export function Inspector({
                 <Tag key={b}>{b}</Tag>
               ))}
             </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+              Capability matrices are not audited by a backend yet — these are editor-side labels.
+            </p>
           </Group>
         ) : null}
 
-        <Group label="Execution plan">
-          <KV k="Compiled into" v="plan_8f31a2" />
-          <KV k="Plan version" v="v24" />
-          <KV k="Hot path" v={data.kind === "policy" ? "no (control plane)" : "yes (data plane)"} />
+        <Group label="Execution">
+          <KV k="Plan hash" v={planHash ? planHash.slice(0, 12) : "not compiled"} mono={false} tone={planHash ? "ok" : "neutral"} />
+          <KV k="Served by" v="Rust gateway data plane" />
         </Group>
       </div>
 
@@ -127,130 +137,5 @@ export function Inspector({
         </button>
       </div>
     </aside>
-  );
-}
-
-function LaneBody({ title }: { title: string }) {
-  const eu = title.includes("eu");
-  return (
-    <>
-      <Group label="Provider">
-        <KV k="Adapter" v="Anthropic" />
-        <KV k="Endpoint" v="api.anthropic.com" />
-      </Group>
-      <Group label="Network">
-        <KV k="Route" v={eu ? "WireGuard EU-03" : "WireGuard US-01"} />
-        <KV k="Region" v={eu ? "EU-Frankfurt" : "US-East"} />
-        <KV k="Egress IP" v={eu ? "185.42.19.7" : "44.201.66.8"} />
-      </Group>
-      <Group label="Policy">
-        <KV k="Bound policy" v={eu ? "eu-residency" : "production-standard"} />
-        <KV k="Evaluation" v="compile-time" />
-      </Group>
-      <Group label="Connection pool">
-        <KV k="Mode" v="warm" />
-        <KV k="Connections" v={eu ? "24" : "48"} />
-        <KV k="Reuse" v={eu ? "91.0%" : "94.2%"} tone="ok" />
-      </Group>
-      <Group label="Health">
-        <KV k="Latency" v={eu ? "119 ms" : "82 ms"} />
-        <KV k="Error rate" v={eu ? "0.07%" : "0.04%"} tone="ok" />
-        <KV k="Last probe" v="4 s ago" />
-      </Group>
-    </>
-  );
-}
-
-function McpBody() {
-  return (
-    <>
-      <Group label="Query">
-        <div className="num rounded-sm border border-border bg-canvas px-2 py-1.5 text-[11px]">github pull request</div>
-      </Group>
-      <Group label="Progressive discovery">
-        <ol className="space-y-1.5">
-          {[
-            ["Discovery", "12 candidates", "ok"],
-            ["Policy filter", "3 permitted", "ok"],
-            ["Activation", "1 selected", "info"],
-            ["Execution", "not yet invoked", "neutral"],
-          ].map(([step, val, tone]) => (
-            <li key={step} className="flex items-center gap-2">
-              <span className={cn("h-3 w-[2px] rounded", tone === "ok" ? "bg-ok" : tone === "info" ? "bg-info" : "bg-border-strong")} />
-              <span className="text-[11px]">{step}</span>
-              <span className="num ml-auto text-[11px] text-muted-foreground">{val}</span>
-            </li>
-          ))}
-        </ol>
-      </Group>
-      <Group label="Index">
-        <KV k="Registered" v="1,842" />
-        <KV k="Cache" v="HIT" tone="ok" />
-        <KV k="Retrieval" v="1.8 ms" />
-      </Group>
-      <Group label="Activated tools">
-        <div className="flex flex-wrap gap-1">
-          <Tag tone="ok">github.read_pr</Tag>
-          <Tag tone="fail">github.write_issue · denied</Tag>
-        </div>
-      </Group>
-    </>
-  );
-}
-
-function SkillBody() {
-  return (
-    <>
-      <Group label="Progressive load">
-        <KV k="Metadata" v="loaded · 1.2 KB" tone="ok" />
-        <KV k="Instructions" v="loaded · 16.8 KB" tone="ok" />
-        <KV k="References" v="2 deferred · 412 KB" />
-        <KV k="Scripts" v="1 available" />
-      </Group>
-      <Group label="Context budget">
-        <KV k="In context" v="18 KB" />
-        <KV k="Deferred" v="412 KB" />
-        <KV k="Fetch mode" v="on demand" />
-      </Group>
-    </>
-  );
-}
-
-function ProviderBody() {
-  return (
-    <>
-      <Group label="Adapter">
-        <KV k="Protocol" v="Messages API v1" />
-        <KV k="Model" v="claude-sonnet-4.5" />
-        <KV k="Endpoint" v="api.anthropic.com" />
-      </Group>
-      <Group label="Measured latency">
-        <KV k="Gateway overhead" v="3.4 ms" tone="ok" />
-        <KV k="Upstream TTFB" v="420 ms" />
-        <KV k="Stream duration" v="1.39 s" />
-      </Group>
-    </>
-  );
-}
-
-function RouteBody() {
-  return (
-    <>
-      <Group label="Match">
-        <KV k="Pattern" v="claude-*" />
-        <KV k="Strategy" v="latency-aware" />
-        <KV k="Tie-break" v="reuse ratio" />
-      </Group>
-      <Group label="Candidates">
-        {([
-          ["anthropic-us-vpn", "82 ms"],
-          ["anthropic-eu-vpn", "119 ms"],
-          ["bedrock-us", "168 ms"],
-          ["openai-direct", "104 ms"],
-        ] as [string, string][]).map(([n, l]) => (
-          <KV key={n} k={n} v={l} />
-        ))}
-      </Group>
-    </>
   );
 }

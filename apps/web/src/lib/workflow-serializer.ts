@@ -240,15 +240,6 @@ const KIND_REVERSE: Record<SchemaNodeKind, EditorKind | null> = {
 
 const SEQUENCE_GAP = 280;
 
-/** Determine editor kind from a schema node config. */
-function editorKindFromConfig(config: SchemaNodeConfig): EditorKind {
-  switch (config.kind) {
-    case "llm": return "provider";
-    case "router": return "route";
-    default: return config.kind as EditorKind;
-  }
-}
-
 /** Derive a display title from a schema node config. */
 function titleFromConfig(node: SchemaNode): string {
   const c = node.config;
@@ -385,7 +376,14 @@ export function deserializeWorkflow(wf: WorkflowJson): DeserializeResult {
   for (const id of topoOrder) {
     const sn = nodesById.get(id);
     if (!sn) continue;
-    const ek = KIND_REVERSE[sn.kind] ?? editorKindFromConfig(sn.config);
+    // Only fall back to the config-kind when the node is a KNOWN schema kind
+    // (the config kind is the same discriminator). An unknown `kind` is
+    // skipped with a warning — never silently rendered as an editable node.
+    if (!(sn.kind in KIND_REVERSE)) {
+      warnings.push(`skipped unmappable node '${id}' (kind: ${sn.kind})`);
+      continue;
+    }
+    const ek = KIND_REVERSE[sn.kind];
     if (ek === null) {
       warnings.push(`skipped unmappable node '${id}' (kind: ${sn.kind})`);
       continue;
@@ -425,8 +423,8 @@ export function deserializeWorkflow(wf: WorkflowJson): DeserializeResult {
     if (!nodesById.has(se.source_node) || !nodesById.has(se.target_node)) continue;
     const srcSchema = nodesById.get(se.source_node)!;
     const tgtSchema = nodesById.get(se.target_node)!;
-    const srcKind = KIND_REVERSE[srcSchema.kind] ?? editorKindFromConfig(srcSchema.config);
-    const tgtKind = KIND_REVERSE[tgtSchema.kind] ?? editorKindFromConfig(tgtSchema.config);
+    const srcKind = KIND_REVERSE[srcSchema.kind];
+    const tgtKind = KIND_REVERSE[tgtSchema.kind];
     if (!srcKind || !tgtKind) continue;
     if (srcKind === "lane" || tgtKind === "lane") continue;
     const newEdge: Edge = {

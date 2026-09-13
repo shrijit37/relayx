@@ -416,3 +416,98 @@ workflow_id = "echo-wf"
         "gateway observed the hot-swapped snapshot"
     );
 }
+
+#[tokio::test]
+async fn gateway_admin_run_executes_published_workflow() {
+    let proxy_port = free_port();
+    let admin_port = free_port();
+
+    let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
+        r#"
+snapshot_version = 1
+
+[server]
+listen = "127.0.0.1:{proxy_port}"
+admin_listen = "127.0.0.1:{admin_port}"
+total_timeout_ms = 5000
+graceful_shutdown_ms = 500
+
+[[routes]]
+id = "workflow-route"
+path_prefix = "/v1/workflow"
+methods = ["POST"]
+workflow_id = "echo-wf"
+"#
+    ))
+    .expect("valid workflow config");
+
+    let publication = Arc::new(PublicationState::new(
+        Arc::new(InMemoryPublisher::new()),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+    ));
+
+    // Publish the echo workflow (Input → Output, no provider needed).
+    publication.publish(snapshot_at(3));
+
+    let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
+        Ok(s) => s,
+        Err(e) => panic!("server build failed: {e}"),
+    };
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let up = tokio::net::TcpStream::connect(("127.0.0.1", admin_port))
+            .await
+            .is_ok();
+        if up {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("gateway admin did not become ready");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Run a published workflow → real execution envelope.
+    let url = format!("http://127.0.0.1:{admin_port}/run");
+    let (status, body) = match post_hyper(
+        &url,
+        r#"{"workflow_id":"echo-wf","body":{"hello":"world"}}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("admin run post failed: {e}"),
+    };
+    assert_eq!(status, http::StatusCode::OK, "published workflow runs");
+    let run: serde_json::Value = serde_json::from_slice(&body).expect("run response JSON");
+    assert_eq!(run["status"], "ok");
+    assert_eq!(run["workflow_id"], "echo-wf");
+    assert_eq!(run["snapshot_version"], 3);
+    assert!(!run["plan_hash"].as_str().unwrap_or_default().is_empty());
+    // The echo workflow's Output node returns its Input — real execution
+    // proves the run path, not a fabricated body.
+    assert_eq!(run["output"]["hello"], "world");
+
+    // Run an unknown/unpublished workflow → real 404.
+    let (status, _body) = match post_hyper(
+        &url,
+        r#"{"workflow_id":"missing","body":{}}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("admin run 404 post failed: {e}"),
+    };
+    assert_eq!(
+        status,
+        http::StatusCode::NOT_FOUND,
+        "unknown workflow is a real 404"
+    );
+}
