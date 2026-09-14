@@ -39,3 +39,38 @@ jobs:
 
       - name: Test
         run: cargo test --all-features --workspace
+
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@4bc04797e8df123df6d7104b8cb33bbe60d1b92b
+        with:
+          bun-version: 1.4.0
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Repo-wide `bun run lint` has ~7k pre-existing prettier violations;
+      # gate on the PR's files only (a full prettier sweep is tracked as follow-up).
+      - name: Lint (changed files)
+        run: |
+          base="${{ github.event.pull_request.base.sha || 'origin/main' }}"
+          changed=$(git diff --name-only "$base"...HEAD -- '*.ts' '*.tsx' || true)
+          if [ -n "$changed" ]; then
+            bunx eslint $changed
+          fi
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build

@@ -71,7 +71,7 @@ export function RelayFlowNode({ data, selected }: NodeProps<RelayNode>) {
   return (
     <div
       className={cn(
-        "w-[228px] rounded-md border border-border bg-panel shadow-node",
+        "relative w-[228px] rounded-md border border-border bg-panel shadow-node",
         run !== "idle" && runStateStyles[run],
         data.issue === "error" && "border-fail/70",
         data.issue === "warn" && "border-warn/60",
@@ -146,8 +146,8 @@ export function RelayFlowNode({ data, selected }: NodeProps<RelayNode>) {
           {branchPorts.map((b, i) => (
             <div
               key={b}
-              className="num absolute right-[-6px] text-[9px] text-muted-foreground"
-              style={{ top: `${34 + i * 22}px`, transform: "translateX(100%)", paddingLeft: 8 }}
+              className="num pointer-events-none absolute text-[9px] text-muted-foreground"
+              style={{ top: `${36 + i * 26}px`, right: 0, transform: "translateX(100%)", paddingLeft: 8 }}
             >
               {b}
             </div>
@@ -158,7 +158,7 @@ export function RelayFlowNode({ data, selected }: NodeProps<RelayNode>) {
               id={b}
               type="source"
               position={Position.Right}
-              style={{ top: 38 + i * 22 }}
+              style={{ top: 40 + i * 26 }}
             />
           ))}
         </>

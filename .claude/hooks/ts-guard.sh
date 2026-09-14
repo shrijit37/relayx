@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ts-guard.sh — PostToolUse hook for TS/TSX edits
-# Advisory: runs prettier --check + eslint after every Edit/Write to a .ts/.tsx file.
-# Logs findings, always exits 0.
+# Enforced: rejects edits introducing explicit `any` types.
+# Advisory: prettier formatting check.
 set -euo pipefail
 
 # Read tool input from stdin (JSON)
@@ -16,6 +16,11 @@ fi
 
 # Non-TS files: skip
 case "$FILE_PATH" in *.ts|*.tsx) ;; *) exit 0 ;; esac
+
+# Resolve to absolute path (hook CWD may not match file location)
+if [[ "$FILE_PATH" != /* ]]; then
+    FILE_PATH="$(pwd)/$FILE_PATH"
+fi
 [ -f "$FILE_PATH" ] || exit 0
 
 # Find project root (nearest package.json)
@@ -33,22 +38,44 @@ done
 
 cd "$PROJECT_ROOT"
 
+# Resolve absolute path for eslint (it ignores files outside the base path)
+ABS_FILE_PATH=$(cd "$(dirname "$FILE_PATH")" && echo "$(pwd)/$(basename "$FILE_PATH")")
+
 # Determine package runner
 RUNNER="npx"
 command -v bunx &>/dev/null && RUNNER="bunx"
 
-# prettier (advisory check — don't auto-reformat)
-PRETTIER_OUTPUT=$($RUNNER prettier --check "$FILE_PATH" 2>&1 || true)
+# prettier (advisory — log but don't block)
+PRETTIER_OUTPUT=$($RUNNER prettier --check "$ABS_FILE_PATH" 2>&1 || true)
 if [ -n "$PRETTIER_OUTPUT" ]; then
-    echo "[ts-guard] prettier findings in $PROJECT_ROOT:"
+    echo "[ts-guard] prettier findings:"
     echo "$PRETTIER_OUTPUT" | head -10
 fi
 
-# eslint (advisory — log but don't fail the hook)
-LINT_OUTPUT=$($RUNNER eslint "$FILE_PATH" 2>&1 || true)
-if [ -n "$LINT_OUTPUT" ]; then
-    echo "[ts-guard] eslint findings in $PROJECT_ROOT:"
-    echo "$LINT_OUTPUT" | head -30
+# eslint — enforced for @typescript-eslint/no-explicit-any
+# Capture exit code properly: set -e + || true makes $? always 0.
+set +e
+ESLINT_OUTPUT=$($RUNNER eslint "$ABS_FILE_PATH" 2>&1)
+ESLINT_EXIT=$?
+set -euo pipefail
+
+if [ $ESLINT_EXIT -ne 0 ] && echo "$ESLINT_OUTPUT" | grep -q "no-explicit-any"; then
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║  ❌ BLOCKED: Explicit 'any' type detected.                ║"
+    echo "║  Fix the violation before continuing.                     ║"
+    echo "║  Use 'unknown' + narrowing/validation instead.            ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "$ESLINT_OUTPUT" | grep "no-explicit-any"
+    echo ""
+    exit 1
+fi
+
+# Other eslint warnings: advisory (log only)
+if [ -n "$ESLINT_OUTPUT" ]; then
+    echo "[ts-guard] eslint advisory:"
+    echo "$ESLINT_OUTPUT" | head -30
 fi
 
 exit 0

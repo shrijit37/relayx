@@ -17,7 +17,7 @@ See [`PHASE6_REPORT.md`](../PHASE6_REPORT.md) for the full completion report. Hi
 - **Frontend wired to real backend** — versions page + workflows index fetch from the control plane; publish returns backend-authoritative version/plan-hash. **Phase 6.5 closes the mock gap:** the editor loads persisted versions into the canvas, Save/Validate are wired end-to-end, and a real Run contract (control-plane → gateway → provider) executes the published ACTIVE version with the real envelope shown in the UI. Management pages show real persisted rows or honest unavailable states; `relay-data.ts` is deleted.
 - **Gateway restart preservation** — the control plane rehydrates the last ACTIVE version of every workflow on boot.
 
-**Test count (Phase 6): Rust 270 passing, zero failures.** Baseline 267 → +3 (control-plane e2e, gateway `/run`). **Control plane: 12 integration tests** against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 19 serializer+run-state tests, production build clean.**
+**Test count (Phase 6): Rust 286 passing, zero failures.** Baseline 267 → +19 (control-plane e2e, gateway `/run`, SQL injection defense-in-depth). **Control plane: 16 integration tests** (12 existing + 4 SQL injection) against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 31 tests (workflow-serializer + run-state + WorkflowBuilder interaction tests), production build clean.**
 
 ### Phase 5 — Runtime publication & frontend wiring (COMPLETE)
 
@@ -34,6 +34,7 @@ See [`PHASE5_REPORT.md`](../PHASE5_REPORT.md) for the full completion report. Hi
 **Test count (Phase 5): 265 passing, zero failures.** Baseline 239 → +26.
 
 ### Phase 1 — High-performance HTTP proxy data plane
+
 - TOML config → immutable snapshot, no DB dependency
 - Route matching + lane-based upstream forwarding
 - HTTP/1.1 streaming proxy (zero buffering, streaming passthrough)
@@ -57,21 +58,22 @@ requests/response/stereams through the canonical model. Streaming is event-by-ev
 drives incremental translation, no full-stream buffering). Phase 1 passthrough remains intact for
 routes without protocol config.
 
-| Milestone | Status | What was built |
-|---|---|---|
-| M2.1 Canonical Model | ✅ | `CanonicalRequest`, `CanonicalResponse`, `ContentBlock` (7 variants: Text, Image, Audio, Reasoning, ToolUse, ToolResult, ToolReference), `Message`, `ToolDefinition`, `ToolUseBlock`, `ToolResultBlock`, `ToolReference`, `AudioContent`, `AudioSource`, `ReasoningContent`, `Usage`, `FinishReason`, `CanonicalStreamEvent` (14 variants incl. AudioDelta, ReasoningDelta, ReasoningSignature), `ProtocolCapabilities`, `ProviderExtensions`, `ProtocolEngineError`, `LossyTranslation`, `LossPolicy` |
-| M2.2 OpenAI Chat Completions | ✅ | Request decoder, response encoder, streaming encoder, tool call encoding, usage encoding, `decode_request_messages`, `decode_tool_choice` helpers |
-| M2.3 Anthropic Messages | ✅ | Request encoder, response decoder, streaming encoder, tool use/result translation, cache usage fields, `Thinking`/`ThinkingDelta`/`SignatureDelta` support, `encode_system_instruction`, `encode_request_messages`, `encode_tools_and_choice` helpers |
-| M2.4 SSE Parser + Stream Engine | ✅ | `StreamingSseParser` (protocol-framing-level, not transport-chunk-level), `format_sse_event`, `format_done_event` |
-| M2.5 Conformance Tests | ✅ | 36 translation e2e tests, 26 streaming boundary tests, 13 canonical/error tests, golden fixtures, round-trip tests, capability loss detection, enforcement tests, error handling, edge cases |
-| M2.6 OpenAI Responses | ✅ | Full adapter: `ResponsesRequest`, `ResponsesResponse`, `ResponsesItem`, `ResponsesContentPart`, `ResponsesStreamEvent`, `decode_request`, `decode_response`, `encode_response`, `encode_stream_event` — handles `input_text`/`output_text`/`input_audio`/`function_call`/reasoning items, `tool_choice` decoding |
-| M2.7 Performance Benchmarks | ✅ | Criterion benchmarks for request decoding, response encoding, stream event encoding, cross-adapter translation |
-| M2.8 Code Quality | ✅ | Split oversized adapter functions (`encode_request` → 4 helpers, `decode_request` → `decode_request_messages` + `decode_tool_choice`), `enforce_translation_losses()` wired into adapter boundaries |
-| M2.10 Gateway Integration | ✅ | `ProtocolEngine` in gateway: route-level `source_protocol`/`target_protocol` config, request decode→canonical→target encode, response decode→canonical→client encode, SSE event-by-event stream translation, error mapping (`ProtocolEngineError` → `GatewayError` → HTTP) |
+| Milestone                       | Status | What was built                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| M2.1 Canonical Model            | ✅     | `CanonicalRequest`, `CanonicalResponse`, `ContentBlock` (7 variants: Text, Image, Audio, Reasoning, ToolUse, ToolResult, ToolReference), `Message`, `ToolDefinition`, `ToolUseBlock`, `ToolResultBlock`, `ToolReference`, `AudioContent`, `AudioSource`, `ReasoningContent`, `Usage`, `FinishReason`, `CanonicalStreamEvent` (14 variants incl. AudioDelta, ReasoningDelta, ReasoningSignature), `ProtocolCapabilities`, `ProviderExtensions`, `ProtocolEngineError`, `LossyTranslation`, `LossPolicy` |
+| M2.2 OpenAI Chat Completions    | ✅     | Request decoder, response encoder, streaming encoder, tool call encoding, usage encoding, `decode_request_messages`, `decode_tool_choice` helpers                                                                                                                                                                                                                                                                                                                                                      |
+| M2.3 Anthropic Messages         | ✅     | Request encoder, response decoder, streaming encoder, tool use/result translation, cache usage fields, `Thinking`/`ThinkingDelta`/`SignatureDelta` support, `encode_system_instruction`, `encode_request_messages`, `encode_tools_and_choice` helpers                                                                                                                                                                                                                                                  |
+| M2.4 SSE Parser + Stream Engine | ✅     | `StreamingSseParser` (protocol-framing-level, not transport-chunk-level), `format_sse_event`, `format_done_event`                                                                                                                                                                                                                                                                                                                                                                                      |
+| M2.5 Conformance Tests          | ✅     | 36 translation e2e tests, 26 streaming boundary tests, 13 canonical/error tests, golden fixtures, round-trip tests, capability loss detection, enforcement tests, error handling, edge cases                                                                                                                                                                                                                                                                                                           |
+| M2.6 OpenAI Responses           | ✅     | Full adapter: `ResponsesRequest`, `ResponsesResponse`, `ResponsesItem`, `ResponsesContentPart`, `ResponsesStreamEvent`, `decode_request`, `decode_response`, `encode_response`, `encode_stream_event` — handles `input_text`/`output_text`/`input_audio`/`function_call`/reasoning items, `tool_choice` decoding                                                                                                                                                                                       |
+| M2.7 Performance Benchmarks     | ✅     | Criterion benchmarks for request decoding, response encoding, stream event encoding, cross-adapter translation                                                                                                                                                                                                                                                                                                                                                                                         |
+| M2.8 Code Quality               | ✅     | Split oversized adapter functions (`encode_request` → 4 helpers, `decode_request` → `decode_request_messages` + `decode_tool_choice`), `enforce_translation_losses()` wired into adapter boundaries                                                                                                                                                                                                                                                                                                    |
+| M2.10 Gateway Integration       | ✅     | `ProtocolEngine` in gateway: route-level `source_protocol`/`target_protocol` config, request decode→canonical→target encode, response decode→canonical→client encode, SSE event-by-event stream translation, error mapping (`ProtocolEngineError` → `GatewayError` → HTTP)                                                                                                                                                                                                                             |
 
 **Total test count (Phase 2 snapshot): 197 tests passing, zero failures.** 131 in protocol-core, 39 in gateway, 12 in workflow-schema, 4 in mock-upstream. Includes 5 property tests (SSE parser non-panic, format→parse roundtrip, canonical serde roundtrip). **Workspace-wide count today: 265 (see Phase 5 section).**
 
 Phase 2 compliance status (post-audit):
+
 - ✅ Gateway now depends on and invokes `protocol-core` (was pure passthrough)
 - ✅ Real non-streaming translation OpenAI Chat ↔ Anthropic works through the live gateway
 - ✅ Streaming translation path implemented event-by-event (no full-stream buffering)
@@ -111,6 +113,7 @@ Execution engine (52 tests: unit + integration + extension-proof + context capab
 React 19 + TanStack Start + TanStack Router + React Flow + Vite (scaffolded via Lovable.dev).
 
 **Pages (15 user-facing routes) — backend-driven or honest unavailable (Phase 6.5):**
+
 - **Fully real:** `/workflows` (list from control plane) ✅
 - **Real:** `/workflows/$workflowId` (load latest version → canvas; Save/Validate/Compile/Publish/Run all hit real control-plane endpoints) ✅
 - **Real:** `/workflows/$workflowId/versions` (version list + plan hash from control plane) ✅
@@ -119,6 +122,7 @@ React 19 + TanStack Start + TanStack Router + React Flow + Vite (scaffolded via 
 - **Honest unavailable (no backend yet):** `/runs`, `/runs/$runId`, `/observability`, `/mcp`, `/skills`, `/policies`, `/secrets` ✅ (no fabricated data)
 
 **Workflow editor:**
+
 - Full React Flow canvas with 16 node kind variants, drag-and-drop, edge connections, Inspector panel
 - **Workflow serialization + deserialization** — `workflow-serializer.ts` maps React Flow ↔ canonical Workflow JSON (lane folding, condition validation, reject-on-invalid, unknown-kind skip-with-warning)
 - **API boundary** — `api.ts` (publish, validate, save, run, fetch, system-health) + React Query hooks wiring the editor to the control plane
@@ -129,7 +133,7 @@ React 19 + TanStack Start + TanStack Router + React Flow + Vite (scaffolded via 
 
 **No fabricated data:** `relay-data.ts` does not exist; no fabricated mock data files exist. `graph.ts` holds only a 2-node empty starter; inline page fixtures (secrets/health/lanes/policies/settings) are gone; `Math.sin` time series are gone. All data flows are real HTTP calls to the control plane API.
 
-**Tests:** serializer + run-state reducer tests (`bun test` in `apps/web`, 19 total), control-plane run integration tests, gateway `/run` integration test. TS clean, production build clean.
+**Tests:** workflow-serializer + run-state reducer + WorkflowBuilder interaction tests (`bun test` in `apps/web`, 31 total), control-plane run integration tests, gateway `/run` integration test. TS clean, production build clean.
 
 ## Backend correctness
 
@@ -143,7 +147,7 @@ Audited findings, current status:
 
 - **Rust: 286 tests** (workspace, zero failures).
 - **Control plane: 16 tests** (12 existing + 4 SQL injection) against a real Postgres 16 + in-process mock gateway.
-- **Frontend: 19 tests** (workflow-serializer 13 + run-state 6) run via `bun test`, not vitest.
+- **Frontend: 31 tests** (workflow-serializer + run-state reducer + 3 WorkflowBuilder interaction tests) run via `bun test` with happy-dom + @testing-library/react. Interaction tests guard against dead-UI regressions (stubbed `RunPanel`, unwired toolbar buttons).
 - **Gateway admin auth: 5 tests** in `apps/gateway/tests/admin_auth.rs` proving anonymous rejection, wrong-key rejection, valid-key acceptance, `/healthz` stays open, and no-key backward compat.
 
 ## Known limitations
@@ -164,22 +168,22 @@ Honest, non-goal inventory — nothing below is claimed complete:
 
 ## Current decisions
 
-| Area | Decision | Status |
-|---|---|---|
-| Frontend canvas | React Flow / xyflow | Decided |
-| Data plane | Rust | Decided |
-| Async runtime | Tokio | Decided |
-| HTTP foundation | Hyper/Tower; Axum where useful | Decided |
-| Proxy option | Evaluate Pingora for dedicated proxy path | Evaluate |
-| Control plane | TypeScript + Fastify | Preferred |
-| Persistent DB | PostgreSQL | Preferred |
-| Cache/coordination | Redis only where justified | Preferred |
-| Workflow runtime | Compiled IR/execution plan | Decided |
-| Routing abstraction | Lane | Decided |
-| MCP | Dynamic discovery + deferred loading semantics | Decided |
-| Skills | Progressive discovery/loading | Decided |
-| Protocol strategy | Canonical core + provider-specific extensions | Decided |
-| Streaming | First-class | Decided |
+| Area                | Decision                                       | Status    |
+| ------------------- | ---------------------------------------------- | --------- |
+| Frontend canvas     | React Flow / xyflow                            | Decided   |
+| Data plane          | Rust                                           | Decided   |
+| Async runtime       | Tokio                                          | Decided   |
+| HTTP foundation     | Hyper/Tower; Axum where useful                 | Decided   |
+| Proxy option        | Evaluate Pingora for dedicated proxy path      | Evaluate  |
+| Control plane       | TypeScript + Fastify                           | Preferred |
+| Persistent DB       | PostgreSQL                                     | Preferred |
+| Cache/coordination  | Redis only where justified                     | Preferred |
+| Workflow runtime    | Compiled IR/execution plan                     | Decided   |
+| Routing abstraction | Lane                                           | Decided   |
+| MCP                 | Dynamic discovery + deferred loading semantics | Decided   |
+| Skills              | Progressive discovery/loading                  | Decided   |
+| Protocol strategy   | Canonical core + provider-specific extensions  | Decided   |
+| Streaming           | First-class                                    | Decided   |
 
 For detailed rationale on each decision, see the [ADRs](./adr-0001-stack.md) and the [Decision Log](#decision-log) below.
 
@@ -187,19 +191,19 @@ For detailed rationale on each decision, see the [ADRs](./adr-0001-stack.md) and
 
 Compact log of decisions. Detailed rationale belongs in ADR files.
 
-| Decision | State |
-|---|---|
-| React Flow for visual graph | Accepted |
-| Rust data plane | Accepted |
-| TypeScript control plane | Preferred |
-| Lane = provider/endpoint + network + policy + pool | Accepted |
-| Compiled workflow IR | Accepted |
-| Progressive MCP discovery | Accepted |
-| Progressive Skill loading | Accepted |
-| Canonical protocol + extensions | Accepted |
-| Separate control/data planes | Accepted |
-| No synchronous DB in hot path | Accepted |
-| Runtime plugin installation | Deferred / restricted |
+| Decision                                           | State                 |
+| -------------------------------------------------- | --------------------- |
+| React Flow for visual graph                        | Accepted              |
+| Rust data plane                                    | Accepted              |
+| TypeScript control plane                           | Preferred             |
+| Lane = provider/endpoint + network + policy + pool | Accepted              |
+| Compiled workflow IR                               | Accepted              |
+| Progressive MCP discovery                          | Accepted              |
+| Progressive Skill loading                          | Accepted              |
+| Canonical protocol + extensions                    | Accepted              |
+| Separate control/data planes                       | Accepted              |
+| No synchronous DB in hot path                      | Accepted              |
+| Runtime plugin installation                        | Deferred / restricted |
 
 ## Implementation phases
 
@@ -228,19 +232,21 @@ See [Roadmap](./roadmap.md) for the full implementation phase breakdown (Phase 0
 
 Current Claude Code configuration for this repository. Update this table whenever `.claude/` config changes (per the Documentation synchronization rule in AGENTS.md).
 
-| Component | Status | Path |
-|-----------|--------|------|
-| settings.json (hooks + permissions) | Installed | `.claude/settings.json` |
-| rust-policy hook | Installed | `.claude/hooks/check-rust-policy.sh` |
-| architecture-guard skill | Installed | `.claude/skills/architecture-guard/SKILL.md` |
-| scaffold-phase skill | Installed | `.claude/skills/scaffold-phase/SKILL.md` |
-| protocol-fidelity-reviewer subagent | Installed | `.claude/agents/protocol-fidelity-reviewer.md` |
-| hot-path-auditor subagent | Installed | `.claude/agents/hot-path-auditor.md` |
+| Component                                           | Status    | Path                                           |
+| --------------------------------------------------- | --------- | ---------------------------------------------- |
+| settings.json (hooks + permissions)                 | Installed | `.claude/settings.json`                        |
+| rust-policy hook                                    | Installed | `.claude/hooks/check-rust-policy.sh`           |
+| ts-guard hook (no-explicit-any + advisory prettier) | Installed | `.claude/hooks/ts-guard.sh`                    |
+| architecture-guard skill                            | Installed | `.claude/skills/architecture-guard/SKILL.md`   |
+| scaffold-phase skill                                | Installed | `.claude/skills/scaffold-phase/SKILL.md`       |
+| protocol-fidelity-reviewer subagent                 | Installed | `.claude/agents/protocol-fidelity-reviewer.md` |
+| hot-path-auditor subagent                           | Installed | `.claude/agents/hot-path-auditor.md`           |
 
 Hooks active:
 
 - PostToolUse: architectural-rule reminder on every Edit/Write
 - PostToolUse: `.claude/hooks/check-rust-policy.sh` on every Edit/Write (fails on `dead_code` suppression, `todo!`, `unimplemented!`, `.unwrap()`, `.expect()`)
+- PostToolUse: `.claude/hooks/ts-guard.sh` on every Edit/Write to `.ts`/`.tsx` files (enforces no-explicit-any; advisory prettier check)
 - PreToolUse: block edits to `Cargo.lock` / `pnpm-lock.yaml` / `pnpm-lock.yml` / `bun.lockb` / `yarn.lock`
 - PreToolUse: block edits to `.env` files
 - Git pre-commit: same rust-policy checker via `.githooks/pre-commit` (`git config core.hooksPath .githooks`)

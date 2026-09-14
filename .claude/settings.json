@@ -26,15 +26,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/check-rust-policy.sh"
+            "command": "/home/shrijit/projects/relay-x/.claude/hooks/check-rust-policy.sh"
           },
           {
             "type": "command",
-            "command": ".claude/hooks/ts-guard.sh"
+            "command": "/home/shrijit/projects/relay-x/.claude/hooks/ts-guard.sh"
           },
           {
             "type": "command",
-            "command": ".claude/hooks/shell-guard.sh"
+            "command": "/home/shrijit/projects/relay-x/.claude/hooks/shell-guard.sh"
           }
         ]
       }

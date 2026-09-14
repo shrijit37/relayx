@@ -48,7 +48,8 @@ cd apps/web
 bun install
 bun run dev       # Vite dev server with TanStack Start SSR
 bun run build     # Production build to .output/
-bun test          # Serializer + run-state reducer tests
+bun run typecheck # tsc --noEmit
+bun test          # Serializer + run-state reducer + WorkflowBuilder interaction tests
 ```
 
 ### Control plane (apps/control-plane)
@@ -141,15 +142,25 @@ cargo clippy --all-targets --all-features --workspace -- -D warnings
 
 `.github/workflows/ci.yml` runs on push to `master`/`main` and all PRs:
 
+### Rust job
+
 1. **Rust policy check** — forbidden patterns (unwrap, expect, todo, dead_code suppression)
 2. **Format check** — `cargo fmt --check`
 3. **Clippy** — `cargo clippy -- -D warnings`
 4. **Test** — `cargo test --all-features --workspace`
 
+### Web job
+
+1. **Typecheck** — `tsc --noEmit` (via `bun run typecheck`)
+2. **Lint (changed files only)** — `eslint` on PR-diffed `.ts`/`.tsx` files (repo-wide lint has pre-existing prettier debt; scoped to PR scope prevents false-red CI)
+3. **Test** — `bun test` (workflow-serializer + run-state reducer + WorkflowBuilder interaction tests, runs in happy-dom)
+4. **Build** — `vite build` (production bundle check)
+
 Features:
+
 - Actions pinned to full commit SHAs (supply-chain security)
 - `permissions: contents: read` (least-privilege)
-- `timeout-minutes: 30` (hung test protection)
+- `timeout-minutes: 30` (Rust), `timeout-minutes: 20` (web)
 - `concurrency` group with cancel-in-progress for PRs
 
 ## Rust policy
@@ -157,6 +168,7 @@ Features:
 Enforced by `.claude/hooks/check-rust-policy.sh` (also runs as git pre-commit hook):
 
 **Prohibited** (in all `.rs` files):
+
 - `#[allow(dead_code)]` / `#[expect(dead_code)]`
 - `todo!()` / `unimplemented!()`
 - `.unwrap()` / `.expect(...)`
@@ -173,12 +185,12 @@ Breaking changes require an ADR and migration plan.
 
 `crates/mock-upstream` supports:
 
-| Feature | Config |
-|---------|--------|
-| JSON mode | `--mode json --json-body '{"ok":true}'` |
-| SSE mode | `--mode sse --chunks 10 --chunk-size 512` |
-| TTFB delay | `--ttfb-ms 5000` |
-| Chunk delay | `--chunk-delay-ms 100` |
+| Feature         | Config                                            |
+| --------------- | ------------------------------------------------- |
+| JSON mode       | `--mode json --json-body '{"ok":true}'`           |
+| SSE mode        | `--mode sse --chunks 10 --chunk-size 512`         |
+| TTFB delay      | `--ttfb-ms 5000`                                  |
+| Chunk delay     | `--chunk-delay-ms 100`                            |
 | Error injection | `x-mock-error-at` / `x-mock-error-status` headers |
 
 Counters exposed at `/stats`: `requests_served`, `connections_accepted`, `bytes_sent`.

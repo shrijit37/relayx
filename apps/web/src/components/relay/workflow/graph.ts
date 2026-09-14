@@ -27,4 +27,6 @@ export const defaultNodes: RelayNode[] = [
   },
 ];
 
-export const defaultEdges: Edge[] = [];
+export const defaultEdges: Edge[] = [
+  { id: "e-input-output", source: "input", target: "output", type: "deletable" },
+];

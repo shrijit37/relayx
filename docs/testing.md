@@ -81,6 +81,12 @@ cargo test --all-features -p relay-gateway --test proxy_integration
 cargo test --all-features -p relay-gateway --test cancellation_integration
 cargo test --all-features -p relay-gateway --test load_test
 
+# Frontend tests (apps/web)
+cd apps/web && bun test
+
+# Frontend typecheck
+cd apps/web && bun run typecheck
+
 # Benchmarks
 cargo bench --bench proxy_latency -p relay-gateway
 ```
@@ -88,6 +94,7 @@ cargo bench --bench proxy_latency -p relay-gateway
 ## Test harness
 
 The `crates/test-harness` crate provides in-process spawn helpers:
+
 - `spawn_gateway(addr)` — gateway with two routes to a mock upstream
 - `spawn_gateway_with_timeout(addr, ms)` — gateway with custom request timeout
 - `spawn_json_stack(body)` — mock (JSON mode) + gateway
@@ -142,6 +149,18 @@ Test:
 - policy rejection
 - fast-path detection
 - fallback compilation
+
+## Frontend interaction tests (Phase 6.5+)
+
+`apps/web/` has 3 WorkflowBuilder interaction tests that guard the "click does nothing" dead-UI regression class:
+
+- **Panel opens** — toolbar "Run test" button triggers a real panel render (not `return null`)
+- **Run submits** — clicking "Run" in the panel fires `POST /workflows/:id/run`, the real backend envelope (request_id, workflow_version, snapshot_version, plan_hash, output) surfaces in the panel
+- **Failed run** — unpublished workflow surfaces the real backend 409 error message
+
+These tests use `@testing-library/react` + `happy-dom` (via `@happy-dom/global-registrator`), stubbing `globalThis.fetch` for API routes. The `ResizeObserver` mock is in `src/test-setup.ts` (bunfig.toml preload).
+
+**Why interaction tests instead of static heuristic?** Detecting "this component returns null and should not" is fragile via static analysis. The interaction test proves the button click actually reaches the real panel and mutation — a `return null` stub, an unwired `onRun`, or a dead `submitRun` all make these tests red (verified via red/green during implementation).
 
 ## Network lane tests (Phase 3+)
 

@@ -475,7 +475,7 @@ export function toCanonicalEdges(edges: Edge[]): CanonicalEdge[] {
 /** Canonical edges → React Flow edges (no semantic reconstruction). */
 export function fromCanonicalEdges(edges: CanonicalEdge[]): Edge[] {
   return edges.map((e) => {
-    const rf: Edge = { id: e.id, source: e.source, target: e.target };
+    const rf: Edge = { id: e.id, source: e.source, target: e.target, type: "deletable" };
     if (e.sourcePort !== "out") rf.sourceHandle = e.sourcePort;
     if (e.targetPort !== "in") rf.targetHandle = e.targetPort;
     if (e.label) rf.label = e.label;
