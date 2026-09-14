@@ -199,7 +199,8 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
       try {
         gatewayResp = await gateway.runStream({ workflow_id: id, body });
       } catch (e) {
-        return reply.code(502).send({ error: String(e) });
+        const message = e instanceof Error ? e.message : String(e);
+        return reply.code(502).send({ error: message });
       }
       const upstream = gatewayResp.body;
       if (!upstream) {
@@ -208,6 +209,12 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
           .send({ error: "gateway returned an empty stream" });
       }
       reply.hijack();
+      // @fastify/cors writes headers on `reply`, which hijacking bypasses;
+      // carry the same reflect-origin policy onto the raw response.
+      if (req.headers.origin) {
+        reply.raw.setHeader("Access-Control-Allow-Origin", req.headers.origin);
+        reply.raw.setHeader("Vary", "Origin");
+      }
       reply.raw.writeHead(200, {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",

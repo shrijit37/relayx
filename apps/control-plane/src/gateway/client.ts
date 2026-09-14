@@ -104,8 +104,15 @@ export class GatewayClient {
         body: JSON.stringify(payload),
       });
       if (!resp.ok) {
-        const data = (await resp.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(data?.error ?? `gateway HTTP ${resp.status}`);
+        const data = (await resp.json().catch(() => null)) as { error?: unknown } | null;
+        const raw = data?.error;
+        const msg =
+          typeof raw === "string"
+            ? raw
+            : typeof raw === "object" && raw !== null && "message" in raw
+              ? String((raw as { message: unknown }).message)
+              : `gateway HTTP ${resp.status}`;
+        throw new Error(msg);
       }
       return resp;
     } catch (e) {

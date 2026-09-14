@@ -20,6 +20,7 @@ import { buildCoherentWire, listActiveWorkflows, nextSnapshotVersion } from "./d
 const PORT = Number(Bun.env["RELAYX_CONTROL_PORT"] ?? 9091);
 const GATEWAY_ADMIN = Bun.env["RELAYX_GATEWAY_ADMIN_URL"] ?? "http://127.0.0.1:9090";
 const GATEWAY_API_KEY = Bun.env["RELAYX_GATEWAY_API_KEY"];
+const HEALTH_POLL_MS = Number(Bun.env["RELAYX_HEALTH_POLL_MS"] ?? 2_000);
 
 const pool = createPool(dbConfigFromEnv());
 
@@ -36,37 +37,44 @@ await pool.query(
 const gateway = new GatewayClient(GATEWAY_ADMIN, GATEWAY_API_KEY);
 const app = await buildApp({ pool, gateway });
 
-// Re-hydrate the data plane from the last ACTIVE version of every workflow.
-// One coherent bundle over ALL active workflows (never single-workflow),
-// credentials resolved, global snapshot version (review #1/#2/#9/#10).
-// The gateway restarts empty; this republish is what restores service.
-// Failures are logged, not fatal: the control plane still serves CRUD.
-try {
-  const activeFlows = await listActiveWorkflows(pool);
-  if (activeFlows.length === 0) {
-    console.log("[rehydrate] no active workflows to re-publish");
-  } else {
+/**
+ * Republish the ACTIVE version of every workflow as one coherent bundle.
+ * Shared by boot and the watchdog; the gateway restarts empty (cargo-watch,
+ * crash, manual), and this republish is what restores service. Failures are
+ * logged, not fatal: the control plane still serves CRUD.
+ */
+async function rehydrateGateway(label: string) {
+  try {
+    const activeFlows = await listActiveWorkflows(pool);
+    if (activeFlows.length === 0) {
+      console.warn(`[${label}] no active workflows to re-publish`);
+      return;
+    }
     const wire = await buildCoherentWire(
       activeFlows,
       (id) => repo.lanes.get(pool, id),
       () => nextSnapshotVersion(pool),
     );
     if ("error" in wire) {
-      console.warn(`[rehydrate] skipped: ${wire.error}`);
+      console.warn(`[${label}] skipped: ${wire.error}`);
     } else {
       const res = await gateway.publish(wire);
       if (res.ok) {
         console.log(
-          `[rehydrate] republished ${activeFlows.length} workflow(s) as snapshot v${res.snapshot_version}`,
+          `[${label}] republished ${activeFlows.length} workflow(s) as snapshot v${res.snapshot_version}`,
         );
       } else {
-        console.warn(`[rehydrate] publish failed: ${res.error}`);
+        console.warn(`[${label}] publish failed: ${res.error}`);
       }
     }
+  } catch (e) {
+    console.warn(`[${label}] skipped`, e);
   }
-} catch (e) {
-  console.warn("[rehydrate] skipped", e);
 }
+
+// Boot re-hydrate: publish the active bundle so a cold-started gateway has
+// state immediately.
+await rehydrateGateway("rehydrate");
 
 try {
   await app.listen({ port: PORT, host: "0.0.0.0" });
@@ -74,6 +82,26 @@ try {
   app.log.error(err);
   process.exit(1);
 }
+
+// Gateway watchdog: poll /healthz (unauthenticated, read-only). When the
+// gateway comes back after being down (restart/recompile/crash), republish
+// the active bundle so the data plane recovers without a CP restart.
+let gatewayWasDown = false;
+setInterval(async () => {
+  try {
+    const r = await fetch(`${GATEWAY_ADMIN}/healthz`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (gatewayWasDown) {
+      console.warn("[watchdog] gateway recovered — rehydrating");
+      await rehydrateGateway("watchdog");
+    }
+    gatewayWasDown = false;
+  } catch {
+    gatewayWasDown = true;
+  }
+}, HEALTH_POLL_MS);
 
 // Control plane is durable + independent of the data plane: leaving this
 // running keeps serving CRUD; gateway publish cadence is driven by calls.
