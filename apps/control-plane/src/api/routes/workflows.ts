@@ -195,7 +195,12 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
     // browser without buffering.
     const { stream } = (req.query ?? {}) as { stream?: string };
     if (stream === "true") {
-      const gatewayResp = await gateway.runStream({ workflow_id: id, body });
+      let gatewayResp: Response;
+      try {
+        gatewayResp = await gateway.runStream({ workflow_id: id, body });
+      } catch (e) {
+        return reply.code(502).send({ error: String(e) });
+      }
       const upstream = gatewayResp.body;
       if (!upstream) {
         return reply

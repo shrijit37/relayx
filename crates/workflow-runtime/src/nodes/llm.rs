@@ -468,7 +468,7 @@ async fn decode_streamed_response_incremental(
         match frame {
             Ok(Some(Ok(bytes))) => {
                 for event in parser.feed(&bytes) {
-                    fold.fold(&event);
+                    fold.fold(&event).await;
                 }
             }
             Ok(Some(Err(e))) => {
@@ -485,7 +485,7 @@ async fn decode_streamed_response_incremental(
         }
     }
     for event in parser.finish() {
-        fold.fold(&event);
+        fold.fold(&event).await;
     }
 
     fold.into_response()
@@ -518,28 +518,29 @@ impl StreamFold {
         }
     }
 
-    /// Emit a token SSE event through the wire channel (best-effort).
-    fn emit_token(&self, delta: &str) {
+    /// Emit a token SSE event through the wire channel, blocking on
+    /// backpressure instead of silently dropping tokens.
+    async fn emit_token(&self, delta: &str) {
         if let Some(ref tx) = self.wire_tx {
             let payload = serde_json::json!({"delta": delta});
             let wire = protocol_core::sse::format_sse_event(&payload.to_string(), Some("token"));
-            let _ = tx.try_send(bytes::Bytes::from(wire));
+            let _ = tx.send(bytes::Bytes::from(wire)).await;
         }
     }
 
     /// Fold one parsed SSE event.
-    fn fold(&mut self, event: &protocol_core::sse::SseEvent) {
+    async fn fold(&mut self, event: &protocol_core::sse::SseEvent) {
         if event.is_done() {
             return;
         }
         match self.protocol {
-            Protocol::OpenAiResponses => self.fold_responses(event),
-            Protocol::AnthropicMessages => self.fold_anthropic(event),
-            Protocol::OpenAiChatCompletions => self.fold_chat(event),
+            Protocol::OpenAiResponses => self.fold_responses(event).await,
+            Protocol::AnthropicMessages => self.fold_anthropic(event).await,
+            Protocol::OpenAiChatCompletions => self.fold_chat(event).await,
         }
     }
 
-    fn fold_chat(&mut self, event: &protocol_core::sse::SseEvent) {
+    async fn fold_chat(&mut self, event: &protocol_core::sse::SseEvent) {
         use protocol_core::adapters::openai_chat::ChatCompletionChunk;
         let chunk: ChatCompletionChunk = match serde_json::from_str(&event.data) {
             Ok(c) => c,
@@ -573,7 +574,7 @@ impl StreamFold {
             }
             if let Some(delta) = &choice.delta.content {
                 self.text.push_str(delta);
-                self.emit_token(delta);
+                self.emit_token(delta).await;
             }
             if let Some(tcs) = &choice.delta.tool_calls {
                 for tc in tcs {
@@ -603,7 +604,7 @@ impl StreamFold {
     /// discriminator: `message_start`, `content_block_delta`, `message_delta`,
     /// `message_stop`. Only text deltas / usage / stop are folded here; tool
     /// delta accumulation is delegated to the canonical fold path.
-    fn fold_anthropic(&mut self, event: &protocol_core::sse::SseEvent) {
+    async fn fold_anthropic(&mut self, event: &protocol_core::sse::SseEvent) {
         use protocol_core::adapters::anthropic_messages::MessagesStreamEvent;
         let parsed: MessagesStreamEvent = match serde_json::from_str(&event.data) {
             Ok(e) => e,
@@ -619,7 +620,7 @@ impl StreamFold {
                 match delta {
                     MessagesDelta::TextDelta { text } => {
                         self.text.push_str(&text);
-                        self.emit_token(&text);
+                        self.emit_token(&text).await;
                     }
                     MessagesDelta::InputJsonDelta { partial_json } => {
                         // Tool-call JSON accumulation — store for later parsing.
@@ -654,7 +655,7 @@ impl StreamFold {
     /// Fold an OpenAI Responses stream event. Responses events use
     /// `response.output_text.delta` for text deltas and
     /// `response.completed` for usage / final status.
-    fn fold_responses(&mut self, event: &protocol_core::sse::SseEvent) {
+    async fn fold_responses(&mut self, event: &protocol_core::sse::SseEvent) {
         use protocol_core::adapters::openai_responses::ResponsesStreamEvent;
         let parsed: ResponsesStreamEvent = match serde_json::from_str(&event.data) {
             Ok(e) => e,
@@ -678,7 +679,7 @@ impl StreamFold {
                     && !text.is_empty()
                 {
                     self.text.push_str(&text);
-                    self.emit_token(&text);
+                    self.emit_token(&text).await;
                 }
             }
             _ => {}

@@ -621,25 +621,37 @@ pub fn admin_router_with_publication(
 
                 match result {
                     Ok(response) => {
-                        let collected = http_body_util::BodyExt::collect(response.into_body())
-                            .await
-                            .ok()
-                            .map(|b| b.to_bytes());
-                        if let Some(bytes) = collected {
-                            let output: serde_json::Value =
-                                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-                            let envelope = serde_json::json!({
-                                "request_id": rid,
-                                "workflow_id": wf_id2,
-                                "snapshot_version": snap.version(),
-                                "plan_hash": snap.plan_hash_for(&wf_id2).unwrap_or_default(),
-                                "output": output,
-                            });
-                            let wire = protocol_core::sse::format_sse_event(
-                                &envelope.to_string(),
-                                Some("done"),
-                            );
-                            let _ = tx.send(bytes::Bytes::from(wire)).await;
+                        let body_result =
+                            http_body_util::BodyExt::collect(response.into_body()).await;
+                        match body_result {
+                            Ok(collected) => {
+                                let bytes = collected.to_bytes();
+                                let output: serde_json::Value =
+                                    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                                let envelope = serde_json::json!({
+                                    "request_id": rid,
+                                    "workflow_id": wf_id2,
+                                    "workflow_version": 0,
+                                    "snapshot_version": snap.version(),
+                                    "plan_hash": snap.plan_hash_for(&wf_id2).unwrap_or_default(),
+                                    "output": output,
+                                });
+                                let wire = protocol_core::sse::format_sse_event(
+                                    &envelope.to_string(),
+                                    Some("done"),
+                                );
+                                let _ = tx.send(bytes::Bytes::from(wire)).await;
+                            }
+                            Err(e) => {
+                                let err = serde_json::json!({
+                                    "error": format!("failed to read response body: {e}")
+                                });
+                                let wire = protocol_core::sse::format_sse_event(
+                                    &err.to_string(),
+                                    Some("error"),
+                                );
+                                let _ = tx.send(bytes::Bytes::from(wire)).await;
+                            }
                         }
                     }
                     Err(e) => {
@@ -653,7 +665,7 @@ pub fn admin_router_with_publication(
             });
 
             let sse_body =
-                axum::body::Body::from_stream(stream.map(|b| Ok::<_, std::io::Error>(b)));
+                axum::body::Body::from_stream(stream.map(Ok::<_, std::io::Error>));
             let resp = axum::response::Response::builder()
                 .status(200)
                 .header(http::header::CONTENT_TYPE, "text/event-stream")

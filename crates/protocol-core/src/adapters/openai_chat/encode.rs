@@ -30,6 +30,14 @@ pub fn encode_request(
     }
 
     for msg in &req.messages {
+        // Skip Tool-role messages here: OpenAI requires `tool_call_id` on
+        // tool-role messages, which only the second loop below emits correctly.
+        // `encode_message` ignores ToolResult blocks, so passing a Tool-role
+        // message through here would emit a malformed message with no
+        // `tool_call_id`.
+        if msg.role == crate::canonical::Role::Tool {
+            continue;
+        }
         let (role_str, content, tool_calls) = encode_message(msg)?;
         messages.push(ChatMessage {
             role: role_str,
@@ -40,7 +48,7 @@ pub fn encode_request(
         });
     }
 
-    // Tool results: OpenAI uses separate `tool` role messages.
+    // Tool results: OpenAI uses separate `tool` role messages (with `tool_call_id`).
     for msg in &req.messages {
         if msg.role == crate::canonical::Role::Tool {
             let blocks = msg.content.clone().into_blocks();

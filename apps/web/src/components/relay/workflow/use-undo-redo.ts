@@ -6,25 +6,23 @@
  */
 
 import { useCallback, useRef, useState } from "react";
+import type { Edge, Node } from "@xyflow/react";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Snapshot = { nodes: any[]; edges: any[] };
+type Snapshot<N extends Node> = { nodes: N[]; edges: Edge[] };
 
-export function useUndoRedo(opts: {
-  getNodes: () => any[];
-  getEdges: () => any[];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  setNodes: (updater: (ns: any[]) => any[]) => void;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  setEdges: (updater: (es: any[]) => any[]) => void;
+export function useUndoRedo<N extends Node>(opts: {
+  getNodes: () => N[];
+  getEdges: () => Edge[];
+  setNodes: (updater: (ns: N[]) => N[]) => void;
+  setEdges: (updater: (es: Edge[]) => Edge[]) => void;
 }) {
   const { getNodes, getEdges, setNodes, setEdges } = opts;
-  const past = useRef<Snapshot[]>([]);
-  const future = useRef<Snapshot[]>([]);
+  const past = useRef<Snapshot<N>[]>([]);
+  const future = useRef<Snapshot<N>[]>([]);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
 
-  const current = useCallback((): Snapshot => ({ nodes: getNodes(), edges: getEdges() }), [getNodes, getEdges]);
+  const current = useCallback((): Snapshot<N> => ({ nodes: getNodes(), edges: getEdges() }), [getNodes, getEdges]);
 
   const record = useCallback(() => {
     past.current.push(current());
@@ -34,7 +32,7 @@ export function useUndoRedo(opts: {
     setCanRedo(false);
   }, [current]);
 
-  const apply = useCallback((snap: Snapshot) => {
+  const apply = useCallback((snap: Snapshot<N>) => {
     setNodes(() => snap.nodes);
     setEdges(() => snap.edges);
   }, [setNodes, setEdges]);

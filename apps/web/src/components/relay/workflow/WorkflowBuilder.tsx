@@ -270,7 +270,10 @@ function Canvas({ workflowId }: { workflowId: string }) {
     const [version, setVersion] = useState<number | null>(null);
     const [planHash, setPlanHash] = useState<string | null>(null);
     const [noSavedVersions, setNoSavedVersions] = useState(false);
-    const { screenToFlowPosition, fitView, getNodes, getEdges } = useReactFlow();
+    const { screenToFlowPosition, fitView, getNodes: getNodesRaw, getEdges } = useReactFlow();
+    // useNodesState<RelayNode> actually stores RelayNode[]; cast getNodes to
+    // match so useUndoRedo's generic infers the concrete type.
+    const getNodes = getNodesRaw as unknown as () => RelayNode[];
     const undo = useUndoRedo({ getNodes, getEdges, setNodes, setEdges });
 
     const { data: latest, isPending: latestPending } = useWorkflowLatestVersion(workflowId);
@@ -619,12 +622,16 @@ function Canvas({ workflowId }: { workflowId: string }) {
                                 output: event.output,
                             },
                         });
-                        break;
+                        return;
                     case "error":
                         runDispatch({ type: "failed", error: event.error });
                         toast.error(`Run failed — ${event.error}`);
-                        break;
+                        return;
                 }
+            }
+            if (abortRef.current === controller) {
+                runDispatch({ type: "failed", error: "stream ended before terminal event" });
+                toast.error("Run failed — stream ended unexpectedly");
             }
         } catch (err: unknown) {
             if (err instanceof DOMException && err.name === "AbortError") {

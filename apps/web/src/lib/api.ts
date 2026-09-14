@@ -292,15 +292,15 @@ export async function* runWorkflowStream(
 function parseSseEvent(part: string): { eventType: string; data: string } | null {
   if (!part.trim()) return null;
   let eventType = "message";
-  let data = "";
+  const dataLines: string[] = [];
   for (const line of part.split("\n")) {
     if (line.startsWith("event:")) {
       eventType = line.slice(6).trim();
     } else if (line.startsWith("data:")) {
-      data = line.slice(5).trim();
+      dataLines.push(line.slice(5).trim());
     }
   }
-  return { eventType, data };
+  return { eventType, data: dataLines.join("\n") };
 }
 
 /** Real control-plane + gateway health probe (both /healthz and /ready). */

@@ -41,8 +41,9 @@ cd "$PROJECT_ROOT"
 # Resolve absolute path for eslint (it ignores files outside the base path)
 ABS_FILE_PATH=$(cd "$(dirname "$FILE_PATH")" && echo "$(pwd)/$(basename "$FILE_PATH")")
 
-# Determine package runner
-RUNNER="npx"
+# Determine package runner (--no-install: never prompt to fetch a missing
+# package interactively — a hook must not hang CI or an editor)
+RUNNER="npx --no-install"
 command -v bunx &>/dev/null && RUNNER="bunx"
 
 # prettier (advisory — log but don't block)

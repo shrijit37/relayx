@@ -282,4 +282,143 @@ mod tests {
             Some("tool_calls")
         );
     }
+
+    /// Encode a full tool-call round-trip: user → assistant (tool_calls) →
+    /// tool (results). The tool-role message must appear exactly once, with a
+    /// valid `tool_call_id`, and no malformed duplicate.
+    #[test]
+    fn test_encode_request_tool_result_round_trip() {
+        let canonical = CanonicalRequest {
+            model: "gpt-4".into(),
+            system: Some(SystemInstruction::Text("You are helpful.".into())),
+            messages: vec![
+                // user
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Text("What's the weather?".into()),
+                },
+                // assistant with tool_calls
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolUse(ToolUseBlock {
+                        id: "call_abc".into(),
+                        name: "get_weather".into(),
+                        input: serde_json::json!({"city": "NYC"}),
+                    })]),
+                },
+                // tool result
+                Message {
+                    role: Role::Tool,
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult(
+                        ToolResultBlock {
+                            tool_use_id: "call_abc".into(),
+                            name: Some("get_weather".into()),
+                            content: ToolResultContent::Text(r#"{"temp":72}"#.into()),
+                            is_error: None,
+                        },
+                    )]),
+                },
+            ],
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            stop: vec![],
+            tools: vec![ToolDefinition {
+                name: "get_weather".into(),
+                description: Some("Get the weather for a city".into()),
+                input_schema: Some(serde_json::json!({"type": "object"})),
+                deferred: None,
+                extra: Default::default(),
+            }],
+            tool_choice: Some(ToolChoice::Auto),
+            stream: false,
+            response_format: None,
+            metadata: None,
+            extensions: ProviderExtensions::default(),
+        };
+
+        let wire = match encode_request(&canonical) {
+            Ok(w) => w,
+            Err(e) => panic!("encode should succeed: {e:?}"),
+        };
+        let messages = &wire.messages;
+
+        // system (1) + user (1) + assistant with tool_calls (1) + tool with tool_call_id (1) = 4
+        assert_eq!(
+            messages.len(),
+            4,
+            "expected exactly 4 messages; got {}: {:?}",
+            messages.len(),
+            messages.iter().map(|m| (&m.role, m.tool_call_id.as_deref())).collect::<Vec<_>>()
+        );
+
+        // assistant message carries tool_calls
+        let assistant = &messages[2];
+        assert_eq!(assistant.role, "assistant");
+        let tc = match assistant.tool_calls.as_ref() {
+            Some(tc) => tc,
+            None => panic!("assistant should have tool_calls"),
+        };
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0].id, "call_abc");
+
+        // tool message carries the tool_call_id
+        let tool_msg = &messages[3];
+        assert_eq!(tool_msg.role, "tool");
+        assert_eq!(
+            tool_msg.tool_call_id.as_deref(),
+            Some("call_abc"),
+            "tool message must carry tool_call_id"
+        );
+        let content_text = match tool_msg.content.as_ref().and_then(|c| c.as_str()) {
+            Some(s) => s,
+            None => panic!("tool message content should be a string"),
+        };
+        assert!(content_text.contains("72"), "tool content should carry result payload");
+    }
+
+    /// A tool-role message with no tool_call_id must never appear in the
+    /// encoded output — that would be an API error from the provider.
+    #[test]
+    fn test_encode_request_no_malformed_tool_message() {
+        let canonical = CanonicalRequest {
+            model: "gpt-4".into(),
+            system: None,
+            messages: vec![Message {
+                role: Role::Tool,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult(
+                    ToolResultBlock {
+                        tool_use_id: "call_777".into(),
+                        name: None,
+                        content: ToolResultContent::Text("ok".into()),
+                        is_error: None,
+                    },
+                )]),
+            }],
+            tools: vec![],
+            tool_choice: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            stop: vec![],
+            stream: false,
+            response_format: None,
+            metadata: None,
+            extensions: ProviderExtensions::default(),
+        };
+
+        let wire = match encode_request(&canonical) {
+            Ok(w) => w,
+            Err(e) => panic!("encode should succeed: {e:?}"),
+        };
+
+        // Exactly one tool message, with the correct tool_call_id.
+        assert_eq!(wire.messages.len(), 1, "tool-role message should appear exactly once");
+        assert_eq!(wire.messages[0].role, "tool");
+        assert_eq!(
+            wire.messages[0].tool_call_id.as_deref(),
+            Some("call_777"),
+            "tool message must have tool_call_id (no malformed duplicate)"
+        );
+    }
 }
