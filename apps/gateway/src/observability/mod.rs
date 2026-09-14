@@ -377,6 +377,7 @@ pub fn admin_router_with_publication(
 ) -> axum::Router {
     use axum::extract::State;
     use axum::routing::{get, post};
+    use tokio_stream::StreamExt as _;
 
     /// Combined admin state: publication seam + auth key.
     #[derive(Clone)]
@@ -504,6 +505,14 @@ pub fn admin_router_with_publication(
         body: serde_json::Value,
     }
 
+    /// Optional query params on `/run`. `stream=true` requests SSE
+    /// token-by-token streaming instead of a buffered JSON envelope.
+    #[derive(serde::Deserialize)]
+    struct RunParams {
+        #[serde(default)]
+        stream: bool,
+    }
+
     /// Execute a workflow from the CURRENT published snapshot (compile-time
     /// validation, never a live draft). This is the frontend's Run contract:
     /// it reuses `execute_workflow` — the same path the proxy's workflow
@@ -512,11 +521,27 @@ pub fn admin_router_with_publication(
     /// that is not in the snapshot (unpublished or unknown) is a 404; a
     /// runtime failure (provider error, timeout, invalid plan) maps through
     /// the gateway's typed error → HTTP mapping to real 4xx/5xx.
+    ///
+    /// With `?stream=true` the response is `text/event-stream`: `token`
+    /// events carry text deltas as they arrive from the upstream provider,
+    /// followed by a final `done` event with the complete envelope (or an
+    /// `error` event on failure).
     async fn run(
         State(state): State<AdminState>,
         headers: http::HeaderMap,
+        req_uri: axum::http::Uri,
         axum::Json(req): axum::Json<RunRequest>,
-    ) -> Result<axum::Json<serde_json::Value>, crate::errors::GatewayError> {
+    ) -> Result<axum::response::Response, crate::errors::GatewayError> {
+        // Parse ?stream=true from the query string.
+        let params = RunParams {
+            stream: req_uri
+                .query()
+                .map(|q| {
+                    q.split('&')
+                        .any(|kv| kv == "stream=true" || kv == "stream=1")
+                })
+                .unwrap_or(false),
+        };
         if check_auth(&headers, &state.api_key).is_err() {
             return Err(crate::errors::GatewayError::InvalidRequest {
                 status: http::StatusCode::UNAUTHORIZED,
@@ -569,6 +594,79 @@ pub fn admin_router_with_publication(
         // workflow executions from running indefinitely.
         let deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(120));
 
+        if params.stream {
+            let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
+            let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+            let wf_id = req.workflow_id.clone();
+            let wf_id2 = wf_id.clone();
+            let snap = snapshot.clone();
+            let pl = plan.clone();
+            let rid = request_id.clone();
+            let bb = body_bytes;
+
+            tokio::spawn(async move {
+                let result = crate::execution::execute_workflow(
+                    &snap,
+                    &pl,
+                    bb,
+                    &wf_id,
+                    &rid,
+                    client,
+                    None,
+                    deadline,
+                    Some(tx.clone()),
+                )
+                .await;
+
+                match result {
+                    Ok(response) => {
+                        let collected = http_body_util::BodyExt::collect(response.into_body())
+                            .await
+                            .ok()
+                            .map(|b| b.to_bytes());
+                        if let Some(bytes) = collected {
+                            let output: serde_json::Value =
+                                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                            let envelope = serde_json::json!({
+                                "request_id": rid,
+                                "workflow_id": wf_id2,
+                                "snapshot_version": snap.version(),
+                                "plan_hash": snap.plan_hash_for(&wf_id2).unwrap_or_default(),
+                                "output": output,
+                            });
+                            let wire = protocol_core::sse::format_sse_event(
+                                &envelope.to_string(),
+                                Some("done"),
+                            );
+                            let _ = tx.send(bytes::Bytes::from(wire)).await;
+                        }
+                    }
+                    Err(e) => {
+                        let err = serde_json::json!({"error": e.to_string()});
+                        let wire = protocol_core::sse::format_sse_event(
+                            &err.to_string(),
+                            Some("error"),
+                        );
+                        let _ = tx.send(bytes::Bytes::from(wire)).await;
+                    }
+                }
+                // tx drops here → stream ends
+            });
+
+            let sse_body =
+                axum::body::Body::from_stream(stream.map(|b| Ok::<_, std::io::Error>(b)));
+            let resp = axum::response::Response::builder()
+                .status(200)
+                .header(http::header::CONTENT_TYPE, "text/event-stream")
+                .header(http::header::CACHE_CONTROL, "no-cache")
+                .body(sse_body);
+            return resp.map_err(|e| {
+                crate::errors::GatewayError::Internal(format!("failed to build SSE response: {e}"))
+            });
+        }
+
+        // Buffered (non-streaming) path — unchanged.
         let response = crate::execution::execute_workflow(
             &snapshot,
             plan,
@@ -578,11 +676,10 @@ pub fn admin_router_with_publication(
             client,
             None,
             deadline,
+            None,
         )
         .await?;
 
-        // Stream the full body (bounded workflow output — the LLM response
-        // has already been folded server-side) into the run envelope.
         let body_bytes = http_body_util::BodyExt::collect(response.into_body())
             .await
             .map_err(|e| {
@@ -607,7 +704,8 @@ pub fn admin_router_with_publication(
             "snapshot_version": snapshot.version(),
             "plan_hash": snapshot.plan_hash_for(&req.workflow_id).unwrap_or_default(),
             "output": output,
-        })))
+        }))
+        .into_response())
     }
 
     axum::Router::new()
