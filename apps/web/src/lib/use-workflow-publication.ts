@@ -25,7 +25,7 @@ import {
   type VersionInfo,
   type VersionRow,
 } from "@/lib/api";
-import type { WorkflowJson } from "@/lib/workflow-serializer";
+import type { WorkflowJson } from "@/lib/workflow";
 
 export const publicationKeys = {
   all: ["publication"] as const,

@@ -11,7 +11,7 @@
  * degrades to an explicit "not connected" state instead of faking success.
  */
 
-import type { WorkflowJson } from "@/lib/workflow-serializer";
+import type { WorkflowJson } from "@/lib/workflow";
 
 /** Base URL for the control-plane API. */
 const API_BASE: string =
