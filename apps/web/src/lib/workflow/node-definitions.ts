@@ -11,6 +11,7 @@ import type {
   CanonicalNode,
   ConditionOperator,
   EditorKind,
+  InputVariable,
   LlmRequestConfig,
 } from "./nodes";
 
@@ -95,14 +96,40 @@ const LLM_FIELDS: FieldDef[] = [
 
 const EMPTY_LLM: LlmRequestConfig = { stream: true };
 
+const INPUT_PORT_TYPES = [
+  { value: "message", label: "Message" },
+  { value: "stream", label: "Stream" },
+  { value: "json", label: "JSON" },
+  { value: "tool_call", label: "Tool call" },
+  { value: "tool_result", label: "Tool result" },
+  { value: "bool", label: "Boolean" },
+];
+
+const INPUT_FIELDS: FieldDef[] = [
+  { name: "inputType", label: "Input type", type: "enum", default: "message", options: INPUT_PORT_TYPES,
+    help: "The type of data this workflow accepts as input." },
+  { name: "description", label: "Description", type: "string", placeholder: "What this workflow accepts as input",
+    help: "Human-readable; does not affect execution." },
+];
+
+export const VARIABLE_TYPES = [
+  { value: "string", label: "String" },
+  { value: "number", label: "Number" },
+  { value: "boolean", label: "Boolean" },
+  { value: "object", label: "Object" },
+  { value: "array", label: "Array" },
+];
+
 const defs: Record<EditorKind, NodeDefinition> = {
   input: {
-    type: "input", schemaVersion: 1, label: "Input",
+    type: "input", schemaVersion: 2, label: "Input",
     inputs: [], outputs: [{ name: "out", direction: "output", portType: "message", required: true }],
-    fields: [],
-    defaults: () => ({ kind: "input" }),
-    displayTitle: () => "HTTP Request",
-    displayLines: () => ["ingress"],
+    fields: INPUT_FIELDS,
+    defaults: () => ({ kind: "input", inputType: "message", description: "", variables: [] }),
+    displayTitle: (c) => (c.kind === "input" ? `Input · ${c.inputType ?? "message"}` : "Input"),
+    displayLines: (c) => c.kind === "input"
+      ? [c.inputType ?? "message", ...(c.variables?.length ? [`${c.variables.length} variables`] : [])]
+      : [],
     executable: true,
   },
   output: {

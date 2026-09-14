@@ -81,9 +81,17 @@ export interface SkillRef {
   progressive: boolean;
 }
 
+/** Expected input variable definition. */
+export interface InputVariable {
+  name: string;
+  type: "string" | "number" | "boolean" | "object" | "array";
+  description?: string;
+  required?: boolean;
+}
+
 /** Per-kind semantic configuration. Mirrors workflow_schema::NodeConfig. */
 export type CanonicalConfig =
-  | { kind: "input"; value?: unknown }
+  | { kind: "input"; inputType?: string; description?: string; variables?: InputVariable[]; value?: unknown }
   | { kind: "output"; value?: unknown }
   | { kind: "llm"; config: LlmRequestConfig }
   | { kind: "router"; strategy: "first_match" | "round_robin" | "load_based" }

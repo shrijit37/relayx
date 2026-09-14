@@ -361,6 +361,147 @@ describe("phase 6.6 canonical serializer", () => {
     expect(result.errors.join()).toContain("Input");
   });
 
+  test("input node with structured config serializes non-default fields", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      node("out", "output"),
+    ];
+    // Simulate what the Inspector writes to canonicalConfig
+    nodes[0]!.data = {
+      kind: "input",
+      title: "Input · json",
+      lines: ["json", "2 variables"],
+      canonicalConfig: {
+        kind: "input",
+        inputType: "json",
+        description: "User profile payload",
+        variables: [
+          { name: "user_id", type: "string", required: true, description: "Unique user ID" },
+          { name: "age", type: "number", required: false },
+        ],
+      },
+    } as RelayNode["data"];
+    const edges: Edge[] = [edge("e1", "in", "out")];
+    const result = serializeWorkflow(nodes, edges, { id: "wf", name: "W", version: 1 });
+    expect(result.errors).toEqual([]);
+    const inNode = result.workflow!.nodes.find((n) => n.id === "in")!;
+    expect(inNode.config).toEqual({
+      kind: "input",
+      input_type: "json",
+      description: "User profile payload",
+      variables: [
+        { name: "user_id", type: "string", required: true, description: "Unique user ID" },
+        { name: "age", type: "number", required: false },
+      ],
+    });
+  });
+
+  test("input node structured config round-trips through serialize→deserialize→serialize", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      node("out", "output"),
+    ];
+    nodes[0]!.data = {
+      kind: "input",
+      title: "Input · stream",
+      lines: ["stream"],
+      canonicalConfig: {
+        kind: "input",
+        inputType: "stream",
+        description: "Streaming events",
+        variables: [
+          { name: "event_type", type: "string", required: true },
+        ],
+      },
+    } as RelayNode["data"];
+    const edges: Edge[] = [edge("e1", "in", "out")];
+    const s1 = serializeWorkflow(nodes, edges, { id: "rt", name: "RT", version: 1 });
+    expect(s1.errors).toEqual([]);
+    const d1 = deserializeWorkflow(s1.workflow!);
+    // Deserialized canonical config should have the full structure
+    const inView = d1.nodes.find((n) => n.id === "in")!;
+    const canonicalConfig = inView.data as { canonicalConfig?: { kind: string; inputType?: string; description?: string; variables?: Array<{ name: string; type: string; required?: boolean }> } };
+    expect(canonicalConfig.canonicalConfig).toMatchObject({
+      kind: "input",
+      inputType: "stream",
+      description: "Streaming events",
+      variables: [{ name: "event_type", type: "string", required: true }],
+    });
+    // Re-serialize and check it's stable
+    const s2 = serializeWorkflow(d1.nodes as RelayNode[], d1.edges, { id: "rt", name: "RT", version: 1 });
+    expect(s2.errors).toEqual([]);
+    const node1 = s1.workflow!.nodes.find((n) => n.id === "in")!;
+    const node2 = s2.workflow!.nodes.find((n) => n.id === "in")!;
+    expect(node2.config).toEqual(node1.config);
+  });
+
+  test("legacy input node with no new fields deserializes with defaults", () => {
+    const legacy = {
+      id: "wf", name: "W", version: 1, schema_version: 2,
+      nodes: [
+        { id: "input", kind: "input", config: { kind: "input" }, inputs: [], outputs: [{ name: "out", port_type: "message" }], position: { x: 0, y: 0 } },
+        { id: "out", kind: "output", config: { kind: "output" }, inputs: [{ name: "in", port_type: "message" }], outputs: [], position: { x: 280, y: 0 } },
+      ],
+      edges: [{ id: "e1", source_node: "input", source_port: "out", target_node: "out", target_port: "in" }],
+    } as never;
+    const result = deserializeWorkflow(legacy);
+    expect(result.errors).toEqual([]);
+    const inView = result.nodes.find((n) => n.id === "input")!;
+    const cc = inView.data as { canonicalConfig?: { kind: string; inputType?: string; description?: string; variables?: unknown[] } };
+    expect(cc.canonicalConfig).toMatchObject({ kind: "input", inputType: "message", description: "", variables: [] });
+  });
+
+  test("input node with default values serializes to minimal form", () => {
+    // A fresh Input node with default inputType should produce just { kind: "input" }
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      node("out", "output"),
+    ];
+    nodes[0]!.data = {
+      kind: "input",
+      title: "Input · message",
+      lines: ["message"],
+      canonicalConfig: {
+        kind: "input",
+        inputType: "message",
+        description: "",
+        variables: [],
+      },
+    } as RelayNode["data"];
+    const edges: Edge[] = [edge("e1", "in", "out")];
+    const result = serializeWorkflow(nodes, edges, { id: "wf", name: "W", version: 1 });
+    expect(result.errors).toEqual([]);
+    const inNode = result.workflow!.nodes.find((n) => n.id === "in")!;
+    // Default inputType/message should not be persisted (omitted for compactness)
+    expect(inNode.config).toEqual({ kind: "input" });
+  });
+
+  test("input node secrets never appear in serialized output", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      node("out", "output"),
+    ];
+    nodes[0]!.data = {
+      kind: "input",
+      title: "Input",
+      lines: [],
+      canonicalConfig: {
+        kind: "input",
+        inputType: "json",
+        description: "test",
+        variables: [{ name: "user_id", type: "string", required: true }],
+      },
+    } as RelayNode["data"];
+    const edges: Edge[] = [edge("e1", "in", "out")];
+    const result = serializeWorkflow(nodes, edges, { id: "sec", name: "S", version: 1 });
+    expect(result.errors).toEqual([]);
+    const raw = JSON.stringify(result.workflow);
+    // No credential infrastructure in input nodes — variables are metadata, not credentials
+    expect(raw).not.toMatch(/api_key|password|secret|credential|api\.key/);
+    // credential_ref is not present
+    expect(raw).not.toMatch(/credential_ref/);
+  });
+
   test("unconfigured condition node refuses to serialize (no fabricated branch)", () => {
     // A fresh condition node carries defaults (field="", operator="equals",
     // value="") until configured — serializing it would produce a branch the
