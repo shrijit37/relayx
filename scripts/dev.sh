@@ -27,12 +27,17 @@ fi
 
 echo "relay-x dev stack"
 
-run mock-upstream  "$ROOT/target/debug/mock-upstream" --port 8101 --mode sse --chunks 10
-sleep 1
-run gateway        "$ROOT/target/debug/relay-gateway"  --config "$ROOT/apps/gateway/config/gateway.toml"
+# Rust services run under cargo watch: first run builds, later runs rebuild and
+# restart on any workspace change (cargo's build lock serializes the two
+# watchers; the second rebuild is a no-op compile).
+( cd "$ROOT" && cargo watch -x 'run -p mock-upstream -- --port 8101 --mode sse --chunks 10' ) > /tmp/relayx-mock-upstream.log 2>&1 &
+PIDS+=($!); echo "  started mock-upstream (pid $!) → /tmp/relayx-mock-upstream.log"
+
+( cd "$ROOT" && cargo watch -x 'run -p relay-gateway -- --config apps/gateway/config/gateway.toml' ) > /tmp/relayx-gateway.log 2>&1 &
+PIDS+=($!); echo "  started gateway (pid $!) → /tmp/relayx-gateway.log"
 
 # bun must run from the right directory — two subshells, backgrounded
-( cd "$ROOT/apps/control-plane" && bun run src/index.ts ) > /tmp/relayx-control-plane.log 2>&1 &
+( cd "$ROOT/apps/control-plane" && bun run dev ) > /tmp/relayx-control-plane.log 2>&1 &
 PIDS+=($!); echo "  started control-plane (pid $!) → /tmp/relayx-control-plane.log"
 
 ( cd "$ROOT/apps/web" && bun run dev -- --port 5173 --strictPort ) > /tmp/relayx-web.log 2>&1 &

@@ -68,6 +68,7 @@ bun test          # Integration tests (real Postgres + in-process mock gateway)
 - Rust stable (1.88+) via `rustup`
 - Postgres 16 for the control plane (infra/docker/compose.dev.yml)
 - `scripts/dev.sh` brings up mock upstream + gateway + control plane + Postgres
+- `cargo-watch` (for auto-rebuild; `cargo install cargo-watch`)
 
 ### Build
 
@@ -91,8 +92,12 @@ The editor talks to the control plane (`:9091`); the control plane talks to the
 gateway admin API (`:9090` for `/validate`, `/publish`, `/run`) for publication
 and execution:
 
-1. Start Postgres + mock upstream + gateway + control plane (`scripts/dev.sh`).
-2. `cd apps/web && bun run dev` → editor on `:5173`.
+1. Start Postgres + mock upstream + gateway + control plane + web (`scripts/dev.sh`).
+   The Rust services run under `cargo watch`: they build on first start and
+   rebuild + restart automatically on any source change. The control plane runs
+   `bun run dev` (bun's own `--watch`), and web hot-reloads via Vite, so the
+   whole stack adapts to edits without restarting the script.
+2. Open the editor on `:5173`.
 3. **Create** a workflow in the editor (Save in `new` mode creates the durable
    workflow row, then navigates to `/workflows/<real-id>`).
 4. **Load** — the editor deserializes `latest.workflow_json` from the control
