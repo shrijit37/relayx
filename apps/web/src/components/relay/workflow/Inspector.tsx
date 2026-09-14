@@ -35,6 +35,7 @@ function Field({
     onChange,
     laneOptions,
     providerOptions,
+    modelOptions,
 }: {
     def: FieldDef;
     value: unknown;
@@ -42,13 +43,16 @@ function Field({
     onChange: (v: unknown) => void;
     laneOptions: { value: string; label: string }[];
     providerOptions: { value: string; label: string }[];
+    modelOptions: { value: string; label: string }[];
 }) {
     const refOptions =
         def.reference === "lanes"
             ? laneOptions
             : def.reference === "providers"
               ? providerOptions
-              : (def.options ?? []);
+              : def.reference === "models"
+                ? modelOptions
+                : (def.options ?? []);
     const isRefSelect =
         (def.reference === "lanes" ||
             def.reference === "providers" ||
@@ -229,6 +233,7 @@ export function Inspector({
     issues = [],
     laneOptions = [],
     providerOptions = [],
+    modelOptions = [],
     focusOnMount = false,
     onFocusConsumed,
 }: {
@@ -241,6 +246,7 @@ export function Inspector({
     issues?: Issue[];
     laneOptions?: { value: string; label: string }[];
     providerOptions?: { value: string; label: string }[];
+    modelOptions?: { value: string; label: string }[];
     focusOnMount?: boolean;
     onFocusConsumed?: () => void;
 }) {
@@ -334,6 +340,7 @@ export function Inspector({
                                     onChange={(v) => set(f.name, v)}
                                     laneOptions={laneOptions}
                                     providerOptions={providerOptions}
+                                    modelOptions={modelOptions}
                                     {...(nodeIssues.find((i) => i.field === f.name)
                                         ? { issue: nodeIssues.find((i) => i.field === f.name) }
                                         : {})}
