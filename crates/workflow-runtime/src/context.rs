@@ -45,6 +45,10 @@ pub struct ExecutionContext {
     pub snapshot: Option<Arc<crate::snapshot::RuntimeSnapshot>>,
     /// Optional reporter of execution milestones.
     pub reporter: Arc<dyn crate::milestone::MilestoneReporter>,
+    /// Optional SSE wire-bytes sender for token-level streaming.
+    /// When present, LLM nodes send formatted SSE token deltas through
+    /// this channel as they arrive from upstream providers.
+    pub token_sender: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
 }
 
 /// What snapshot/plan state an execution carries.
@@ -178,6 +182,7 @@ impl ExecutionContext {
             metadata: ExecutionMetadata::default(),
             snapshot: None,
             reporter: Arc::new(crate::milestone::NoopReporter),
+            token_sender: None,
         }
     }
 
@@ -198,6 +203,7 @@ impl ExecutionContext {
             metadata: self.metadata.clone(),
             snapshot: self.snapshot.clone(),
             reporter: self.reporter.clone(),
+            token_sender: self.token_sender.clone(),
         }
     }
 }
