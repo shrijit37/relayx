@@ -26,15 +26,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '⚡ Verify CLAUDE.md architectural rules (12 non-negotiable constraints) before finalizing.'"
-          },
-          {
-            "type": "command",
             "command": ".claude/hooks/check-rust-policy.sh"
           },
           {
             "type": "command",
             "command": ".claude/hooks/ts-guard.sh"
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/shell-guard.sh"
           }
         ]
       }

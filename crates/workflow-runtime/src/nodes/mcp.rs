@@ -1,11 +1,12 @@
 //! MCP node — invokes an MCP tool via the executor trait.
 //!
 //! If an `McpToolExecutor` is provided in the execution context, the node
-//! calls it. Otherwise, it returns a stub result (graceful degradation).
+//! calls it. Otherwise it fails — a fabricated "success" must never reach
+//! downstream nodes.
 
 use crate::context::ExecutionContext;
 use crate::error::NodeError;
-use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
+use crate::nodes::{NodeInput, NodeOutput};
 use workflow_schema::McpConfig;
 
 /// Execute an MCP node. Resolves and invokes an MCP tool.
@@ -30,13 +31,9 @@ pub async fn execute(
                 .await?;
             Ok(NodeOutput::message(result))
         }
-        None => {
-            // Graceful degradation — no MCP server connected.
-            Ok(NodeOutput::message(RuntimeValue::Json(serde_json::json!({
-                "mcp_tool": config.tool_name,
-                "server": config.server_ref,
-                "status": "mcp_not_connected",
-            }))))
-        }
+        None => Err(NodeError::Internal(format!(
+            "MCP executor not available: tool '{}' cannot be executed",
+            config.tool_name
+        ))),
     }
 }

@@ -1,0 +1,96 @@
+Main review agent died on a provider error, but **7 of 8 analysis angles completed successfully** via sub-agents. Only the cross-file tracer (Angle C) is missing due to the transient 524 timeout. That's enough data for the consolidated report.
+
+---
+
+## Full Codebase Review — Consolidated Findings
+
+All findings below are deduplicated and cross-verified across independent analysis angles. Locations marked with **(multi)** were flagged by 2+ independent reviewers.
+
+---
+
+### 🔴 CRITICAL — Security / Data Integrity
+
+| #      | File                                        | Line | Finding                                                                                                                                                                                                                                                                                                                                       |
+| ------ | ------------------------------------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **C1** | `apps/gateway/src/observability/mod.rs`     | 538  | **Unauthenticated mutation endpoints** — `/publish`, `/validate`, `/run` accept bare HTTP POST with no auth middleware. Anyone who can reach the gateway port can publish an arbitrary snapshot (replacing live runtime + lanes with attacker-controlled upstreams). The prior code only had health/metrics endpoints. **(removed-behavior)** |
+| **C2** | `apps/control-plane/src/db/repositories.ts` | 225  | **SQL injection via dynamic column names** — `providers.update` and `lanes.update` interpolate field names from user request body directly into SQL (`${k} = $${idx}`). Values are parameterized; column names are not. **(line-by-line)**                                                                                                    |
+| **C3** | `crates/workflow-runtime/src/nodes/mcp.rs`  | 33   | **MCP nodes fabricate data on failure** — no executor registered → `{"status": "mcp_not_connected"}` returned as 200 OK. Downstream nodes consume fabricated data and produce plausible-looking wrong results. Violates CLAUDE.md Rule 12: "Dynamic discovery must degrade safely." **(altitude)**                                            |
+
+---
+
+### 🔴 HIGH — Correctness / Silent Data Corruption
+
+| #       | File                                                         | Line | Finding                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------- | ------------------------------------------------------------ | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **H1**  | `crates/workflow-runtime/src/nodes/llm.rs`                   | 193  | **Workflow LLM node ignores protocol engine** — `protocol_target()` hardcodes `OpenAiChatCompletions` regardless of input protocol. An Anthropic workflow node encodes as OpenAI Chat, hits wrong endpoint, and the SSE fold silently parses Anthropic events as OpenAI chunks. Root cause traced to the frontend serializer (H7) never setting `protocol`. **(multi: altitude, wrapper, removed-behavior)** |
+| **H2**  | `crates/workflow-runtime/src/execution.rs`                   | 183  | **Edge condition operators silently discarded** — schema carries full operators (GreaterThan, Contains, etc.) but compiler maps them all to `FieldEquals` (`json == value`). A `score > 10` condition evaluates as `score == 10`. **(altitude)**                                                                                                                                                             |
+| **H3**  | `crates/workflow-runtime/src/nodes/condition.rs`             | 30   | **Condition equality broken by f64 round-trip** — `RuntimeValue::Number` (f64-backed) compared against config conditions (u64-backed). serde_json `PartialEq` treats `u64 1 ≠ f64 1.0`. **(language-pitfall)**                                                                                                                                                                                               |
+| **H4**  | `crates/workflow-runtime/src/nodes/mod.rs`                   | 41   | **`RuntimeValue::Number` uses f64** — JSON integers > 2^53 silently lose precision via `as_f64()`. Trace IDs, timestamps, large IDs all corrupted. **(language-pitfall)**                                                                                                                                                                                                                                    |
+| **H5**  | `crates/workflow-runtime/src/nodes/router.rs`                | 20   | **Router `% 2` hardcode** — round-robin only cycles between 2 routes regardless of downstream count. Route 2+ are dead paths. **(multi: language-pitfall, altitude)**                                                                                                                                                                                                                                        |
+| **H6**  | `crates/protocol-core/src/adapters/openai_chat/mod.rs`       | 619  | **Tool messages duplicated** — `Role::Tool` messages processed in the general loop *and again* in the second loop, producing duplicate `role:'tool'` entries. **(line-by-line)**                                                                                                                                                                                                                             |
+| **H7**  | `apps/web/src/lib/workflow-serializer.ts`                    | 195  | **Frontend never sets `protocol` in LLM config** — `configFor()` omits the protocol field, so it defaults to OpenAI regardless of the configured provider. This is the upstream trigger for H1. **(wrapper)**                                                                                                                                                                                                |
+| **H8**  | `crates/workflow-runtime/src/nodes/fallback.rs`              | 59   | **Fallback kills streaming** — reconstructs `LlmConfig` without `stream` field, hardcoding `false`. Streaming fallback chains silently buffer. **(multi: altitude, removed-behavior, wrapper)**                                                                                                                                                                                                              |
+| **H9**  | `crates/protocol-core/src/adapters/openai_chat/mod.rs`       | 870  | **Malformed tool_call arguments silently swallowed** — broken JSON becomes `{}` with zero indication. **(line-by-line)**                                                                                                                                                                                                                                                                                     |
+| **H10** | `crates/workflow-runtime/src/nodes/retry.rs`                 | 63   | **`on_timeout` is dead** — declared, serialized, documented in schema, but `should_retry()` only checks `on_provider_error`. User setting `on_timeout: true` gets a silent no-op. **(removed-behavior)**                                                                                                                                                                                                     |
+| **H11** | `apps/gateway/src/proxy/mod.rs`                              | 272  | **Upstream HTTP method hardcoded POST** — client GET requests silently become POST upstream. **(line-by-line)**                                                                                                                                                                                                                                                                                              |
+| **H12** | `crates/workflow-runtime/src/nodes/llm.rs`                   | 334  | **Multimodal system messages crash** — system message with only image/audio blocks (no text) causes `extract_text_content` to return `Err`, failing the whole node. **(line-by-line)**                                                                                                                                                                                                                       |
+| **H13** | `crates/protocol-core/src/sse.rs`                            | 71   | **SSE parser 3× allocation per event** — lossy UTF-8 conversion + line extraction + join allocates 3 Strings per event when 1 suffices. **(efficiency)**                                                                                                                                                                                                                                                     |
+| **H14** | `apps/web/src/components/relay/workflow/WorkflowBuilder.tsx` | 53   | **HMR duplicate node IDs** — module-level `nodeSeq` counter resets on hot reload while React state retains old IDs. Duplicate IDs silently break edge wiring. **(language-pitfall)**                                                                                                                                                                                                                         |
+
+---
+
+### 🟠 MEDIUM — Architecture / Observability Gaps
+
+| #      | File                                       | Line | Finding                                                                                                                                                                                                          |
+| ------ | ------------------------------------------ | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M1** | `apps/gateway/src/proxy/mod.rs`            | 174  | **Workflow routes bypass observability** — new `workflow_route_request` path returns early, skipping `increment_route_selected`, `increment_lane_selected`, and the active-request gauge. **(removed-behavior)** |
+| **M2** | `apps/gateway/src/proxy/mod.rs`            | 300  | **Translation path uses global pool, not lane pool** — lane isolation not enforced on the translation hot path. LanePools exist but aren't used here. **(wrapper)**                                              |
+| **M3** | `apps/gateway/src/config/mod.rs`           | 200  | **Per-lane pool limits silently ignored** — `CompiledLane` stores `max_idle`/`max_concurrent`/`connect_timeout`; pool builder uses hardcoded values. **(wrapper)**                                               |
+| **M4** | `apps/gateway/src/proxy/mod.rs`            | 328  | **Per-lane `frame_timeout` ignored** — both translation and passthrough use global default (60s). **(wrapper)**                                                                                                  |
+| **M5** | `apps/gateway/src/observability/mod.rs`    | 490  | **`/run` allocates fresh Hyper client per request** — no connection reuse, bypasses lane pools via `None`. **(multi: line-by-line, altitude, wrapper)**                                                          |
+| **M6** | `crates/workflow-runtime/src/context.rs`   | 29   | **`ExecutionContext.deadline` always `None`** — documented, checked in loop, but never set by any caller. Per-node deadline enforcement permanently disabled. **(removed-behavior)**                             |
+| **M7** | `crates/workflow-runtime/src/provider.rs`  | 40   | **`ProviderRegistry` never used** — billed as "stable provider extension boundary" but never instantiated. Could catch protocol/lane mismatch at publish time. **(removed-behavior)**                            |
+| **M8** | `crates/workflow-runtime/src/nodes/llm.rs` | 217  | **`stream: false` default in `build_canonical_request`** — default-then-override pattern means a missed caller override silently buffers. **(conventions)**                                                      |
+
+---
+
+### 🟡 LOW — Efficiency / Duplication / Dead Code
+
+| #       | File                                                          | Line | Finding                                                                                                                                                           |
+| ------- | ------------------------------------------------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **L1**  | `crates/workflow-runtime/src/execution.rs`                    | 506  | **`gather_input` O(E) linear scan** — ignores pre-computed `edges_from` HashMap. **(efficiency)**                                                                 |
+| **L2**  | `apps/gateway/src/execution.rs`                               | 64   | **`NodeRuntime::new()` clones entire `ExecutionPlan` per request** — should be `Arc<&ExecutionPlan>`. **(efficiency)**                                            |
+| **L3**  | `crates/workflow-runtime/src/context.rs`                      | 185  | **`for_node()` clones all 12 context fields per node** — 500 atomic Arc increments per 50-node request. **(efficiency)**                                          |
+| **L4**  | `apps/gateway/src/protocol.rs`                                | 361  | **`check_request_losses` deep-clones MessageContent** just for a boolean check. **(efficiency)**                                                                  |
+| **L5**  | `apps/gateway/src/proxy/mod.rs`                               | 423  | **Intermediate HeaderMap in `build_upstream_request`** — allocate+populate+iterate instead of single-pass builder. **(efficiency)**                               |
+| **L6**  | `crates/protocol-core/src/adapters/openai_chat/mod.rs`        | 1006 | **`usize → u32` truncation** on streaming tool_call delta index. **(language-pitfall)**                                                                           |
+| **L7**  | `apps/web/src/lib/api.ts`                                     | 28   | **`req()` casts null-as-T** — non-JSON 200 returns null cast to expected type. **(language-pitfall)**                                                             |
+| **L8**  | `apps/web/src/lib/api.ts`                                     | 190  | **`RunResult` type drift** — duplicated from backend, missing shared source of truth. **(reuse)**                                                                 |
+| **L9**  | `apps/gateway/src/execution.rs`                               | 18   | **`GatewayClient` type alias duplicated** — same hyper client alias defined in two places. **(reuse)**                                                            |
+| **L10** | `crates/mock-upstream/src/sse.rs`                             | 40   | **Mock SSE wire format doesn't handle multi-line data** — tests pass against broken format the real parser can't round-trip. **(reuse)**                          |
+| **L11** | `apps/gateway/src/observability/mod.rs`                       | 490  | **Tracing span dropped `upstream` URL field** — can't diagnose which lane/host a request hit from logs alone. **(removed-behavior)**                              |
+| **L12** | `crates/workflow-runtime/src/execution.rs`                    | 67   | **`FastPathTranslated` dead variant** — defined and matched but never produced by `classify_plan()`. **(multi: altitude, removed-behavior)**                      |
+| **L13** | `docs/state.md`                                               | 20   | **Test counts stale** — claims 270 passing (actual 265); workflow-runtime 52 (actual 54). Baseline arithmetic contradicts Phase 5 ending state. **(conventions)** |
+| **L14** | `apps/web/src/lib/run-state.ts`                               | 14   | **Dead `RunPhase.queued` variant** — never dispatched by any reducer. **(wrapper)**                                                                               |
+| **L15** | `crates/protocol-core/src/adapters/anthropic_messages/mod.rs` | 572  | **Token `u32` addition overflow** — `input + output` can wrap to 0 on large counts. **(multi: line-by-line, language-pitfall)**                                   |
+| **L16** | `apps/control-plane/src/gateway/client.ts`                    | 74   | **`GatewayClient.run()` return type too narrow** — `GatewayResult` missing `request_id`/`workflow_id`/`plan_hash` fields actually returned. **(wrapper)**         |
+
+---
+
+### Summary
+
+| Severity    | Count  | Theme                                                                                                     |
+| ----------- | ------ | --------------------------------------------------------------------------------------------------------- |
+| 🔴 Critical | 3      | Unauthenticated mutations, SQL injection, silent fabrication                                              |
+| 🔴 High     | 14     | Protocol handling broken in workflow path, f64 precision loss, dead config fields, silent data corruption |
+| 🟠 Medium   | 8      | Observability gaps, lane isolation not enforced, deadlines never set                                      |
+| 🟡 Low      | 16     | Hot-path alloc, duplication, dead code, stale docs                                                        |
+| **Total**   | **41** |                                                                                                           |
+
+### Top 5 to fix first
+
+1. **C1** — Add auth middleware to `/publish`/`/validate`/`/run` (security, immediate)
+2. **C2** — Whitelist column names in `providers.update`/`lanes.update` (SQL injection)
+3. **H1+H7** — Wire `protocol` from frontend serializer → LLM node → `protocol_target()` (workflow LLM is broken for anything non-OpenAI)
+4. **H3+H4** — Switch `RuntimeValue::Number` to `serde_json::Number` or equivalent integer-safe type (condition nodes silently broken)
+5. **M2+M3+M4** — Wire per-lane pool config and timeouts through the proxy path (lane isolation is a design promise that's unfulfilled)

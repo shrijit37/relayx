@@ -48,6 +48,7 @@ export type RunResult =
 export class GatewayClient {
   constructor(
     readonly baseUrl: string,
+    private readonly apiKey?: string,
     private readonly fetchFn: typeof fetch = fetch,
   ) {}
 
@@ -92,9 +93,15 @@ export class GatewayClient {
   private async post(path: string, body: unknown): Promise<GatewayResponse | { status: "error"; error: string }> {
     let resp: Response;
     try {
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      // Mutating admin endpoints are protected by a shared-secret API key;
+      // when configured, every request carries it as a Bearer token.
+      if (this.apiKey) {
+        headers["authorization"] = `Bearer ${this.apiKey}`;
+      }
       resp = await this.fetchFn(`${this.baseUrl}${path}`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers,
         body: JSON.stringify(body),
       });
     } catch (e) {

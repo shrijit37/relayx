@@ -61,13 +61,34 @@ pub async fn execute(
 
 /// Whether an error should trigger another attempt under the config policy.
 ///
-/// `ProtocolEngineError` has no dedicated Timeout variant, so provider-side
-/// failures (upstream HTTP/transport — the set containing timeouts) are
-/// gated entirely by `on_provider_error`. Client-side/internal errors are
-/// never retried.
+/// `ProtocolEngineError` has no dedicated Timeout variant, so timeouts are
+/// detected heuristically from provider-error messages ("timeout"). Retries
+/// trigger when `on_provider_error` is set for any provider-side failure, or
+/// when `on_timeout` is set for a timeout-classified one. Client-side/internal
+/// errors are never retried.
 fn should_retry(config: &RetryConfig, e: &NodeError) -> bool {
     match e {
-        NodeError::Provider(_) => config.on_provider_error,
+        NodeError::Provider(pe) => {
+            if config.on_provider_error {
+                return true;
+            }
+            if config.on_timeout && is_timeout_error(pe) {
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Heuristic timeout detection — upstream transport errors surface as
+/// `ProviderError` with a message containing "timeout" or "timed out".
+fn is_timeout_error(pe: &protocol_core::error::ProtocolEngineError) -> bool {
+    match pe {
+        protocol_core::error::ProtocolEngineError::ProviderError { message } => {
+            let msg = message.to_lowercase();
+            msg.contains("timeout") || msg.contains("timed out")
+        }
         _ => false,
     }
 }
@@ -118,6 +139,40 @@ mod tests {
         let config = cfg(true);
         let err = NodeError::Internal("boom".into());
         assert!(!should_retry(&config, &err));
+    }
+
+    #[test]
+    fn timeout_retried_when_policy_allows() {
+        let config = cfg(false); // on_timeout = true, on_provider_error = false
+        let err = NodeError::Provider(ProtocolEngineError::ProviderError {
+            message: "upstream request failed: request timed out".into(),
+        });
+        assert!(should_retry(&config, &err));
+    }
+
+    #[test]
+    fn timeout_not_retried_when_policy_denies() {
+        let config = RetryConfig {
+            on_timeout: false,
+            ..cfg(false)
+        };
+        let err = NodeError::Provider(ProtocolEngineError::ProviderError {
+            message: "upstream request failed: request timed out".into(),
+        });
+        assert!(!should_retry(&config, &err));
+    }
+
+    #[test]
+    fn provider_error_retried_via_provider_policy_even_for_timeout() {
+        // on_provider_error=true retries timeouts even when on_timeout=false.
+        let config = RetryConfig {
+            on_timeout: false,
+            ..cfg(true)
+        };
+        let err = NodeError::Provider(ProtocolEngineError::ProviderError {
+            message: "upstream request failed: request timed out".into(),
+        });
+        assert!(should_retry(&config, &err));
     }
 
     #[test]

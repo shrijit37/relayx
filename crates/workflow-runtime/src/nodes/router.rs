@@ -15,10 +15,12 @@ pub async fn execute(
     input: NodeInput,
     counter: &AtomicUsize,
 ) -> Result<NodeOutput, NodeError> {
+    let n = config.output_ports.max(1);
     let selected = match config.strategy {
         workflow_schema::RouterStrategy::FirstMatch => 0,
-        workflow_schema::RouterStrategy::RoundRobin => counter.fetch_add(1, Ordering::Relaxed) % 2,
-        workflow_schema::RouterStrategy::LoadBased => 0,
+        workflow_schema::RouterStrategy::RoundRobin => counter.fetch_add(1, Ordering::Relaxed) % n,
+        // ponytail: LoadBased = round-robin until load metrics exist
+        workflow_schema::RouterStrategy::LoadBased => counter.fetch_add(1, Ordering::Relaxed) % n,
     };
 
     Ok(NodeOutput::on_port(

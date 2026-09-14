@@ -1,28 +1,19 @@
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
 import {
-  AlertTriangle,
-  ArrowRightLeft,
-  Boxes,
-  GitFork,
-  Globe,
-  LogIn,
-  Radar,
-  Radio,
-  RefreshCw,
-  Route,
-  ShieldCheck,
-  Signal,
-  Sparkles,
-  Split,
+  AlertTriangle, ArrowRightLeft, Boxes, GitFork, Globe, LogIn, Radar,
+  Radio, RefreshCw, Route, ShieldCheck, Signal, Sparkles, Split,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusDot } from "../primitives";
+import type { CanonicalNode, EditorKind } from "@/lib/workflow/nodes";
+import { getNodeDefinition } from "@/lib/workflow/node-definitions";
 
 export type RunState = "idle" | "queued" | "running" | "streaming" | "completed" | "failed";
 
+/** Editor-only display state — the canonical node is the source of truth. */
 export type RelayNodeData = {
-  kind: NodeKind;
+  kind: EditorKind;
   title: string;
   lines: string[];
   badges?: string[];
@@ -32,27 +23,13 @@ export type RelayNodeData = {
   issue?: "error" | "warn";
   runState?: RunState;
   branches?: string[];
+  /** Reference to the canonical model node this view renders. */
+  canonicalId?: string;
 };
 
-export type NodeKind =
-  | "input"
-  | "output"
-  | "transform"
-  | "condition"
-  | "route"
-  | "lane"
-  | "fallback"
-  | "retry"
-  | "provider"
-  | "endpoint"
-  | "mcp"
-  | "tool"
-  | "skill"
-  | "agent"
-  | "policy"
-  | "observability";
+export type NodeKind = EditorKind;
 
-export const nodeMeta: Record<NodeKind, { label: string; icon: LucideIcon; accent: string }> = {
+export const nodeMeta: Record<EditorKind, { label: string; icon: LucideIcon; accent: string }> = {
   input: { label: "Input", icon: LogIn, accent: "text-info" },
   output: { label: "Output", icon: Radio, accent: "text-info" },
   transform: { label: "Transform", icon: ArrowRightLeft, accent: "text-primary" },
@@ -83,9 +60,13 @@ const runStateStyles: Record<RunState, string> = {
 export type RelayNode = Node<RelayNodeData, "relay">;
 
 export function RelayFlowNode({ data, selected }: NodeProps<RelayNode>) {
-  const meta = nodeMeta[data.kind];
+  // Guard: `data.kind` must always resolve to a known meta entry. Unknown
+  // kinds degrade to a display-only Tool icon instead of crashing the canvas.
+  const meta = nodeMeta[data.kind] ?? nodeMeta.tool;
   const Icon = meta.icon;
   const run = data.runState ?? "idle";
+  const def = getNodeDefinition(data.kind);
+  const branchPorts = data.kind === "condition" ? ["true", "false"] : data.branches ?? [];
 
   return (
     <div
@@ -138,6 +119,11 @@ export function RelayFlowNode({ data, selected }: NodeProps<RelayNode>) {
             ))}
           </div>
         ) : null}
+        {def && !def.executable ? (
+          <div className="mt-1.5 rounded-[3px] border border-warn/40 bg-warn/8 px-1.5 py-0.5 text-[10px] text-warn">
+            not executed yet — blocks publish
+          </div>
+        ) : null}
       </div>
 
       {(data.metaLeft || data.metaRight || data.status) && (
@@ -155,9 +141,9 @@ export function RelayFlowNode({ data, selected }: NodeProps<RelayNode>) {
         </div>
       )}
 
-      {data.branches?.length ? (
+      {branchPorts.length ? (
         <>
-          {data.branches.map((b, i) => (
+          {branchPorts.map((b, i) => (
             <div
               key={b}
               className="num absolute right-[-6px] text-[9px] text-muted-foreground"
@@ -166,7 +152,7 @@ export function RelayFlowNode({ data, selected }: NodeProps<RelayNode>) {
               {b}
             </div>
           ))}
-          {data.branches.map((b, i) => (
+          {branchPorts.map((b, i) => (
             <Handle
               key={`h-${b}`}
               id={b}
@@ -184,3 +170,4 @@ export function RelayFlowNode({ data, selected }: NodeProps<RelayNode>) {
 }
 
 export const relayNodeTypes = { relay: RelayFlowNode };
+export type { CanonicalNode };

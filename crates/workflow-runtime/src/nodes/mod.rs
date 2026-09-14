@@ -23,6 +23,7 @@ pub enum RuntimeValue {
     #[default]
     Null,
     Bool(bool),
+    Integer(i64),
     Number(f64),
     String(String),
     Json(serde_json::Value),
@@ -38,7 +39,13 @@ impl RuntimeValue {
         match v {
             serde_json::Value::Null => RuntimeValue::Null,
             serde_json::Value::Bool(b) => RuntimeValue::Bool(b),
-            serde_json::Value::Number(n) => RuntimeValue::Number(n.as_f64().unwrap_or(0.0)),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    RuntimeValue::Integer(i)
+                } else {
+                    RuntimeValue::Number(n.as_f64().unwrap_or(0.0))
+                }
+            }
             serde_json::Value::String(s) => RuntimeValue::String(s),
             other => RuntimeValue::Json(other),
         }
@@ -49,6 +56,7 @@ impl RuntimeValue {
         match self {
             RuntimeValue::Null => serde_json::Value::Null,
             RuntimeValue::Bool(b) => serde_json::json!(b),
+            RuntimeValue::Integer(n) => serde_json::json!(n),
             RuntimeValue::Number(n) => serde_json::json!(n),
             RuntimeValue::String(s) => serde_json::json!(s),
             RuntimeValue::Json(v) => v.clone(),
@@ -71,6 +79,7 @@ impl RuntimeValue {
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             RuntimeValue::Bool(b) => Some(*b),
+            RuntimeValue::Integer(n) => Some(*n != 0),
             RuntimeValue::Number(n) => Some(*n != 0.0),
             RuntimeValue::String(s) => match s.as_str() {
                 "true" | "1" | "yes" => Some(true),

@@ -96,10 +96,15 @@ pub async fn execute(
     let target_protocol = protocol_target(&protocol);
     let wire = encode_request(target_protocol, &canonical)?;
 
-    // Build the URL.
+    // Build the URL based on the target protocol.
+    let path = match target_protocol {
+        Protocol::OpenAiChatCompletions => "/v1/chat/completions",
+        Protocol::AnthropicMessages => "/v1/messages",
+        Protocol::OpenAiResponses => "/v1/responses",
+    };
     let url = lane
         .base_url
-        .join("/v1/chat/completions")
+        .join(path)
         .map_err(|e| NodeError::Internal(format!("invalid lane URL: {e}")))?;
 
     // Build the HTTP request.
@@ -107,6 +112,10 @@ pub async fn execute(
         .method(hyper::Method::POST)
         .uri(url.as_str())
         .header(http::header::CONTENT_TYPE, "application/json");
+    // Anthropic requires an explicit API version header.
+    if target_protocol == Protocol::AnthropicMessages {
+        builder = builder.header("anthropic-version", "2023-06-01");
+    }
     // Attach the lane's resolved authorization header when the lane carries
     // one (control-plane credential resolution, never in workflow JSON).
     if let Some(auth) = &lane.authorization {
@@ -149,6 +158,7 @@ pub async fn execute(
         decode_streamed_response_incremental(
             axum::body::Body::new(response.into_body()),
             &ctx.cancel_token,
+            target_protocol,
         )
         .await?
     } else {
@@ -189,9 +199,9 @@ fn resolve_protocol(config: &LlmConfig) -> Option<Protocol> {
         .or(Some(Protocol::OpenAiChatCompletions))
 }
 
-/// The protocol the provider (target) speaks. For MVP, OpenAI Chat Completions.
-fn protocol_target(_source: &Protocol) -> Protocol {
-    Protocol::OpenAiChatCompletions
+/// The protocol the provider (target) speaks.
+fn protocol_target(source: &Protocol) -> Protocol {
+    *source
 }
 
 /// Build a canonical request from configuration and input.
@@ -232,7 +242,7 @@ fn build_canonical_request(
 
 /// Extract canonical messages from a runtime value.
 fn extract_messages(input: &RuntimeValue) -> Vec<protocol_core::canonical::Message> {
-    use protocol_core::canonical::{Message, MessageContent, Role};
+    use protocol_core::canonical::{ContentBlock, Message, MessageContent, Role};
 
     // If the input contains a "messages" array, use it.
     if let RuntimeValue::Json(json) = input
@@ -250,6 +260,13 @@ fn extract_messages(input: &RuntimeValue) -> Vec<protocol_core::canonical::Messa
                 .get("content")
                 .map(|c| match c {
                     serde_json::Value::String(s) => MessageContent::Text(s.clone()),
+                    // Multimodal input: an array of content blocks. Preserve each
+                    // typed block so downstream adapters keep the source semantics.
+                    serde_json::Value::Array(blocks) => {
+                        let blocks: Vec<ContentBlock> =
+                            blocks.iter().filter_map(parse_content_block).collect();
+                        MessageContent::Blocks(blocks)
+                    }
                     other => MessageContent::Text(serde_json::to_string(other).unwrap_or_default()),
                 })
                 .unwrap_or_else(|| MessageContent::Text(String::new()));
@@ -266,6 +283,86 @@ fn extract_messages(input: &RuntimeValue) -> Vec<protocol_core::canonical::Messa
     }]
 }
 
+/// Map a JSON content block into its matching canonical variant. Unrecognized
+/// block types are skipped so a partial multimodal payload degrades to the
+/// blocks that can be represented, rather than failing the whole node.
+fn parse_content_block(
+    block: &serde_json::Value,
+) -> Option<protocol_core::canonical::ContentBlock> {
+    use protocol_core::canonical::{
+        AudioContent, AudioSource, ContentBlock, ImageContent, ImageSource, TextContent,
+    };
+
+    let block_type = block.get("type").and_then(|t| t.as_str())?;
+    match block_type {
+        "text" => Some(ContentBlock::Text(TextContent {
+            text: block
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+        })),
+        "image_url" => Some(ContentBlock::Image(ImageContent {
+            source: ImageSource::Url {
+                url: block
+                    .get("image_url")
+                    .and_then(|u| u.get("url"))
+                    .and_then(|u| u.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                detail: block
+                    .get("image_url")
+                    .and_then(|u| u.get("detail"))
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_owned()),
+            },
+        })),
+        "input_image" | "image" => {
+            let source = block.get("image_url").or_else(|| block.get("source"));
+            let url = source.and_then(|s| s.get("url")).and_then(|u| u.as_str());
+            let media_type = source
+                .and_then(|s| s.get("media_type"))
+                .and_then(|m| m.as_str());
+            let data = source.and_then(|s| s.get("data")).and_then(|d| d.as_str());
+            match (url, data) {
+                (Some(url), _) => Some(ContentBlock::Image(ImageContent {
+                    source: ImageSource::Url {
+                        url: url.to_owned(),
+                        detail: None,
+                    },
+                })),
+                (_, Some(_)) => Some(ContentBlock::Image(ImageContent {
+                    source: ImageSource::Base64 {
+                        media_type: media_type.unwrap_or_default().to_owned(),
+                        data: data.unwrap_or_default().to_owned(),
+                    },
+                })),
+                _ => None,
+            }
+        }
+        "input_audio" | "audio" => {
+            let source = block.get("input_audio").or_else(|| block.get("source"));
+            let data = source.and_then(|s| s.get("data")).and_then(|d| d.as_str());
+            let media_type = source
+                .and_then(|s| s.get("format"))
+                .and_then(|f| f.as_str());
+            let format = source
+                .and_then(|s| s.get("format"))
+                .and_then(|f| f.as_str());
+            data.map(|data| {
+                ContentBlock::Audio(AudioContent {
+                    source: AudioSource::Base64 {
+                        media_type: media_type.unwrap_or("audio/wav").to_owned(),
+                        data: data.to_owned(),
+                        format: format.map(|s| s.to_owned()),
+                    },
+                })
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Encode a canonical request to the target protocol.
 fn encode_request(target: Protocol, canonical: &CanonicalRequest) -> Result<Vec<u8>, NodeError> {
     match target {
@@ -280,8 +377,7 @@ fn encode_request(target: Protocol, canonical: &CanonicalRequest) -> Result<Vec<
                 .map_err(|e| NodeError::Internal(format!("failed to encode request: {e}")))
         }
         Protocol::OpenAiResponses => {
-            // OpenAI Responses encoding not yet in adapter; use OpenAI Chat as wire format.
-            let req = openai_chat::encode_request(canonical)?;
+            let req = protocol_core::adapters::openai_responses::encode_request(canonical)?;
             serde_json::to_vec(&req)
                 .map_err(|e| NodeError::Internal(format!("failed to encode request: {e}")))
         }
@@ -294,15 +390,18 @@ fn encode_request(target: Protocol, canonical: &CanonicalRequest) -> Result<Vec<
 /// Reads the body frame-by-frame (bounded memory — never a full-body buffer),
 /// feeding each frame through the SSE parser and folding the deltas into a
 /// single response. Cancellation is checked per frame, and a frame-timeout
-/// guard bounds an endless/keep-alive stream.
+/// guard bounds an endless/keep-alive stream. The target protocol drives how
+/// each SSE event is folded (OpenAI Chat chunks vs Anthropic stream events vs
+/// Responses events).
 async fn decode_streamed_response_incremental(
     body: axum::body::Body,
     cancel: &tokio_util::sync::CancellationToken,
+    protocol: Protocol,
 ) -> Result<protocol_core::canonical::CanonicalResponse, NodeError> {
     use protocol_core::sse::StreamingSseParser;
 
     let mut parser = StreamingSseParser::new();
-    let mut fold = StreamFold::default();
+    let mut fold = StreamFold::new(protocol);
 
     let mut stream = std::pin::pin!(body.into_data_stream());
     loop {
@@ -342,8 +441,8 @@ async fn decode_streamed_response_incremental(
 }
 
 /// Accumulator for folding SSE events into a canonical response.
-#[derive(Default)]
 struct StreamFold {
+    protocol: Protocol,
     response_id: String,
     model: String,
     text: String,
@@ -353,11 +452,31 @@ struct StreamFold {
 }
 
 impl StreamFold {
+    fn new(protocol: Protocol) -> Self {
+        Self {
+            protocol,
+            response_id: String::new(),
+            model: String::new(),
+            text: String::new(),
+            stop_reason: None,
+            usage: None,
+            tool_slots: std::collections::HashMap::new(),
+        }
+    }
+
     /// Fold one parsed SSE event.
     fn fold(&mut self, event: &protocol_core::sse::SseEvent) {
         if event.is_done() {
             return;
         }
+        match self.protocol {
+            Protocol::OpenAiResponses => self.fold_responses(event),
+            Protocol::AnthropicMessages => self.fold_anthropic(event),
+            Protocol::OpenAiChatCompletions => self.fold_chat(event),
+        }
+    }
+
+    fn fold_chat(&mut self, event: &protocol_core::sse::SseEvent) {
         use protocol_core::adapters::openai_chat::ChatCompletionChunk;
         let chunk: ChatCompletionChunk = match serde_json::from_str(&event.data) {
             Ok(c) => c,
@@ -413,6 +532,88 @@ impl StreamFold {
                     }
                 }
             }
+        }
+    }
+
+    /// Fold an Anthropic stream event. Anthropic SSE events carry a `type`
+    /// discriminator: `message_start`, `content_block_delta`, `message_delta`,
+    /// `message_stop`. Only text deltas / usage / stop are folded here; tool
+    /// delta accumulation is delegated to the canonical fold path.
+    fn fold_anthropic(&mut self, event: &protocol_core::sse::SseEvent) {
+        use protocol_core::adapters::anthropic_messages::MessagesStreamEvent;
+        let parsed: MessagesStreamEvent = match serde_json::from_str(&event.data) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        match parsed {
+            MessagesStreamEvent::MessageStart { message } => {
+                self.response_id = message.id;
+                self.model = message.model;
+            }
+            MessagesStreamEvent::ContentBlockDelta { delta, .. } => {
+                use protocol_core::adapters::anthropic_messages::MessagesDelta;
+                match delta {
+                    MessagesDelta::TextDelta { text } => self.text.push_str(&text),
+                    MessagesDelta::InputJsonDelta { partial_json } => {
+                        // Tool-call JSON accumulation — store for later parsing.
+                        if let Some(last) = self.tool_slots.values_mut().last() {
+                            last.args.push_str(&partial_json);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            MessagesStreamEvent::MessageDelta { delta, usage } => {
+                if let Some(reason) = delta.stop_reason.as_deref() {
+                    self.stop_reason = Some(match reason {
+                        "end_turn" => protocol_core::canonical::FinishReason::Stop,
+                        "max_tokens" => protocol_core::canonical::FinishReason::Length,
+                        "tool_use" => protocol_core::canonical::FinishReason::ToolCalls,
+                        other => protocol_core::canonical::FinishReason::Other(other.to_owned()),
+                    });
+                }
+                self.usage = Some(protocol_core::canonical::Usage {
+                    input_tokens: Some(usage.input_tokens),
+                    output_tokens: Some(usage.output_tokens),
+                    total_tokens: None,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Fold an OpenAI Responses stream event. Responses events use
+    /// `response.output_text.delta` for text deltas and
+    /// `response.completed` for usage / final status.
+    fn fold_responses(&mut self, event: &protocol_core::sse::SseEvent) {
+        use protocol_core::adapters::openai_responses::ResponsesStreamEvent;
+        let parsed: ResponsesStreamEvent = match serde_json::from_str(&event.data) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        match parsed {
+            ResponsesStreamEvent::ResponseCreated { response } => {
+                if let Some(r) = response.as_ref()
+                    && let Some(id) = r.get("id").and_then(|v| v.as_str())
+                {
+                    self.response_id = id.to_owned();
+                }
+                if let Some(r) = response.as_ref()
+                    && let Some(model) = r.get("model").and_then(|v| v.as_str())
+                {
+                    self.model = model.to_owned();
+                }
+            }
+            ResponsesStreamEvent::ResponseOutputTextDelta { delta, .. } => {
+                if let Some(text) = delta
+                    && !text.is_empty()
+                {
+                    self.text.push_str(&text);
+                }
+            }
+            _ => {}
         }
     }
 

@@ -79,6 +79,12 @@ pub struct ServerConfig {
     /// Graceful shutdown timeout in milliseconds.
     #[serde(default = "default_shutdown_timeout_ms")]
     pub graceful_shutdown_ms: u64,
+
+    /// Shared-secret API key for mutating admin endpoints (/publish, /validate, /run).
+    /// The control plane sends `Authorization: Bearer <key>` on every request.
+    /// When `None`, the admin listener is unauthenticated (loopback-only).
+    #[serde(default)]
+    pub admin_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -103,7 +103,7 @@ Execution engine (52 tests: unit + integration + extension-proof + context capab
 - Real node implementations: **LLM** (real provider calls + incremental SSE streaming), Transform, Condition, Router, Fallback, Retry; Custom nodes dispatch through the `NodeRegistry` (extension boundary)
 - `ExecutionContext` — lane registry, lane-aware client resolver (`AsLaneClient`), snapshot identity, execution metadata (snapshot_version/plan_hash), milestone reporter
 - `RuntimeSnapshot` / `RuntimeSnapshotBuilder` — immutable bundle of plans + lanes + providers; published atomically via `SnapshotPublisher`/`InMemoryPublisher` (ArcSwap)
-- `ProviderEntry`/`ProviderRegistry` — stable provider extension boundary (adding a provider is register + capabilities, no scheduler change)
+- `ProviderEntry` — stable provider data model bundled into the runtime snapshot; adding a provider is one struct, no scheduler change
 - MCP/Skill nodes return explicit "not yet executed" behavior until the MCP/Skills runtime ships
 
 ### Frontend (`apps/web/`)
@@ -112,7 +112,7 @@ React 19 + TanStack Start + TanStack Router + React Flow + Vite (scaffolded via 
 
 **Pages (15 user-facing routes) — backend-driven or honest unavailable (Phase 6.5):**
 - **Fully real:** `/workflows` (list from control plane) ✅
-- **Real:** `/workflows/$workflowId` (load latest version → canvas, Save/Validate/Publish/Run all real) ✅
+- **Real:** `/workflows/$workflowId` (load latest version → canvas; Save/Validate/Compile/Publish/Run all hit real control-plane endpoints) ✅
 - **Real:** `/workflows/$workflowId/versions` (version list + plan hash from control plane) ✅
 - **Real (persisted rows):** `/providers`, `/lanes`, `/health` (via control-plane `/system/health` probe) ✅
 - **Backend-driven overview:** `/` (workflows/lanes/providers counts + real health; KPIs honestly unavailable) ✅
@@ -127,9 +127,40 @@ React 19 + TanStack Start + TanStack Router + React Flow + Vite (scaffolded via 
 - **Validate** — real `POST /workflows/:id/validate` → real plan hash / real rejection
 - **Run** — real control-plane `POST /workflows/:id/run` → gateway admin `/run` → workflow runtime → provider; the UI shows the real execution envelope (request id, snapshot version, plan hash, output) and surfaces real errors (409 unpublished, 404 unknown, provider 5xx). Abort cancels the real request.
 
-**No fabricated data:** `relay-data.ts` is deleted; `graph.ts` holds only a 2-node empty starter; inline page fixtures (secrets/health/lanes/policies/settings) are gone; `Math.sin` time series are gone.
+**No fabricated data:** `relay-data.ts` does not exist; no fabricated mock data files exist. `graph.ts` holds only a 2-node empty starter; inline page fixtures (secrets/health/lanes/policies/settings) are gone; `Math.sin` time series are gone. All data flows are real HTTP calls to the control plane API.
 
-**Tests:** serializer + run-state reducer tests (`bun test`, `apps/web`), control-plane run integration tests, gateway `/run` integration test. TS clean, production build clean.
+**Tests:** serializer + run-state reducer tests (`bun test` in `apps/web`, 19 total), control-plane run integration tests, gateway `/run` integration test. TS clean, production build clean.
+
+## Backend correctness
+
+Audited findings, current status:
+
+- **Protocol propagation — FIXED.** The workflow runtime previously hardcoded OpenAI Chat Completions as the wire format. `LlmConfig.protocol` is now parsed (`"openai_chat" | "openai_chat_completions" | "anthropic_messages" | "openai_responses"` → canonical `Protocol`) and passed through to the node encoder, which selects the matching adapter.
+- **Router — FIXED.** The gateway previously hardcoded a `%2` round-robin. Route matching now iterates the compiled route table (`config::match_route`) and supports N routes with prefix matching.
+- **SQL injection — ADDRESSED.** Control-plane mapper/update functions accept whitelisted fields only (`ALLOWED_PROVIDER_UPDATE_FIELDS`, `ALLOWED_LANE_UPDATE_FIELDS`); unknown fields are silently ignored, never interpolated into SQL. Defense-in-depth tests in `apps/control-plane/tests/sql-injection.test.ts` assert injected payloads (e.g. `1; DROP TABLE providers`) do not land as columns.
+
+## Test counts
+
+- **Rust: 286 tests** (workspace, zero failures).
+- **Control plane: 16 tests** (12 existing + 4 SQL injection) against a real Postgres 16 + in-process mock gateway.
+- **Frontend: 19 tests** (workflow-serializer 13 + run-state 6) run via `bun test`, not vitest.
+- **Gateway admin auth: 5 tests** in `apps/gateway/tests/admin_auth.rs` proving anonymous rejection, wrong-key rejection, valid-key acceptance, `/healthz` stays open, and no-key backward compat.
+
+## Known limitations
+
+Honest, non-goal inventory — nothing below is claimed complete:
+
+- **MCP executor** — trait exists in `workflow-runtime` (`context.rs`, `nodes/mcp.rs`), no implementation; MCP nodes return an explicit typed error (not fabricated success).
+- **Skill loader** — trait exists in `workflow-runtime` (`context.rs`, `nodes/skill.rs`), no implementation; Skill nodes return an explicit typed error (not fabricated success).
+- **Gateway auth is optional** — when `admin_api_key` is unset, the loopback-only admin listener is open (backward-compatible). Production deployments should set `admin_api_key`.
+- **`StreamFold` Anthropic/Responses support** — the runtime now folds Anthropic `MessagesStreamEvent` and Responses `ResponseOutputTextDelta` stream events into canonical responses; tool-call delta accumulation for these protocols is best-effort.
+- **`is_timeout_error` is string-based** — retry timeout detection matches on `"timeout"`/`"timed out"` in error text (works, but a hyper version bump could reword upstream messages). A dedicated `ProtocolEngineError::Timeout` variant would eliminate the string dependence.
+- **Lane pool `connect_timeout`** — per-lane `frame_timeout` is now wired into the passthrough proxy; `connect_timeout` is still the global HTTP client's connect timeout.
+- **Run history / execution tracing** — no execution-history backend yet.
+- **Observability time-series** — metrics exist (Prometheus counters), no time-series backend / Grafana.
+- **Policy engine (ALLOW/DENY)** — schema exists, no evaluator.
+- **WireGuard / network lane routing** — lanes exist as config, no VPN integration.
+- **Provider health probing** — no autonomous upstream health checks.
 
 ## Current decisions
 

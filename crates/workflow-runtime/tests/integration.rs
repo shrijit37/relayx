@@ -106,7 +106,10 @@ fn router_node(id: &str, strategy: RouterStrategy) -> Node {
     Node {
         id: id.into(),
         kind: NodeKind::Router,
-        config: NodeConfig::Router(RouterConfig { strategy }),
+        config: NodeConfig::Router(RouterConfig {
+            strategy,
+            output_ports: 2,
+        }),
         inputs: vec![PortDef {
             name: "in".into(),
             port_type: PortType::Message,
@@ -503,5 +506,370 @@ fn test_transform_merge() {
             assert_eq!(map.get("b"), Some(&serde_json::json!(2)));
         }
         other => panic!("Expected merged object, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_router_round_robin_three_ports() {
+    use std::sync::Mutex;
+    use workflow_runtime::milestone::MilestoneReporter;
+
+    // Router with 3 output ports cycles route_0 → route_1 → route_2 on ONE runtime.
+    // The reporter records the port the router selected on each node_completed call.
+    #[derive(Default)]
+    struct Recording {
+        ports: Mutex<Vec<String>>,
+    }
+    impl MilestoneReporter for Recording {
+        fn node_completed(&self, node_id: &str, output_port: Option<&str>) {
+            if node_id == "route" {
+                self.ports
+                    .lock()
+                    .unwrap()
+                    .push(output_port.unwrap_or("").to_string());
+            }
+        }
+        fn node_failed(&self, _node_id: &str, _error: &str) {}
+    }
+
+    let wf = Workflow {
+        id: "wf-router3".into(),
+        name: "router3".into(),
+        version: 1,
+        nodes: vec![
+            input_node("in"),
+            Node {
+                id: "route".into(),
+                kind: NodeKind::Router,
+                config: NodeConfig::Router(RouterConfig {
+                    strategy: RouterStrategy::RoundRobin,
+                    output_ports: 3,
+                }),
+                inputs: vec![PortDef {
+                    name: "in".into(),
+                    port_type: PortType::Message,
+                }],
+                outputs: vec![
+                    PortDef {
+                        name: "route_0".into(),
+                        port_type: PortType::Message,
+                    },
+                    PortDef {
+                        name: "route_1".into(),
+                        port_type: PortType::Message,
+                    },
+                    PortDef {
+                        name: "route_2".into(),
+                        port_type: PortType::Message,
+                    },
+                ],
+            },
+            output_node("out0"),
+            output_node("out1"),
+            output_node("out2"),
+        ],
+        edges: vec![
+            simple_edge("in", "route"),
+            conditional_edge("route", "out0", "route_0"),
+            conditional_edge("route", "out1", "route_1"),
+            conditional_edge("route", "out2", "route_2"),
+        ],
+    };
+    let plan = build_and_validate(&wf);
+    let lanes = Arc::new(LaneRegistry::new());
+    let recording = Arc::new(Recording::default());
+    let rt = NodeRuntime::new(plan);
+    for i in 0..6u32 {
+        let mut ctx = ExecutionContext::new("test-wf".into(), format!("run-{i}"), lanes.clone());
+        ctx.reporter = recording.clone();
+        // NodeRuntime::execute takes &self; the counter persists across calls.
+        let result = tokio_test::block_on(rt.execute(
+            &ctx,
+            NodeInput::message(RuntimeValue::String(format!("msg-{i}"))),
+        ))
+        .expect("execution succeeded");
+        assert_eq!(result.port, None); // output nodes report no port
+    }
+    let ports = recording.ports.lock().unwrap().clone();
+    assert_eq!(
+        ports,
+        vec![
+            "route_0", "route_1", "route_2", "route_0", "route_1", "route_2"
+        ]
+    );
+}
+
+#[test]
+fn test_router_single_port_always_route_0() {
+    use std::sync::Mutex;
+    use workflow_runtime::milestone::MilestoneReporter;
+
+    #[derive(Default)]
+    struct Recording {
+        ports: Mutex<Vec<String>>,
+    }
+    impl MilestoneReporter for Recording {
+        fn node_completed(&self, node_id: &str, output_port: Option<&str>) {
+            if node_id == "route" {
+                self.ports
+                    .lock()
+                    .unwrap()
+                    .push(output_port.unwrap_or("").to_string());
+            }
+        }
+        fn node_failed(&self, _node_id: &str, _error: &str) {}
+    }
+
+    let wf = Workflow {
+        id: "wf-router1".into(),
+        name: "router1".into(),
+        version: 1,
+        nodes: vec![
+            input_node("in"),
+            Node {
+                id: "route".into(),
+                kind: NodeKind::Router,
+                config: NodeConfig::Router(RouterConfig {
+                    strategy: RouterStrategy::RoundRobin,
+                    output_ports: 1,
+                }),
+                inputs: vec![PortDef {
+                    name: "in".into(),
+                    port_type: PortType::Message,
+                }],
+                outputs: vec![PortDef {
+                    name: "route_0".into(),
+                    port_type: PortType::Message,
+                }],
+            },
+            output_node("out0"),
+        ],
+        edges: vec![
+            simple_edge("in", "route"),
+            conditional_edge("route", "out0", "route_0"),
+        ],
+    };
+    let plan = build_and_validate(&wf);
+    let lanes = Arc::new(LaneRegistry::new());
+    let recording = Arc::new(Recording::default());
+    let rt = NodeRuntime::new(plan);
+    for i in 0..4u32 {
+        let mut ctx = ExecutionContext::new("test-wf".into(), format!("run-{i}"), lanes.clone());
+        ctx.reporter = recording.clone();
+        let result = tokio_test::block_on(
+            rt.execute(&ctx, NodeInput::message(RuntimeValue::String("x".into()))),
+        )
+        .expect("execution succeeded");
+        assert_eq!(result.port, None);
+    }
+    let ports = recording.ports.lock().unwrap().clone();
+    assert_eq!(ports, vec!["route_0", "route_0", "route_0", "route_0"]);
+}
+
+// ─── RuntimeValue integer precision ─────────────────────────────────────────
+
+mod runtime_value_integer {
+    use super::*;
+
+    #[test]
+    fn test_integer_from_json_preserves_precision() {
+        let v = RuntimeValue::from_json(serde_json::json!(i64::MAX));
+        assert!(matches!(v, RuntimeValue::Integer(i64::MAX)));
+        assert_eq!(v.to_json(), serde_json::json!(i64::MAX));
+    }
+
+    #[test]
+    fn test_integer_condition_equality() {
+        // Integer(42) == json!(42) → true branch
+        let wf = Workflow {
+            id: "wf-int-eq".into(),
+            name: "int-eq".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                condition_node("cond", "n", ConditionOp::Equal, serde_json::json!(42)),
+                output_node("out"),
+            ],
+            edges: vec![
+                simple_edge("in", "cond"),
+                conditional_edge("cond", "out", "true"),
+            ],
+        };
+        let lanes = Arc::new(LaneRegistry::new());
+        let result = run_sync(
+            build_and_validate(&wf),
+            RuntimeValue::Json(serde_json::json!({"n": 42})),
+            lanes,
+        );
+        assert_eq!(result, RuntimeValue::Bool(true));
+
+        // Integer(42) == json!(42.0) → false; no "true" edge → validation error
+        let wf = Workflow {
+            id: "wf-int-eq-float".into(),
+            name: "int-eq-float".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                condition_node("cond", "n", ConditionOp::Equal, serde_json::json!(42.0)),
+                output_node("out"),
+            ],
+            edges: vec![
+                simple_edge("in", "cond"),
+                conditional_edge("cond", "out", "true"),
+            ],
+        };
+        let plan = build_and_validate(&wf);
+        let lanes = Arc::new(LaneRegistry::new());
+        let rt = NodeRuntime::new(plan);
+        let ctx = ExecutionContext::new("wf-int-eq-float".into(), "test-run".into(), lanes);
+        let result = tokio_test::block_on(rt.execute(
+            &ctx,
+            NodeInput::message(RuntimeValue::Json(serde_json::json!({"n": 42}))),
+        ));
+        assert!(
+            matches!(result, Err(WorkflowError::Validation(_))),
+            "Expected validation error (condition false), got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_integer_condition_comparison() {
+        // Integer(10) > json!(5)
+        let wf = Workflow {
+            id: "wf-int-gt".into(),
+            name: "int-gt".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                condition_node("cond", "n", ConditionOp::GreaterThan, serde_json::json!(5)),
+                output_node("out"),
+            ],
+            edges: vec![
+                simple_edge("in", "cond"),
+                conditional_edge("cond", "out", "true"),
+            ],
+        };
+        let lanes = Arc::new(LaneRegistry::new());
+        let result = run_sync(
+            build_and_validate(&wf),
+            RuntimeValue::Json(serde_json::json!({"n": 10})),
+            lanes,
+        );
+        assert_eq!(result, RuntimeValue::Bool(true));
+
+        // Integer(10) < json!(20)
+        let wf = Workflow {
+            id: "wf-int-lt".into(),
+            name: "int-lt".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                condition_node("cond", "n", ConditionOp::LessThan, serde_json::json!(20)),
+                output_node("out"),
+            ],
+            edges: vec![
+                simple_edge("in", "cond"),
+                conditional_edge("cond", "out", "true"),
+            ],
+        };
+        let lanes = Arc::new(LaneRegistry::new());
+        let result = run_sync(
+            build_and_validate(&wf),
+            RuntimeValue::Json(serde_json::json!({"n": 10})),
+            lanes,
+        );
+        assert_eq!(result, RuntimeValue::Bool(true));
+    }
+
+    #[test]
+    fn test_integer_large_values() {
+        let two_53: i64 = 1 << 53;
+        for n in [two_53, two_53 + 1] {
+            let v = RuntimeValue::from_json(serde_json::json!(n));
+            assert!(
+                matches!(v, RuntimeValue::Integer(_)),
+                "expected Integer for {n}, got {v:?}"
+            );
+            assert_eq!(v.to_json(), serde_json::json!(n));
+        }
+    }
+
+    #[test]
+    fn test_mcp_no_executor_returns_error() {
+        let wf = Workflow {
+            id: "wf-mcp-err".into(),
+            name: "mcp-err".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                Node {
+                    id: "mcp1".into(),
+                    kind: NodeKind::Mcp,
+                    config: NodeConfig::Mcp(McpConfig {
+                        server_ref: "test-server".into(),
+                        tool_name: "test-tool".into(),
+                        deferred: false,
+                    }),
+                    inputs: vec![PortDef {
+                        name: "in".into(),
+                        port_type: PortType::Message,
+                    }],
+                    outputs: vec![PortDef {
+                        name: "out".into(),
+                        port_type: PortType::Message,
+                    }],
+                },
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "mcp1"), simple_edge("mcp1", "out")],
+        };
+        let plan = build_and_validate(&wf);
+        let lanes = Arc::new(LaneRegistry::new());
+        let rt = NodeRuntime::new(plan);
+        let ctx = ExecutionContext::new("test-wf".into(), "run-0".into(), lanes);
+        let result = tokio_test::block_on(rt.execute(&ctx, NodeInput::message(RuntimeValue::Null)));
+        assert!(
+            result.is_err(),
+            "MCP with no executor should return error, not fabricated success"
+        );
+    }
+
+    #[test]
+    fn test_skill_no_loader_returns_error() {
+        let wf = Workflow {
+            id: "wf-skill-err".into(),
+            name: "skill-err".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                Node {
+                    id: "skill1".into(),
+                    kind: NodeKind::Skill,
+                    config: NodeConfig::Skill(SkillConfig {
+                        skill_ref: "test-skill".into(),
+                        progressive: false,
+                    }),
+                    inputs: vec![PortDef {
+                        name: "in".into(),
+                        port_type: PortType::Message,
+                    }],
+                    outputs: vec![PortDef {
+                        name: "out".into(),
+                        port_type: PortType::Message,
+                    }],
+                },
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "skill1"), simple_edge("skill1", "out")],
+        };
+        let plan = build_and_validate(&wf);
+        let lanes = Arc::new(LaneRegistry::new());
+        let rt = NodeRuntime::new(plan);
+        let ctx = ExecutionContext::new("test-wf".into(), "run-0".into(), lanes);
+        let result = tokio_test::block_on(rt.execute(&ctx, NodeInput::message(RuntimeValue::Null)));
+        assert!(
+            result.is_err(),
+            "Skill with no loader should return error, not fabricated success"
+        );
     }
 }

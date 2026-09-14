@@ -23,9 +23,6 @@ pub struct AppState {
     >,
     /// Per-request overall timeout deadline.
     pub timeout: Duration,
-    /// Maximum time between body frames. If no frame arrives within this
-    /// duration, the streaming response is terminated.
-    pub frame_timeout: Duration,
     /// Runtime publication state: the active compiled snapshot and the
     /// per-lane connection pools, hot-swappable via `PublicationState`.
     /// None for pure proxy deployments that don't execute workflows.
@@ -119,7 +116,6 @@ impl GatewayServer {
             config: self.config.clone(),
             client: Arc::new(client),
             timeout: Duration::from_millis(self.server_config.total_timeout_ms),
-            frame_timeout: Duration::from_secs(60), // Default; per-lane override in Phase 3
             publication: publication_state.clone(),
         });
 
@@ -136,8 +132,12 @@ impl GatewayServer {
             Some(ps) => crate::observability::admin_router_with_publication(
                 self.metrics_handle.clone(),
                 Some(ps.clone()),
+                self.server_config.admin_api_key.clone(),
             ),
-            None => crate::observability::admin_router(self.metrics_handle.clone()),
+            None => crate::observability::admin_router(
+                self.metrics_handle.clone(),
+                self.server_config.admin_api_key.clone(),
+            ),
         };
 
         let admin_listener = TcpListener::bind(self.server_config.admin_listen).await?;
@@ -212,7 +212,7 @@ mod tests {
             .get()
             .ok_or_else(|| anyhow::anyhow!("metrics recorder handle unavailable"))?
             .clone();
-        Ok(crate::observability::admin_router(handle))
+        Ok(crate::observability::admin_router(handle, None))
     }
 
     #[tokio::test]

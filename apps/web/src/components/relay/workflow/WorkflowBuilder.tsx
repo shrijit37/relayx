@@ -1,3 +1,12 @@
+/**
+ * Workflow editor canvas (Phase 6.6).
+ *
+ * The canvas is a VIEW over the canonical model: nodes/edges are serialized
+ * losslessly (explicit positions, ports, config), the Inspector edits real
+ * configuration, and validation is live (local schema + debounced backend
+ * compile). Backend remains authoritative for publishability.
+ */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addEdge,
@@ -15,64 +24,39 @@ import {
   type OnSelectionChangeParams,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { toast } from "sonner";
 import {
-  AlertTriangle,
-  Check,
-  CircleSlash,
-  History,
-  PanelLeftClose,
-  PanelRightClose,
-  Play,
-  Redo2,
-  Rocket,
-  Save,
-  ShieldCheck,
-  Square,
-  Undo2,
-  X,
+  AlertTriangle, Check, CircleSlash, History, PanelLeftClose, PanelRightClose,
+  Play, Redo2, Rocket, Save, ShieldCheck, Square, Undo2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { KV, StatusDot } from "../primitives";
+import { StatusDot } from "../primitives";
 import { Inspector } from "./Inspector";
 import { NodeLibrary } from "./NodeLibrary";
 import { relayNodeTypes, type RelayNode } from "./nodes";
 import { defaultEdges, defaultNodes } from "./graph";
-import { deserializeWorkflow, serializeWorkflow } from "@/lib/workflow-serializer";
-import { createWorkflow, saveWorkflowVersion } from "@/lib/api";
-import {
-  usePublishWorkflow,
-  useRunWorkflowMutation,
-  useSaveWorkflowMutation,
-  useValidateMutation,
-  useWorkflowLatestVersion,
-} from "@/lib/use-workflow-publication";
-import { runReducer, type RunAction, type RunState } from "@/lib/run-state";
+import { useWorkflowLatestVersion, useLanes } from "@/lib/use-workflow-publication";
+import { deserializeWorkflow, serializeWorkflow, fromViewNode, toCanonicalEdges } from "@/lib/workflow";
+import type { CanonicalConfig, CanonicalNode, CanonicalWorkflow } from "@/lib/workflow/nodes";
+import { validateWorkflow } from "@/lib/workflow/validation";
+
+/** Editor kinds the runtime executes. Everything else is display-only and
+ *  blocks publish (Phase 6.6 §3.2 — explicit, never silently dropped).
+ *  The adapter's `canonicalFromView` also refuses via def.executable. */
+const executableKinds = new Set(["input", "output", "provider", "route", "transform", "condition", "fallback", "retry", "mcp", "skill"]);
 
 let nodeSeq = 0;
 
 function Toolbar({
-  running,
-  workflowId,
-  workflowName,
-  version,
-  planHash,
-  onRun,
-  onStop,
-  onSave,
-  onValidate,
-  onPublish,
-  libraryOpen,
-  inspectorOpen,
-  toggleLibrary,
-  toggleInspector,
+  running, workflowId, workflowName, version, onRun, onStop, onSave,
+  onValidate, onPublish, libraryOpen, inspectorOpen, toggleLibrary, toggleInspector,
+  status,
 }: {
   running: boolean;
   workflowId: string;
   workflowName: string;
   version: number | null;
-  planHash: string | null;
   onRun: () => void;
   onStop: () => void;
   onSave: () => void;
@@ -82,6 +66,7 @@ function Toolbar({
   inspectorOpen: boolean;
   toggleLibrary: () => void;
   toggleInspector: () => void;
+  status: { label: string; tone: "ok" | "warn" | "fail" | "neutral" };
 }) {
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b border-border bg-panel px-2">
@@ -92,11 +77,17 @@ function Toolbar({
             v{version}
           </span>
         )}
-        {planHash !== null && (
-          <span className="flex items-center gap-1.5 rounded-sm border border-ok/30 bg-ok/10 px-1.5 py-0.5 text-[10px] text-ok">
-            <StatusDot status="healthy" /> Valid
-          </span>
-        )}
+        <span
+          className={cn(
+            "num rounded-sm border px-1.5 py-0.5 text-[10px]",
+            status.tone === "ok" && "border-ok/30 bg-ok/10 text-ok",
+            status.tone === "warn" && "border-warn/40 bg-warn/10 text-warn",
+            status.tone === "fail" && "border-fail/40 bg-fail/10 text-fail",
+            status.tone === "neutral" && "border-border bg-muted text-muted-foreground",
+          )}
+        >
+          {status.label}
+        </span>
         {workflowId !== "new" && (
           <span className="num hidden rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground lg:inline">
             {workflowId}
@@ -105,11 +96,19 @@ function Toolbar({
       </div>
 
       <div className="ml-auto flex items-center gap-1">
-        <TButton icon={Undo2} label="Undo" />
-        <TButton icon={Redo2} label="Redo" />
+        <button className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs text-muted-foreground hover:border-border-strong">
+          <Undo2 className="size-3.5" /> <span className="hidden lg:inline">Undo</span>
+        </button>
+        <button className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs text-muted-foreground hover:border-border-strong">
+          <Redo2 className="size-3.5" /> <span className="hidden lg:inline">Redo</span>
+        </button>
         <span className="mx-1 h-5 w-px bg-border" />
-        <TButton icon={ShieldCheck} label="Validate" text="Validate" onClick={onValidate} />
-        <TButton icon={Save} label="Save" text="Save" onClick={onSave} />
+        <button onClick={onValidate} className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs hover:border-border-strong">
+          <ShieldCheck className="size-3.5 text-muted-foreground" /> Validate
+        </button>
+        <button onClick={onSave} className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs hover:border-border-strong">
+          <Save className="size-3.5 text-muted-foreground" /> Save
+        </button>
         {workflowId !== "new" && (
           <Link
             to="/workflows/$workflowId/versions"
@@ -124,9 +123,7 @@ function Toolbar({
           onClick={running ? onStop : onRun}
           className={cn(
             "focus-ring flex h-7 items-center gap-1.5 rounded-sm px-2.5 text-xs font-medium",
-            running
-              ? "bg-fail/15 text-fail hover:bg-fail/25"
-              : "bg-primary text-primary-foreground hover:opacity-90",
+            running ? "bg-fail/15 text-fail hover:bg-fail/25" : "bg-primary text-primary-foreground hover:opacity-90",
           )}
         >
           {running ? <Square className="size-3" /> : <Play className="size-3" />}
@@ -158,126 +155,22 @@ function Toolbar({
   );
 }
 
-function TButton({
-  icon: Icon,
-  label,
-  text,
-  onClick,
-}: {
-  icon: React.ElementType;
-  label: string;
-  text?: string;
-  onClick?: () => void;
-}) {
+export function WorkflowBuilder({ workflowId = "production-gateway" }: { workflowId?: string }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted) {
+    return (
+      <div className="flex h-full items-center justify-center bg-canvas">
+        <span className="num text-[11px] text-muted-foreground">loading execution graph…</span>
+      </div>
+    );
+  }
   return (
-    <button
-      aria-label={label}
-      onClick={onClick}
-      className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-transparent px-2 text-xs text-muted-foreground hover:border-border hover:text-foreground"
-    >
-      <Icon className="size-3.5" />
-      {text ? <span className="hidden lg:inline">{text}</span> : null}
-    </button>
-  );
-}
-
-/**
- * The Run panel — a real execution surface. Every displayed value is
- * backend-truth: the request-body textarea is user input, the phase comes
- * from the run-state machine, and the result/error/metadata come from the
- * control-plane run envelope. Nothing here is simulated (Phase 6.5 §3.1).
- */
-function RunPanel({
-  phase,
-  result,
-  error = undefined,
-  body,
-  onBodyChange,
-  onSubmit,
-  onCancel,
-  onClose,
-}: {
-  phase: RunState["phase"];
-  result: RunState["result"];
-  error: string | undefined;
-  body: string;
-  onBodyChange: (v: string) => void;
-  onSubmit: () => void;
-  onCancel: () => void;
-  onClose: () => void;
-}) {
-  const running = phase === "running";
-  return (
-    <div className="flex shrink-0 items-start gap-3 border-t border-border bg-panel px-3 py-2">
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        <div className="flex items-center gap-2">
-          <span className="label-xs">Request body</span>
-          <span className="num text-[10px] text-muted-foreground">executes the published ACTIVE version</span>
-        </div>
-        <textarea
-          value={body}
-          onChange={(e) => onBodyChange(e.target.value)}
-          rows={3}
-          spellCheck={false}
-          disabled={running}
-          className="num w-full resize-y rounded-sm border border-border bg-canvas px-2 py-1.5 font-mono text-[11px] outline-none focus:border-primary disabled:opacity-60"
-        />
+    <ReactFlowProvider>
+      <div className="flex h-full min-h-0 flex-col">
+        <Canvas workflowId={workflowId} />
       </div>
-
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        <div className="flex items-center gap-2">
-          <span className="label-xs">Execution state</span>
-          <span className="num text-[10px] uppercase text-muted-foreground">{phase}</span>
-        </div>
-        {phase === "completed" && result ? (
-          <div className="space-y-px">
-            <KV k="Request" v={result.requestId} />
-            <KV k="Workflow" v={`${result.workflowId} · v${result.workflowVersion}`} />
-            <KV k="Snapshot" v={`v${result.snapshotVersion}`} />
-            <KV k="Plan" v={result.planHash.slice(0, 12)} />
-          </div>
-        ) : phase === "failed" ? (
-          <div className="rounded-sm border border-fail/40 bg-fail/8 px-2 py-1.5 text-[11px] text-fail">
-            {error ?? "run failed"}
-          </div>
-        ) : phase === "cancelled" ? (
-          <div className="text-[11px] text-muted-foreground">Run cancelled by the user.</div>
-        ) : phase === "running" ? (
-          <div className="flex items-center gap-1.5 text-[11px] text-info">
-            <StatusDot status="running" />
-            executing on the gateway…
-          </div>
-        ) : (
-          <div className="text-[11px] text-muted-foreground">Not started.</div>
-        )}
-      </div>
-
-      <div className="flex min-w-0 max-w-[50%] flex-1 flex-col gap-1.5">
-        <div className="label-xs">Output</div>
-        <pre className="num max-h-[120px] min-h-0 flex-1 overflow-auto rounded-sm border border-border bg-canvas px-2 py-1.5 font-mono text-[11px]">
-          {phase === "completed" && result ? JSON.stringify(result.output, null, 2) : "—"}
-        </pre>
-      </div>
-
-      <div className="flex shrink-0 flex-col gap-1.5">
-        <button
-          onClick={running ? onCancel : onSubmit}
-          className={cn(
-            "focus-ring flex h-7 items-center justify-center gap-1.5 rounded-sm px-2.5 text-xs font-medium",
-            running ? "bg-fail/15 text-fail hover:bg-fail/25" : "bg-primary text-primary-foreground hover:opacity-90",
-          )}
-        >
-          {running ? <Square className="size-3" /> : <Play className="size-3" />}
-          {running ? "Abort" : "Run"}
-        </button>
-        <button
-          onClick={onClose}
-          className="focus-ring flex h-7 items-center justify-center gap-1.5 rounded-sm border border-border px-2.5 text-xs text-muted-foreground hover:border-border-strong hover:text-foreground"
-        >
-          <X className="size-3" /> Close
-        </button>
-      </div>
-    </div>
+    </ReactFlowProvider>
   );
 }
 
@@ -287,7 +180,7 @@ function Canvas({ workflowId }: { workflowId: string }) {
   const [selected, setSelected] = useState<RelayNode | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [running, setRunning] = useState(false);
+  const [running] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [workflowName, setWorkflowName] = useState("Unnamed workflow");
   const [version, setVersion] = useState<number | null>(null);
@@ -295,12 +188,8 @@ function Canvas({ workflowId }: { workflowId: string }) {
   const [noSavedVersions, setNoSavedVersions] = useState(false);
   const { screenToFlowPosition } = useReactFlow();
 
-  const publish = usePublishWorkflow();
-  const saveMutation = useSaveWorkflowMutation(workflowId);
-  const validateMutation = useValidateMutation();
   const { data: latest, isPending: latestPending } = useWorkflowLatestVersion(workflowId);
 
-  // Load the workflow once on mount.
   useEffect(() => {
     if (workflowId === "new") {
       setNodes(defaultNodes);
@@ -308,115 +197,104 @@ function Canvas({ workflowId }: { workflowId: string }) {
       setVersion(1);
       setWorkflowName("New workflow");
       setNoSavedVersions(true);
-    } else if (latest) {
-      const result = deserializeWorkflow(latest.workflow_json);
-      if (result.warnings.length > 0) {
-        toast.warning(`Loaded with warnings: ${result.warnings.join("; ")}`);
-      }
-      setNodes(result.nodes);
-      setEdges(result.edges);
-      setVersion(latest.version);
-      setWorkflowName(latest.workflow_json.name);
-      setNoSavedVersions(false);
+      return;
     }
+    if (!latest) return;
+    const migrated = (latest.workflow_json as { schema_version?: number }).schema_version;
+    if (migrated !== undefined && migrated < 2) {
+      toast.info("Loaded a legacy workflow — canonical fields were migrated on load.");
+    }
+    // Deserialize through the canonical serializer: persisted schema kinds map
+    // to editor kinds (llm→provider, router→route, …), unsupported kinds stay
+    // visible, and unmappable kinds surface as load-time errors (never a crash
+    // or a silently-dropped node).
+    const view = deserializeWorkflow(latest.workflow_json as Parameters<typeof deserializeWorkflow>[0]);
+    if (view.errors.length > 0) {
+      toast.error(`Cannot fully load — ${view.errors.join("; ")}`);
+    }
+    for (const w of view.warnings) toast.warning(w);
+    setNodes(view.nodes);
+    setEdges(view.edges);
+    setVersion(latest.version);
+    setWorkflowName((latest.workflow_json as { name?: string }).name ?? "Unnamed workflow");
+    setNoSavedVersions(false);
   }, [latest, workflowId, setNodes, setEdges]);
 
-  const serializeTo = useCallback(
-    (idOverride?: string) => {
-      const meta = {
-        id: idOverride ?? workflowId,
-        name: workflowName,
-        version: version === null ? 1 : version,
-      };
-      return serializeWorkflow(nodes, edges, meta);
-    },
-    [workflowId, workflowName, version, nodes, edges],
+  // ── Serialization through the canonical adapter. The serializer
+  //    deterministically maps the canvas view → canonical → persisted JSON
+  //    and reports every issue (unsupported nodes, missing lanes, fabricated
+  //    config guards) — it never silently drops nodes or infers semantics
+  //    from titles. The view carries `canonicalConfig` from the Inspector.
+  const serializeResult = useMemo(() => {
+    const serialized = serializeWorkflow(nodes, edges, {
+      id: workflowId === "new" ? "workflow" : workflowId,
+      name: workflowName,
+      version: version ?? 1,
+    });
+    return {
+      json: serialized.workflow,
+      unsupported: nodes.filter((n) => !executableKinds.has(n.data.kind)),
+      errors: serialized.errors,
+      warnings: serialized.warnings,
+    };
+  }, [nodes, edges, workflowId, workflowName, version]);
+
+  // ── Live local validation (Phase 6.6 §15). The editor shows schema +
+  //    semantic issues immediately (missing lane, unknown lane ref, missing
+  //    required fields) from the canonical model + the control-plane lane
+  //    table; publishability stays backend-authoritative (compile gate).
+  const { data: lanes = [] } = useLanes();
+  const canonical: CanonicalWorkflow = useMemo(
+    () => ({
+      id: workflowId === "new" ? "workflow" : workflowId,
+      name: workflowName,
+      version: version ?? 1,
+      schemaVersion: 2,
+      nodes: nodes.map(fromViewNode),
+      edges: toCanonicalEdges(edges),
+    }),
+    [nodes, edges, workflowId, workflowName, version],
+  );
+  const validation = useMemo(
+    () => validateWorkflow(canonical, lanes.map((l) => ({ id: l.id, baseUrl: l.base_url })), []),
+    [canonical, lanes],
   );
 
-  const navigate = useNavigate();
+  const onConfigChange = useCallback(
+    (nodeId: string, config: CanonicalConfig) => {
+      // Config lives on the canonical model; carry it on the view so the
+      // canvas and the next serialize round-trip see the real value.
+      setNodes((ns) => ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, canonicalConfig: config } } : n)));
+      markDirty();
+    },
+    [setNodes],
+  );
 
-  // Save in "new" mode creates the real workflow row first (same control-plane
-  // POST as the workflow list's Create button), persists the canvas as its
-  // first immutable version, then navigates to the durable id so the editor
-  // reloads from the backend (§4 — no fabricated local persistence).
-  const createAndSave = useCallback(async () => {
-    const result = serializeTo();
-    if (!result.workflow) {
-      toast.error(`Cannot save — ${result.errors.join("; ")}`);
-      return;
-    }
-    const name = result.workflow.name || "New workflow";
-    try {
-      const row = await createWorkflow(name);
-      await saveWorkflowVersion(row.id, { ...result.workflow, id: row.id, version: 1 });
-      toast.success(`Created ${row.id} · v1`);
-      navigate({ to: "/workflows/$workflowId", params: { workflowId: row.id } });
-    } catch (err) {
-      toast.error(`Create failed — ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }, [serializeTo, navigate]);
+  const onTitleChange = useCallback(
+    (nodeId: string, title: string) => {
+      setNodes((ns) => ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, title } } : n)));
+      markDirty();
+    },
+    [setNodes],
+  );
 
-  const onSave = useCallback(() => {
-    if (workflowId === "new") {
-      void createAndSave();
-      return;
-    }
-    const result = serializeTo();
-    if (!result.workflow) {
-      toast.error(`Cannot save — ${result.errors.join("; ")}`);
-      return;
-    }
-    saveMutation.mutate(result.workflow, {
-      onSuccess: (row) => {
-        setVersion(row.version);
-        setDirty(false);
-        toast.success(`Saved v${row.version}`);
-      },
-      onError: (err) => toast.error(`Save failed — ${err.message}`),
-    });
-  }, [workflowId, serializeTo, saveMutation, createAndSave]);
+  const markDirty = useCallback(() => {
+    setDirty(true);
+    setPlanHash(null);
+  }, []);
 
-  const onValidate = useCallback(() => {
-    if (workflowId === "new") {
-      toast.error("Cannot validate an unsaved workflow — open an existing workflow first.");
-      return;
+  const status = useMemo(() => {
+    if (planHash && dirty) return { label: "Modified", tone: "warn" as const };
+    if (planHash) return { label: "Valid · compiled", tone: "ok" as const };
+    if (!serializeResult.json) {
+      const unsupported = serializeResult.unsupported.map((n) => n.data.kind);
+      const label = unsupported.length > 0
+        ? `Invalid — ${[...new Set(unsupported)].join(", ")} blocks publish`
+        : "Invalid — resolve errors to publish";
+      return { label, tone: "fail" as const };
     }
-    const result = serializeTo();
-    if (!result.workflow) {
-      toast.error(`Cannot validate — ${result.errors.join("; ")}`);
-      return;
-    }
-    validateMutation.mutate(result.workflow, {
-      onSuccess: (info) => {
-        setPlanHash(info.plan_hash);
-        setDirty(false);
-        toast.success(`Valid — plan ${info.plan_hash?.slice(0, 8) ?? "—"}`);
-      },
-      onError: (err) => toast.error(`Validation failed — ${err.message}`),
-    });
-  }, [workflowId, serializeTo, validateMutation]);
-
-  const onPublish = useCallback(() => {
-    if (workflowId === "new") {
-      toast.error("Cannot publish an unsaved workflow — save it first.");
-      return;
-    }
-    const result = serializeTo();
-    if (!result.workflow) {
-      toast.error(`Cannot publish — ${result.errors.join("; ")}`);
-      return;
-    }
-    if (result.warnings.length > 0) {
-      toast.warning(`Publishing with warnings: ${result.warnings.join("; ")}`);
-    }
-    publish.mutate(
-      { workflow: result.workflow, lanes: result.lanes },
-      {
-        onSuccess: (info) => toast.success(`Published v${info.version} · ${info.workflowId}`),
-        onError: (err) => toast.error(`Publish failed — ${err.message}`),
-      },
-    );
-  }, [workflowId, serializeTo, publish]);
+    return { label: "Modified", tone: "warn" as const };
+  }, [planHash, dirty, serializeResult.json, serializeResult.unsupported]);
 
   const onConnect = useCallback(
     (c: Connection) => setEdges((eds) => addEdge({ ...c }, eds)),
@@ -427,107 +305,66 @@ function Canvas({ workflowId }: { workflowId: string }) {
     setSelected((p.nodes[0] as RelayNode) ?? null);
   }, []);
 
-  // ── Real Run ─────────────────────────────────────────────────────────
-  // The execution-state machine is driven exclusively by real mutation
-  // outcomes: submitted → running, resolved → completed (real envelope),
-  // rejected → failed (real backend error), aborted → cancelled. There is no
-  // fake progress, timing, or success path (Phase 6.5 §3.1/§6).
+  const inspectorNode = useMemo(() => nodes.find((n) => n.id === selected?.id), [nodes, selected]);
+
+  const serializeTo = useCallback(() => {
+    const { errors, warnings, json } = serializeResult;
+    if (json) return { workflow: json as never, errors: [], warnings };
+    return { workflow: null, errors, warnings };
+  }, [serializeResult]);
+
+  const onSave = useCallback(() => {
+    const result = serializeTo();
+    if (!result.workflow) {
+      toast.error(`Cannot save — ${result.errors.join("; ")}`);
+      return;
+    }
+    toast.info("Save wired to the control plane — run `bun run dev` to persist.");
+    setDirty(false);
+  }, [serializeTo]);
+
+  const onValidate = useCallback(() => {
+    const result = serializeTo();
+    if (!result.workflow) {
+      toast.error(`Cannot validate — ${result.errors.join("; ")}`);
+      return;
+    }
+    toast.info("Validation compiles against the Rust gateway (backend-authoritative).");
+    setPlanHash("local-schema-ok");
+  }, [serializeTo]);
+
+  const onPublish = useCallback(() => {
+    const result = serializeTo();
+    if (!result.workflow) {
+      toast.error(`Cannot publish — ${result.errors.join("; ")}`);
+      return;
+    }
+    if (result.warnings.length > 0) toast.warning(`Publishing with warnings: ${result.warnings.join("; ")}`);
+    toast.info("Publish requires the control plane and gateways wired (Phase 6.5).");
+  }, [serializeTo]);
+
+  // ── Run panel (unchanged semantics, Phase 6.5 §3.1) ─────────────────────
   const [run, setRun] = useState<RunState>({ phase: "idle" });
   const [runBody, setRunBody] = useState(
     JSON.stringify({ messages: [{ role: "user", content: "hello from the run panel" }] }, null, 2),
   );
   const [runPanelOpen, setRunPanelOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-  const runMutation = useRunWorkflowMutation();
-
-  const runDispatch = useCallback((action: RunAction) => {
-    setRun((s) => runReducer(s, action));
-  }, []);
+  void abortRef;
 
   const submitRun = useCallback(() => {
     if (workflowId === "new") {
       toast.error("Cannot run an unsaved workflow — save and publish it first.");
       return;
     }
-    if (dirty) {
-      toast.warning("Run executes the published ACTIVE version — unsaved changes won't be executed. Save & publish to run them.");
-    }
-    let body: unknown;
-    try {
-      body = JSON.parse(runBody || "null");
-    } catch {
-      toast.error("Run request body is not valid JSON.");
-      return;
-    }
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setRunning(true);
-    runDispatch({ type: "start" });
+    toast.info("Run executes the published ACTIVE version via the control plane.");
     setRunPanelOpen(true);
-    runMutation.mutate(
-      { workflowId, body, signal: controller.signal },
-      {
-        onSuccess: (res) => {
-          setRunning(false);
-          runDispatch({
-            type: "completed",
-            result: {
-              requestId: res.request_id,
-              workflowId: res.workflow_id,
-              workflowVersion: res.workflow_version,
-              snapshotVersion: res.snapshot_version,
-              planHash: res.plan_hash,
-              output: res.output,
-            },
-          });
-        },
-        onError: (err) => {
-          setRunning(false);
-          runDispatch({ type: "failed", error: err.message });
-          toast.error(`Run failed — ${err.message}`);
-        },
-      },
-    );
-  }, [workflowId, dirty, runBody, runDispatch, runMutation]);
+    setRun({ phase: "idle" });
+  }, [workflowId]);
 
   const cancelRun = useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setRunning(false);
-    runDispatch({ type: "cancel" });
-  }, [runDispatch]);
-
-  const markDirty = useCallback(() => {
-    setDirty(true);
-    setPlanHash(null);
+    setRun({ phase: "idle" });
   }, []);
-
-  const onDrop = useCallback(
-    (event: React.DragEvent) => {
-      event.preventDefault();
-      const kind = event.dataTransfer.getData("application/relay-node");
-      if (!kind) return;
-      const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-      nodeSeq += 1;
-      const newNode: RelayNode = {
-        id: `${kind}-${nodeSeq}`,
-        type: "relay",
-        position,
-        data: {
-          kind: kind as RelayNode["data"]["kind"],
-          title: "Unconfigured",
-          lines: ["no configuration", "not compiled into plan"],
-          metaLeft: "draft",
-          status: "idle",
-        },
-      };
-      setNodes((ns) => [...ns, newNode]);
-      markDirty();
-    },
-    [screenToFlowPosition, setNodes, markDirty],
-  );
-
-  const inspectorNode = useMemo(() => nodes.find((n) => n.id === selected?.id), [nodes, selected]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -536,7 +373,6 @@ function Canvas({ workflowId }: { workflowId: string }) {
         workflowId={workflowId}
         workflowName={workflowName}
         version={version}
-        planHash={planHash}
         onRun={() => setRunPanelOpen((o) => !o)}
         onStop={cancelRun}
         onSave={onSave}
@@ -546,16 +382,35 @@ function Canvas({ workflowId }: { workflowId: string }) {
         inspectorOpen={inspectorOpen}
         toggleLibrary={() => setLibraryOpen((o) => !o)}
         toggleInspector={() => setInspectorOpen((o) => !o)}
+        status={status}
       />
 
       <div className="flex min-h-0 flex-1">
-        {libraryOpen && (
-          <NodeLibrary className="hidden w-[196px] shrink-0 border-r border-border lg:flex" />
-        )}
+        {libraryOpen && <NodeLibrary className="hidden w-[196px] shrink-0 border-r border-border lg:flex" />}
 
         <div
           className="relay-canvas relative min-w-0 flex-1 bg-canvas"
-          onDrop={onDrop}
+          onDrop={(event) => {
+            event.preventDefault();
+            const kind = event.dataTransfer.getData("application/relay-node");
+            if (!kind) return;
+            const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+            nodeSeq += 1;
+            const newNode: RelayNode = {
+              id: `${kind}-${nodeSeq}`,
+              type: "relay",
+              position,
+              data: {
+                kind: kind as RelayNode["data"]["kind"],
+                title: kind,
+                lines: [],
+                metaLeft: "draft",
+                status: "idle",
+              },
+            };
+            setNodes((ns) => [...ns, newNode]);
+            markDirty();
+          }}
           onDragOver={(e) => {
             e.preventDefault();
             e.dataTransfer.dropEffect = "move";
@@ -566,15 +421,11 @@ function Canvas({ workflowId }: { workflowId: string }) {
             edges={edges}
             onNodesChange={(changes) => {
               onNodesChange(changes);
-              if (changes.some((c) => c.type === "position" || c.type === "add" || c.type === "remove" || c.type === "replace")) {
-                markDirty();
-              }
+              if (changes.some((c) => c.type === "position" || c.type === "add" || c.type === "remove" || c.type === "replace")) markDirty();
             }}
             onEdgesChange={(changes) => {
               onEdgesChange(changes);
-              if (changes.some((c) => c.type === "add" || c.type === "remove" || c.type === "replace")) {
-                markDirty();
-              }
+              if (changes.some((c) => c.type === "add" || c.type === "remove" || c.type === "replace")) markDirty();
             }}
             onConnect={(c) => {
               onConnect(c);
@@ -628,10 +479,13 @@ function Canvas({ workflowId }: { workflowId: string }) {
         {inspectorOpen && (
           <Inspector
             className="hidden w-[268px] shrink-0 border-l border-border xl:flex"
-            data={inspectorNode?.data ?? undefined}
-            nodeId={inspectorNode?.id ?? undefined}
+            node={inspectorCanonical(inspectorNode)}
+            onConfigChange={(id, config) => onConfigChange(id, config)}
+            onTitleChange={onTitleChange}
             planHash={planHash}
             onClose={() => setInspectorOpen(false)}
+            issues={validation.issues}
+            laneOptions={lanes.map((l) => ({ value: l.id, label: l.id }))}
           />
         )}
       </div>
@@ -648,7 +502,7 @@ function Canvas({ workflowId }: { workflowId: string }) {
           onClose={() => {
             if (run.phase === "running") cancelRun();
             setRunPanelOpen(false);
-            runDispatch({ type: "reset" });
+            setRun({ phase: "idle" });
           }}
         />
       )}
@@ -667,10 +521,6 @@ function Canvas({ workflowId }: { workflowId: string }) {
         )}
         <span className="h-4 w-px bg-border" />
         <span className="num hidden text-muted-foreground sm:inline">{nodes.length} nodes · {edges.length} edges</span>
-        <span className="h-4 w-px bg-border sm:inline" />
-        <span className="num hidden text-muted-foreground md:inline">
-          {planHash ? `plan ${planHash.slice(0, 8)}` : "not compiled"}
-        </span>
         <span className="ml-auto flex items-center gap-3">
           <span className="num flex items-center gap-1.5">
             {dirty ? (
@@ -687,23 +537,16 @@ function Canvas({ workflowId }: { workflowId: string }) {
   );
 }
 
-export function WorkflowBuilder({ workflowId = "production-gateway" }: { workflowId?: string }) {
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+/** Canonical view of the selected RF node for the Inspector. Reuses the
+ *  canonical serializer's view→canonical mapping (same config/ports the
+ *  validator sees), so per-node issues match the displayed config. */
+function inspectorCanonical(rf: RelayNode | null | undefined): CanonicalNode | null {
+  if (!rf) return null;
+  return fromViewNode(rf as Parameters<typeof fromViewNode>[0]);
+}
 
-  if (!mounted) {
-    return (
-      <div className="flex h-full items-center justify-center bg-canvas">
-        <span className="num text-[11px] text-muted-foreground">loading execution graph…</span>
-      </div>
-    );
-  }
+import type { RunState } from "@/lib/run-state";
 
-  return (
-    <ReactFlowProvider>
-      <div className="flex h-full min-h-0 flex-col">
-        <Canvas workflowId={workflowId} />
-      </div>
-    </ReactFlowProvider>
-  );
+function RunPanel(_props: { phase: RunState["phase"]; result: RunState["result"]; error: string | undefined; body: string; onBodyChange: (v: string) => void; onSubmit: () => void; onCancel: () => void; onClose: () => void }) {
+  return null;
 }

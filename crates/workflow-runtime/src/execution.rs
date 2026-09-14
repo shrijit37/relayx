@@ -216,6 +216,21 @@ impl ExecutionPlan {
             .map(|(i, id)| (id.clone(), i))
             .collect();
 
+        // Apply the router output port count from the actual edge topology:
+        // RoundRobin cycles over how many distinct output ports the router has.
+        for node in node_map.values_mut() {
+            if let NodeConfig::Router(ref mut rc) = node.config {
+                let port_count = workflow
+                    .edges
+                    .iter()
+                    .filter(|e| e.source_node == node.id)
+                    .map(|e| &e.source_port)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                rc.output_ports = port_count.max(1);
+            }
+        }
+
         // Index edges by source node for fast lookup during execution.
         let mut edges_from: HashMap<NodeId, Vec<usize>> = HashMap::new();
         for (idx, edge) in edges.iter().enumerate() {
@@ -443,16 +458,22 @@ impl PortDataStore {
 /// The node runtime — executes a compiled plan.
 pub struct NodeRuntime {
     plan: ExecutionPlan,
-    /// Round-robin counter for Router nodes.
-    router_counter: AtomicUsize,
+    /// Per-router round-robin counters (independent per node id).
+    router_counters: HashMap<NodeId, AtomicUsize>,
 }
 
 impl NodeRuntime {
     /// Create a runtime from a compiled execution plan.
     pub fn new(plan: ExecutionPlan) -> Self {
+        let router_counters = plan
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.config, NodeConfig::Router(_)))
+            .map(|n| (n.id.clone(), AtomicUsize::new(0)))
+            .collect();
         Self {
             plan,
-            router_counter: AtomicUsize::new(0),
+            router_counters,
         }
     }
 
@@ -518,7 +539,7 @@ impl NodeRuntime {
                 exec_node,
                 &node_ctx,
                 node_input,
-                &self.router_counter,
+                &self.router_counters,
                 &self.plan.registry,
             )
             .await;
@@ -651,7 +672,7 @@ async fn execute_node(
     node: &ExecNode,
     ctx: &ExecutionContext,
     input: NodeInput,
-    router_counter: &AtomicUsize,
+    router_counters: &HashMap<NodeId, AtomicUsize>,
     registry: &Arc<NodeRegistry>,
 ) -> Result<NodeOutput, NodeError> {
     match &node.config {
@@ -661,7 +682,10 @@ async fn execute_node(
         NodeConfig::Transform(config) => crate::nodes::transform::execute(config, ctx, input).await,
         NodeConfig::Condition(config) => crate::nodes::condition::execute(config, ctx, input).await,
         NodeConfig::Router(config) => {
-            crate::nodes::router::execute(config, ctx, input, router_counter).await
+            let counter = router_counters.get(&node.id).ok_or_else(|| {
+                NodeError::Internal("router node missing round-robin counter".into())
+            })?;
+            crate::nodes::router::execute(config, ctx, input, counter).await
         }
         NodeConfig::Mcp(config) => crate::nodes::mcp::execute(config, ctx, input).await,
         NodeConfig::Skill(config) => crate::nodes::skill::execute(config, ctx, input).await,

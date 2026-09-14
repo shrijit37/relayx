@@ -82,6 +82,9 @@ pub struct MockState {
     pub last_request_body: std::sync::Mutex<Option<String>>,
     /// Headers of the most recently received LLM request (lower-cased names).
     pub last_request_headers: std::sync::Mutex<Option<std::collections::HashMap<String, String>>>,
+    /// URI path of the most recently received request (e.g. `/v1/messages`),
+    /// so tests can verify protocol routing.
+    pub last_request_path: std::sync::Mutex<Option<String>>,
 }
 
 impl MockState {
@@ -159,10 +162,19 @@ async fn run_mock(
                     Ok((stream, _peer)) => {
                         state.connections_accepted.fetch_add(1, Ordering::Relaxed);
 
+                        let svc_state = state.clone();
                         let svc = hyper::service::service_fn(move |req| {
                             let router = router.clone();
+                            let svc_state = svc_state.clone();
                             async move {
                                 let (parts, incoming_body) = req.into_parts();
+                                // Capture the request path so protocol-routing
+                                // tests can assert which endpoint was hit.
+                                *svc_state
+                                    .last_request_path
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner()) =
+                                    Some(parts.uri.path().to_owned());
                                 // Map hyper's body into axum's Body (axum Body
                                 // is a wrapper around the same frame types).
                                 let body = axum::body::Body::new(incoming_body);

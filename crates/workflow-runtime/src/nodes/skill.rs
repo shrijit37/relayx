@@ -1,11 +1,11 @@
 //! Skill node — loads and applies a skill via the loader trait.
 //!
 //! If a `SkillLoader` is provided in the execution context, the node calls it.
-//! Otherwise, it returns a stub result (graceful degradation).
+//! Otherwise it fails — a fabricated "success" must never reach downstream nodes.
 
 use crate::context::ExecutionContext;
 use crate::error::NodeError;
-use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
+use crate::nodes::{NodeInput, NodeOutput};
 use workflow_schema::SkillConfig;
 
 /// Execute a skill node. Loads skill content progressively.
@@ -26,12 +26,9 @@ pub async fn execute(
             let result = loader.load_skill(&config.skill_ref).await?;
             Ok(NodeOutput::message(result))
         }
-        None => {
-            // Graceful degradation — no skill registry connected.
-            Ok(NodeOutput::message(RuntimeValue::Json(serde_json::json!({
-                "skill": config.skill_ref,
-                "status": "skill_not_loaded",
-            }))))
-        }
+        None => Err(NodeError::Internal(format!(
+            "Skill loader not available: skill '{}' cannot be loaded",
+            config.skill_ref
+        ))),
     }
 }

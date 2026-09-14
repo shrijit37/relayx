@@ -261,7 +261,121 @@ fn decode_status(status: &str) -> FinishReason {
     }
 }
 
-/// Map a canonical finish reason to a Responses API status.
+/// Encode a canonical request into a Responses API wire request.
+///
+/// This is the inverse of [`decode_request`]. Messages map to `input` items;
+/// system instructions map to `instructions`; tools and tool_choice are
+/// translated to Responses-native types.
+pub fn encode_request(req: &CanonicalRequest) -> Result<ResponsesRequest, ProtocolEngineError> {
+    // System instructions → instructions field.
+    let instructions = req.system.as_ref().map(|s| match s {
+        crate::canonical::SystemInstruction::Text(t) => serde_json::Value::String(t.clone()),
+        crate::canonical::SystemInstruction::Blocks(blocks) => {
+            let texts: Vec<&str> = blocks.iter().map(|b| b.text.as_str()).collect();
+            serde_json::Value::String(texts.join("\n"))
+        }
+    });
+
+    // Messages → input items.
+    let mut input: Vec<serde_json::Value> = Vec::new();
+    for msg in &req.messages {
+        let role = match msg.role {
+            crate::canonical::Role::User => "user",
+            crate::canonical::Role::Assistant => "assistant",
+            crate::canonical::Role::System => "system",
+            crate::canonical::Role::Tool => "user",
+        };
+        let blocks = msg.content.clone().into_blocks();
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        for block in blocks {
+            match block {
+                crate::canonical::ContentBlock::Text(t) => {
+                    parts.push(serde_json::json!({"type": "input_text", "text": t.text}));
+                }
+                crate::canonical::ContentBlock::Image(img) => {
+                    let url = match &img.source {
+                        crate::canonical::ImageSource::Url { url, .. } => url.clone(),
+                        crate::canonical::ImageSource::Base64 {
+                            media_type, data, ..
+                        } => {
+                            format!("data:{media_type};base64,{data}")
+                        }
+                    };
+                    parts.push(serde_json::json!({"type": "input_image", "image_url": url}));
+                }
+                crate::canonical::ContentBlock::ToolResult(tr) => {
+                    let output = match &tr.content {
+                        crate::canonical::ToolResultContent::Text(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    input.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": tr.tool_use_id,
+                        "output": output,
+                    }));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        input.push(serde_json::json!({"role": role, "content": parts}));
+    }
+
+    let input_value = if input.len() == 1 && input[0].get("content").is_some() {
+        input.remove(0)
+    } else {
+        serde_json::Value::Array(input)
+    };
+
+    let tools: Vec<ResponsesTool> = req
+        .tools
+        .iter()
+        .map(|t| ResponsesTool {
+            tool_type: "function".into(),
+            name: Some(t.name.clone()),
+            description: t.description.clone(),
+            parameters: t.input_schema.clone(),
+            strict: t.extra.get("strict").and_then(|v| v.as_bool()),
+            extra: Default::default(),
+        })
+        .collect();
+
+    let tool_choice = req.tool_choice.as_ref().map(|tc| match tc {
+        crate::canonical::ToolChoice::Auto => ResponsesToolChoice::String("auto".into()),
+        crate::canonical::ToolChoice::Required => ResponsesToolChoice::String("required".into()),
+        crate::canonical::ToolChoice::None => ResponsesToolChoice::String("none".into()),
+        crate::canonical::ToolChoice::Named { name } => {
+            ResponsesToolChoice::Object(serde_json::json!({"type": "function", "name": name}))
+        }
+    });
+
+    Ok(ResponsesRequest {
+        model: req.model.clone(),
+        instructions,
+        input: Some(input_value),
+        temperature: req.temperature,
+        top_p: req.top_p,
+        max_output_tokens: req.max_tokens,
+        stream: req.stream,
+        stop: if req.stop.is_empty() {
+            None
+        } else {
+            Some(req.stop.clone())
+        },
+        tools: if tools.is_empty() { None } else { Some(tools) },
+        tool_choice,
+        response_format: req.response_format.as_ref().map(|rf| {
+            let mut obj = serde_json::json!({"type": rf.format_type});
+            if let Some(schema) = &rf.json_schema {
+                obj["json_schema"] = schema.clone();
+            }
+            obj
+        }),
+        metadata: req.metadata.clone(),
+        extra: Default::default(),
+    })
+}
+
 fn encode_status(reason: &FinishReason) -> &'static str {
     match reason {
         FinishReason::Stop => "completed",
