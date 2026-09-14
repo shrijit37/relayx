@@ -13,12 +13,15 @@
 export type RunPhase =
   | "idle" // no run has been started (or the previous run was stopped)
   | "running" // a real run request is in flight (mutation pending)
+  | "streaming" // tokens arriving via SSE
   | "completed" // the real gateway returned a result
   | "failed" // the real backend/gateway returned an error
   | "cancelled"; // the run was aborted by the user
 
 export type RunState = {
   phase: RunPhase;
+  /** Accumulated token text during streaming. */
+  streamOutput?: string;
   /** Real backend-truth envelope only (not user/fabricated). */
   result?: {
     requestId: string;
@@ -34,6 +37,7 @@ export type RunState = {
 
 export type RunAction =
   | { type: "start" }
+  | { type: "streaming"; delta: string }
   | { type: "completed"; result: NonNullable<RunState["result"]> }
   | { type: "failed"; error: string }
   | { type: "cancel" }
@@ -42,13 +46,20 @@ export type RunAction =
 export function runReducer(state: RunState, action: RunAction): RunState {
   switch (action.type) {
     case "start":
-      return { phase: "running" };
+      return { phase: "running", streamOutput: "" };
+    case "streaming":
+      return {
+        phase: "streaming",
+        streamOutput: (state.streamOutput ?? "") + action.delta,
+      };
     case "completed":
       return { phase: "completed", result: action.result };
     case "failed":
       return { phase: "failed", error: action.error };
     case "cancel":
-      return state.phase === "running" ? { phase: "cancelled" } : state;
+      return state.phase === "running" || state.phase === "streaming"
+        ? { phase: "cancelled" }
+        : state;
     case "reset":
       return { phase: "idle" };
   }

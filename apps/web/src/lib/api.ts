@@ -213,6 +213,96 @@ export async function runWorkflow(
   return req<RunResult>(`/workflows/${workflowId}/run`, init);
 }
 
+/** SSE stream events from the gateway's token-level run. */
+export type StreamTokenEvent = { type: "token"; delta: string };
+export type StreamDoneEvent = {
+  type: "done";
+  request_id: string;
+  workflow_id: string;
+  workflow_version: number;
+  snapshot_version: number;
+  plan_hash: string;
+  output: unknown;
+};
+export type StreamErrorEvent = { type: "error"; error: string };
+export type StreamEvent = StreamTokenEvent | StreamDoneEvent | StreamErrorEvent;
+
+/** Execute the published ACTIVE version of a workflow through the control
+ *  plane, consuming the gateway's SSE token stream. Yields parsed events as
+ *  they arrive; the caller iterates with `for await`. */
+export async function* runWorkflowStream(
+  workflowId: string,
+  body: unknown,
+  signal?: AbortSignal,
+): AsyncGenerator<StreamEvent> {
+  const init: RequestInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ body }),
+  };
+  if (signal !== undefined) init.signal = signal;
+
+  const resp = await fetch(`${API_BASE}/workflows/${workflowId}/run?stream=true`, init);
+  if (!resp.ok) {
+    const data = (await resp.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(data?.error ?? `HTTP ${resp.status}`);
+  }
+  const reader = resp.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE events are terminated by a blank line.
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop()!; // trailing fragment may be incomplete
+
+      for (const part of parts) {
+        const event = parseSseEvent(part);
+        if (!event) continue;
+        if (event.eventType === "token") {
+          const parsed = JSON.parse(event.data) as { delta: string };
+          yield { type: "token", delta: parsed.delta };
+        } else if (event.eventType === "done") {
+          const parsed = JSON.parse(event.data);
+          yield {
+            type: "done",
+            request_id: parsed.request_id,
+            workflow_id: parsed.workflow_id,
+            workflow_version: parsed.workflow_version ?? 0,
+            snapshot_version: parsed.snapshot_version,
+            plan_hash: parsed.plan_hash,
+            output: parsed.output,
+          };
+        } else if (event.eventType === "error") {
+          const parsed = JSON.parse(event.data) as { error: string };
+          yield { type: "error", error: parsed.error };
+        }
+      }
+    }
+  } finally {
+    reader.cancel();
+  }
+}
+
+function parseSseEvent(part: string): { eventType: string; data: string } | null {
+  if (!part.trim()) return null;
+  let eventType = "message";
+  let data = "";
+  for (const line of part.split("\n")) {
+    if (line.startsWith("event:")) {
+      eventType = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      data = line.slice(5).trim();
+    }
+  }
+  return { eventType, data };
+}
+
 /** Real control-plane + gateway health probe (both /healthz and /ready). */
 export type SystemHealth = {
   control_plane: { status: string; service?: string };

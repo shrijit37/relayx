@@ -14,7 +14,7 @@ const idle: RunState = { phase: "idle" };
 
 describe("runReducer", () => {
   test("idle → start → running", () => {
-    expect(runReducer(idle, { type: "start" })).toEqual({ phase: "running" });
+    expect(runReducer(idle, { type: "start" })).toEqual({ phase: "running", streamOutput: "" });
   });
 
   test("running → completed carries the real result envelope", () => {
@@ -31,13 +31,16 @@ describe("runReducer", () => {
     });
   });
 
-  test("cancel only fires from running (a completed run is not clobbered)", () => {
+  test("cancel only fires from running/streaming (a completed run is not clobbered)", () => {
     expect(runReducer(idle, { type: "cancel" })).toEqual(idle);
     expect(runReducer({ phase: "completed", result: ok }, { type: "cancel" })).toEqual({
       phase: "completed",
       result: ok,
     });
     expect(runReducer({ phase: "running" }, { type: "cancel" })).toEqual({ phase: "cancelled" });
+    expect(runReducer({ phase: "streaming", streamOutput: "hi" }, { type: "cancel" })).toEqual({
+      phase: "cancelled",
+    });
   });
 
   test("reset returns to idle", () => {
