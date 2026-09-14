@@ -90,6 +90,25 @@ export class GatewayClient {
     return { ok: false, error: `unexpected gateway run status '${(data as GatewayResponse).status ?? "unknown"}'` };
   }
 
+  /** Execute a workflow via the gateway with SSE streaming.
+   *  Returns the raw Response body so the caller can pipe it through. */
+  async runStream(payload: unknown): Promise<Response> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.apiKey) {
+      headers["authorization"] = `Bearer ${this.apiKey}`;
+    }
+    const resp = await this.fetchFn(`${this.baseUrl}/run?stream=true`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const data = (await resp.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(data?.error ?? `gateway HTTP ${resp.status}`);
+    }
+    return resp;
+  }
+
   private async post(path: string, body: unknown): Promise<GatewayResponse | { status: "error"; error: string }> {
     let resp: Response;
     try {
