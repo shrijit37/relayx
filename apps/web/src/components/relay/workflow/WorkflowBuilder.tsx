@@ -52,11 +52,11 @@ import { defaultEdges, defaultNodes } from "./graph";
 import { useUndoRedo } from "./use-undo-redo";
 import {
     usePublishWorkflow,
-    useRunWorkflowMutation,
     useSaveWorkflowMutation,
     useValidateMutation,
     useWorkflowLatestVersion,
     useLanes,
+    useProviders,
 } from "@/lib/use-workflow-publication";
 import { createWorkflow, saveWorkflowVersion } from "@/lib/api";
 import {
@@ -443,6 +443,22 @@ function Canvas({ workflowId }: { workflowId: string }) {
         [nodes, selected],
     );
 
+    const { data: providers = [] } = useProviders();
+    const providerOptions = providers.map((p) => ({ value: p.name, label: p.name }));
+    const modelOptions = useMemo(() => {
+        if (!inspectorNode) return [];
+        const canonical = inspectorCanonical(inspectorNode);
+        if (!canonical) return [];
+        const cfg = canonical.config;
+        if (cfg.kind !== "llm" || !cfg.config.provider) return [];
+        const match = providers.find((p) => p.name === cfg.config.provider);
+        if (!match) return [];
+        const opts: { value: string; label: string }[] = [];
+        if (cfg.config.model && cfg.config.model !== match.model) opts.push({ value: cfg.config.model, label: cfg.config.model });
+        opts.push({ value: match.model, label: match.model });
+        return opts;
+    }, [providers, inspectorNode]);
+
     const navigate = useNavigate();
 
     // ── Real Save / Validate / Publish (control-plane mutations) ──────────
@@ -557,13 +573,12 @@ function Canvas({ workflowId }: { workflowId: string }) {
     );
     const [runPanelOpen, setRunPanelOpen] = useState(false);
     const abortRef = useRef<AbortController | null>(null);
-    const runMutation = useRunWorkflowMutation();
 
     const runDispatch = useCallback((action: RunAction) => {
         setRun((s) => runReducer(s, action));
     }, []);
 
-    const submitRun = useCallback(() => {
+    const submitRun = useCallback(async () => {
         if (workflowId === "new") {
             toast.error("Cannot run an unsaved workflow — save and publish it first.");
             return;
@@ -584,29 +599,42 @@ function Canvas({ workflowId }: { workflowId: string }) {
         abortRef.current = controller;
         runDispatch({ type: "start" });
         setRunPanelOpen(true);
-        runMutation.mutate(
-            { workflowId, body, signal: controller.signal },
-            {
-                onSuccess: (res) => {
-                    runDispatch({
-                        type: "completed",
-                        result: {
-                            requestId: res.request_id,
-                            workflowId: res.workflow_id,
-                            workflowVersion: res.workflow_version,
-                            snapshotVersion: res.snapshot_version,
-                            planHash: res.plan_hash,
-                            output: res.output,
-                        },
-                    });
-                },
-                onError: (err) => {
-                    runDispatch({ type: "failed", error: err.message });
-                    toast.error(`Run failed — ${err.message}`);
-                },
-            },
-        );
-    }, [workflowId, dirty, runBody, runDispatch, runMutation]);
+
+        try {
+            const { runWorkflowStream } = await import("@/lib/api");
+            for await (const event of runWorkflowStream(workflowId, body, controller.signal)) {
+                switch (event.type) {
+                    case "token":
+                        runDispatch({ type: "streaming", delta: event.delta });
+                        break;
+                    case "done":
+                        runDispatch({
+                            type: "completed",
+                            result: {
+                                requestId: event.request_id,
+                                workflowId: event.workflow_id,
+                                workflowVersion: event.workflow_version,
+                                snapshotVersion: event.snapshot_version,
+                                planHash: event.plan_hash,
+                                output: event.output,
+                            },
+                        });
+                        break;
+                    case "error":
+                        runDispatch({ type: "failed", error: event.error });
+                        toast.error(`Run failed — ${event.error}`);
+                        break;
+                }
+            }
+        } catch (err: unknown) {
+            if (err instanceof DOMException && err.name === "AbortError") {
+                runDispatch({ type: "cancel" });
+            } else {
+                runDispatch({ type: "failed", error: String(err) });
+                toast.error(`Run failed — ${String(err)}`);
+            }
+        }
+    }, [workflowId, dirty, runBody, runDispatch]);
 
     const cancelRun = useCallback(() => {
         abortRef.current?.abort();
@@ -916,6 +944,8 @@ function Canvas({ workflowId }: { workflowId: string }) {
                         onClose={() => setInspectorOpen(false)}
                         issues={validation.issues}
                         laneOptions={lanes.map((l) => ({ value: l.id, label: l.id }))}
+                        providerOptions={providerOptions}
+                        modelOptions={modelOptions}
                     />
                 )}
             </div>
@@ -925,6 +955,7 @@ function Canvas({ workflowId }: { workflowId: string }) {
                     phase={run.phase}
                     result={run.result}
                     error={run.error}
+                    streamOutput={run.streamOutput ?? ""}
                     onBodyChange={(v) => setRunBody(v)}
                     body={runBody}
                     onSubmit={submitRun}
@@ -981,6 +1012,7 @@ function RunPanel({
     phase,
     result,
     error = undefined,
+    streamOutput = "",
     body,
     onBodyChange,
     onSubmit,
@@ -990,13 +1022,14 @@ function RunPanel({
     phase: RunState["phase"];
     result: RunState["result"];
     error: string | undefined;
+    streamOutput: string;
     body: string;
     onBodyChange: (v: string) => void;
     onSubmit: () => void;
     onCancel: () => void;
     onClose: () => void;
 }) {
-    const running = phase === "running";
+    const active = phase === "running" || phase === "streaming";
     return (
         <div className="flex shrink-0 items-start gap-3 border-t border-border bg-panel px-3 py-2">
             <div className="flex min-w-0 flex-1 flex-col gap-1.5">
@@ -1011,7 +1044,7 @@ function RunPanel({
                     onChange={(e) => onBodyChange(e.target.value)}
                     rows={3}
                     spellCheck={false}
-                    disabled={running}
+                    disabled={active}
                     className="num w-full resize-y rounded-sm border border-border bg-canvas px-2 py-1.5 font-mono text-[11px] outline-none focus:border-primary disabled:opacity-60"
                 />
             </div>
@@ -1036,10 +1069,10 @@ function RunPanel({
                     <div className="text-[11px] text-muted-foreground">
                         Run cancelled by the user.
                     </div>
-                ) : phase === "running" ? (
+                ) : phase === "running" || phase === "streaming" ? (
                     <div className="flex items-center gap-1.5 text-[11px] text-info">
                         <StatusDot status="running" />
-                        executing on the gateway…
+                        {phase === "streaming" ? "streaming tokens…" : "executing on the gateway…"}
                     </div>
                 ) : (
                     <div className="text-[11px] text-muted-foreground">Not started.</div>
@@ -1049,22 +1082,26 @@ function RunPanel({
             <div className="flex min-w-0 max-w-[50%] flex-1 flex-col gap-1.5">
                 <div className="label-xs">Output</div>
                 <pre className="num max-h-[120px] min-h-0 flex-1 overflow-auto rounded-sm border border-border bg-canvas px-2 py-1.5 font-mono text-[11px]">
-                    {phase === "completed" && result ? JSON.stringify(result.output, null, 2) : "—"}
+                    {phase === "streaming" && streamOutput
+                        ? streamOutput
+                        : phase === "completed" && result
+                          ? JSON.stringify(result.output, null, 2)
+                          : "—"}
                 </pre>
             </div>
 
             <div className="flex shrink-0 flex-col gap-1.5">
                 <button
-                    onClick={running ? onCancel : onSubmit}
+                    onClick={active ? onCancel : onSubmit}
                     className={cn(
                         "focus-ring flex h-7 items-center justify-center gap-1.5 rounded-sm px-2.5 text-xs font-medium",
-                        running
+                        active
                             ? "bg-fail/15 text-fail hover:bg-fail/25"
                             : "bg-primary text-primary-foreground hover:opacity-90",
                     )}
                 >
-                    {running ? <Square className="size-3" /> : <Play className="size-3" />}
-                    {running ? "Abort" : "Run"}
+                    {active ? <Square className="size-3" /> : <Play className="size-3" />}
+                    {active ? "Abort" : "Run"}
                 </button>
                 <button
                     onClick={onClose}

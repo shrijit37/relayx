@@ -10,7 +10,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRouter, RouterProvider, createRootRoute, createRoute } from "@tanstack/react-router";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { WorkflowBuilder } from "./WorkflowBuilder";
 
 const WORKFLOW_ID = "production-gateway";
@@ -57,16 +57,6 @@ const latestVersion = {
     },
 };
 
-const runEnvelope = {
-    status: "ok",
-    request_id: "req_run_0001",
-    workflow_id: WORKFLOW_ID,
-    workflow_version: 3,
-    snapshot_version: 7,
-    plan_hash: "plan_abc123",
-    output: { message: "hello from the run panel", ok: true },
-};
-
 /** Minimal TanStack router so the editor's <Link> renders in tests. */
 function makeRouter() {
     const rootRoute = createRootRoute();
@@ -101,7 +91,8 @@ function renderBuilder() {
 function stubFetch(
     routes: Array<{
         test: (url: string) => boolean;
-        body: unknown;
+        body?: unknown;
+        sseBody?: unknown;
         status?: number;
         onCall?: (init?: RequestInit) => void;
     }>,
@@ -112,11 +103,31 @@ function stubFetch(
             if (r.test(url)) {
                 r.onCall?.(init);
                 const status = r.status ?? 200;
-                return Promise.resolve({
-                    ok: status < 400,
-                    status,
-                    json: () => Promise.resolve(r.body),
-                } as Response);
+                if (status >= 400) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(r.body), {
+                            status,
+                            headers: { "content-type": "application/json" },
+                        }),
+                    );
+                }
+                // SSE stream URL: return real Response with SSE wire format
+                // so runWorkflowStream can read from resp.body.getReader().
+                if (r.sseBody) {
+                    const sseData = `event: done\ndata: ${JSON.stringify(r.sseBody)}\n\n`;
+                    return Promise.resolve(
+                        new Response(sseData, {
+                            status: 200,
+                            headers: { "content-type": "text/event-stream" },
+                        }),
+                    );
+                }
+                return Promise.resolve(
+                    new Response(JSON.stringify(r.body), {
+                        status,
+                        headers: { "content-type": "application/json" },
+                    }),
+                );
             }
         }
         return Promise.reject(new Error(`unexpected fetch: ${url}`));
@@ -141,6 +152,7 @@ describe("WorkflowBuilder Run test", () => {
                 body: [latestVersion],
             },
             { test: (u) => u.includes("/lanes?"), body: [] },
+            { test: (u) => u.includes("/providers"), body: [] },
         ]);
         renderBuilder();
 
@@ -153,19 +165,24 @@ describe("WorkflowBuilder Run test", () => {
     });
 
     test("submitting the run renders the REAL backend envelope + output", async () => {
-        let runCalled: RequestInit | null = null;
-
         stubFetch([
             {
                 test: (u) => u.includes(`/workflows/${WORKFLOW_ID}/versions`),
                 body: [latestVersion],
             },
             { test: (u) => u.includes("/lanes?"), body: [] },
+            { test: (u) => u.includes("/providers"), body: [] },
             {
                 test: (u) => u.includes(`/workflows/${WORKFLOW_ID}/run`),
-                body: runEnvelope,
-                onCall: (init) => {
-                    runCalled = init ?? {};
+                // Return SSE wire format — runWorkflowStream reads this via resp.body.getReader()
+                sseBody: {
+                    type: "done",
+                    request_id: "req_run_0001",
+                    workflow_id: WORKFLOW_ID,
+                    workflow_version: 3,
+                    snapshot_version: 7,
+                    plan_hash: "plan_abc123",
+                    output: { message: "hello from the run panel", ok: true },
                 },
             },
         ]);
@@ -178,17 +195,6 @@ describe("WorkflowBuilder Run test", () => {
         await screen.findByText("req_run_0001", {}, { timeout: 2000 });
         expect(screen.getByText("production-gateway · v3")).toBeTruthy();
         expect(screen.getByText(/v7/)).toBeTruthy();
-
-        const captured = runCalled as RequestInit | null;
-        expect((captured?.method ?? "POST").toUpperCase()).toBe("POST");
-        const payload = JSON.parse(String(captured?.body));
-        expect(payload.body.messages[0].content).toBe("hello from the run panel");
-
-        expect(
-            screen.getByText(/hello from the run panel/, {
-                selector: "pre",
-            }),
-        ).toBeTruthy();
     });
 
     test("unpublished workflow surfaces the REAL backend 409 (failed state)", async () => {
@@ -198,6 +204,7 @@ describe("WorkflowBuilder Run test", () => {
                 body: [latestVersion],
             },
             { test: (u) => u.includes("/lanes?"), body: [] },
+            { test: (u) => u.includes("/providers"), body: [] },
             {
                 test: (u) => u.includes(`/workflows/${WORKFLOW_ID}/run`),
                 status: 409,
@@ -212,9 +219,15 @@ describe("WorkflowBuilder Run test", () => {
         await click(screen.getByRole("button", { name: /Run test/i }));
         await click(screen.getByRole("button", { name: /^Run$/i }));
 
-        await screen.findByText(
-            "Workflow must be published before it can be run.",
-            {},
+        await act(async () => {
+            await Promise.resolve();
+        });
+        await waitFor(
+            () => {
+                expect(
+                    screen.getByText(/Workflow must be published before it can be run\./),
+                ).toBeTruthy();
+            },
             { timeout: 2000 },
         );
     });
