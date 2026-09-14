@@ -70,6 +70,26 @@ export function validateConfig(type: EditorKind, config: CanonicalConfig, issues
       issues.push(issueFor(config, { field: "provider", severity: "warn", message: `Provider '${llm.provider}' is not in the known set (anthropic, openai) — backend will verify.` }));
     }
   }
+  if (config.kind === "input" && config.variables) {
+    const validVarTypes = new Set(["string", "number", "boolean", "object", "array"]);
+    const varNameRe = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+    const seenNames = new Set<string>();
+    for (let i = 0; i < config.variables.length; i++) {
+      const v = config.variables[i];
+      if (!v) continue;
+      if (!v.name) {
+        issues.push(issueFor(config, { field: "variables", severity: "error", message: `Variable ${i + 1}: name is required.` }));
+      } else if (!varNameRe.test(v.name)) {
+        issues.push(issueFor(config, { field: "variables", severity: "error", message: `Variable '${v.name}': name must be alphanumeric with underscores.` }));
+      } else if (seenNames.has(v.name)) {
+        issues.push(issueFor(config, { field: "variables", severity: "error", message: `Variable '${v.name}': duplicate name.` }));
+      }
+      seenNames.add(v.name);
+      if (!validVarTypes.has(v.type)) {
+        issues.push(issueFor(config, { field: "variables", severity: "error", message: `Variable '${v.name}': invalid type '${v.type}'.` }));
+      }
+    }
+  }
 }
 
 function configNodeId(_config: CanonicalConfig): string | undefined {
@@ -83,6 +103,10 @@ function issueFor(config: CanonicalConfig, init: Omit<Issue, "nodeId">): Issue {
 
 function fieldValue(config: CanonicalConfig, name: string): unknown {
   switch (config.kind) {
+    case "input":
+      if (name === "inputType") return config.inputType;
+      if (name === "description") return config.description;
+      return undefined;
     case "llm": return config.config[name as keyof LlmRequestConfig];
     case "router": return config.strategy === name ? config.strategy : undefined;
     case "transform": return config.operation === name ? config.operation : undefined;

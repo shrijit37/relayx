@@ -16,7 +16,7 @@ import { getNodeDefinition, portsForType } from "./node-definitions";
 import { validateStructural, type Issue } from "./validation";
 import type {
   CanonicalConfig, CanonicalEdge, CanonicalNode, CanonicalWorkflow,
-  ConditionOperator, EditorKind, LlmRequestConfig,
+  ConditionOperator, EditorKind, InputVariable, LlmRequestConfig,
 } from "./nodes";
 import { WORKFLOW_SCHEMA_VERSION } from "./nodes";
 
@@ -38,7 +38,7 @@ export type LlmSchemaConfig = {
 }
 
 export type SchemaNodeConfig =
-  | { kind: "input"; value?: unknown }
+  | { kind: "input"; value?: unknown; input_type?: string; description?: string; variables?: InputVariable[] }
   | { kind: "output"; value?: unknown }
   | LlmSchemaConfig
   | { kind: "router"; strategy?: "first_match" | "round_robin" | "load_based" }
@@ -166,7 +166,14 @@ function llmToSchema(c: LlmRequestConfig): LlmSchemaConfig {
 function configFor(n: CanonicalNode, issues: Issue[]): SchemaNodeConfig | null {
   const c = n.config;
   switch (c.kind) {
-    case "input": return { kind: "input", value: c.value };
+    case "input": {
+      const config: Extract<SchemaNodeConfig, { kind: "input" }> = { kind: "input" };
+      if (c.value !== undefined) config.value = c.value;
+      if (c.inputType && c.inputType !== "message") config.input_type = c.inputType;
+      if (c.description) config.description = c.description;
+      if (c.variables && c.variables.length > 0) config.variables = c.variables;
+      return config;
+    }
     case "output": return { kind: "output", value: c.value };
     case "llm": {
       const cfg = llmToSchema(c.config);
@@ -278,7 +285,13 @@ function llmFromSchema(c: LlmSchemaConfig): LlmRequestConfig {
 function configFromSchema(sn: SchemaNode, issues: Issue[]): CanonicalConfig | null {
   const c = sn.config;
   switch (c.kind) {
-    case "input": return { kind: "input", value: c.value };
+    case "input": return {
+      kind: "input",
+      inputType: c.input_type ?? "message",
+      description: c.description ?? "",
+      variables: c.variables ?? [],
+      value: c.value,
+    };
     case "output": return { kind: "output", value: c.value };
     case "llm": return { kind: "llm", config: llmFromSchema(c) };
     case "router": return { kind: "router", strategy: c.strategy ?? "round_robin" };
