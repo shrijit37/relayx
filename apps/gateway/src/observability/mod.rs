@@ -644,10 +644,8 @@ pub fn admin_router_with_publication(
                     }
                     Err(e) => {
                         let err = serde_json::json!({"error": e.to_string()});
-                        let wire = protocol_core::sse::format_sse_event(
-                            &err.to_string(),
-                            Some("error"),
-                        );
+                        let wire =
+                            protocol_core::sse::format_sse_event(&err.to_string(), Some("error"));
                         let _ = tx.send(bytes::Bytes::from(wire)).await;
                     }
                 }

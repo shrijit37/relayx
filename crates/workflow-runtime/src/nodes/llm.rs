@@ -78,8 +78,14 @@ pub async fn execute(
         return Err(handle_error_response(response).await);
     }
 
-    let canonical_response =
-        decode_response_body(response, &ctx.cancel_token, target_protocol, config.stream, ctx.token_sender.clone()).await?;
+    let canonical_response = decode_response_body(
+        response,
+        &ctx.cancel_token,
+        target_protocol,
+        config.stream,
+        ctx.token_sender.clone(),
+    )
+    .await?;
 
     tracing::debug!(
         node_id = %ctx.node_id,
