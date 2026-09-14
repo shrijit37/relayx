@@ -386,7 +386,7 @@ function Canvas({ workflowId }: { workflowId: string }) {
       />
 
       <div className="flex min-h-0 flex-1">
-        {libraryOpen && <NodeLibrary className="hidden w-[196px] shrink-0 border-r border-border lg:flex" />}
+        {libraryOpen && <NodeLibrary className="w-[196px] shrink-0 border-r border-border" />}
 
         <div
           className="relay-canvas relative min-w-0 flex-1 bg-canvas"
@@ -478,7 +478,7 @@ function Canvas({ workflowId }: { workflowId: string }) {
 
         {inspectorOpen && (
           <Inspector
-            className="hidden w-[268px] shrink-0 border-l border-border xl:flex"
+            className="w-[268px] shrink-0 border-l border-border"
             node={inspectorCanonical(inspectorNode)}
             onConfigChange={(id, config) => onConfigChange(id, config)}
             onTitleChange={onTitleChange}
