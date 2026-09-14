@@ -31,17 +31,40 @@ list_all_rust_files() {
   } | sort -u
 }
 
+# ── Claude Code hook mode ────────────────────────────────────
+# When invoked by Claude Code, stdin contains JSON with tool_input.
+# Extract the file path and check just that one file.
+INPUT=""
+if [[ ! -t 0 ]]; then
+  INPUT=$(cat)
+fi
+
+if [[ -n "$INPUT" ]] && echo "$INPUT" | jq -e '.tool_input' &>/dev/null 2>&1; then
+  FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // empty' 2>/dev/null || true)
+  [[ -n "$FILE_PATH" ]] || exit 0
+  case "$FILE_PATH" in *.rs) ;; *) exit 0 ;; esac
+  [[ -f "$FILE_PATH" ]] || exit 0
+  files="$FILE_PATH"
+elif [[ -n "$INPUT" ]]; then
+  # Not a hook invocation — fall through to CLI logic below
+  :
+fi
+
+# ── CLI mode (pre-commit, CI, manual) ────────────────────────
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
 fi
 
-if [[ "${1:-}" == "--all" ]]; then
-  files="$(list_all_rust_files)"
-elif [[ $# -gt 0 ]]; then
-  files="$(printf '%s\n' "$@")"
-else
-  files="$(list_changed_rust_files)"
+# Only resolve files if not already set by hook mode above
+if [[ -z "${files:-}" ]]; then
+  if [[ "${1:-}" == "--all" ]]; then
+    files="$(list_all_rust_files)"
+  elif [[ $# -gt 0 ]]; then
+    files="$(printf '%s\n' "$@")"
+  else
+    files="$(list_changed_rust_files)"
+  fi
 fi
 
 rust_files=()
@@ -54,8 +77,7 @@ if [[ ${#rust_files[@]} -eq 0 ]]; then
   exit 0
 fi
 
-# Mirrors the test-file exemption in ~/.claude/scripts/rust-unwrap-blocker.sh
-# (which uses grep -qE '(test|tests|_test\.rs|test_)') so both layers agree.
+# Exempt test files from .unwrap() / .expect() checks.
 is_test_file() {
   grep -qE '(test|tests|_test\.rs|test_)' <<< "$1" && return 0
   return 1

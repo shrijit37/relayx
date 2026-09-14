@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # ts-guard.sh — PostToolUse hook for TS/TSX edits
-# Runs prettier + eslint after every Edit/Write to a .ts/.tsx file.
-# Advisory like rust-guard.sh — logs findings, always exits 0.
+# Advisory: runs prettier --check + eslint after every Edit/Write to a .ts/.tsx file.
+# Logs findings, always exits 0.
 set -euo pipefail
 
 # Read tool input from stdin (JSON)
 INPUT=$(cat)
 
-# Extract file path
+# Extract file path — handle both hook JSON (tool_input nested) and raw JSON
 FILE_PATH=""
 if command -v jq &>/dev/null; then
-    FILE_PATH=$(echo "$INPUT" | jq -r '.file_path // .filePath // empty' 2>/dev/null || true)
+    FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // .file_path // .filePath // empty' 2>/dev/null || true)
 fi
 [ -n "$FILE_PATH" ] || exit 0
 
@@ -33,11 +33,19 @@ done
 
 cd "$PROJECT_ROOT"
 
-# prettier (silent, best-effort)
-npx prettier --write "$FILE_PATH" 2>/dev/null || true
+# Determine package runner
+RUNNER="npx"
+command -v bunx &>/dev/null && RUNNER="bunx"
+
+# prettier (advisory check — don't auto-reformat)
+PRETTIER_OUTPUT=$($RUNNER prettier --check "$FILE_PATH" 2>&1 || true)
+if [ -n "$PRETTIER_OUTPUT" ]; then
+    echo "[ts-guard] prettier findings in $PROJECT_ROOT:"
+    echo "$PRETTIER_OUTPUT" | head -10
+fi
 
 # eslint (advisory — log but don't fail the hook)
-LINT_OUTPUT=$(npx eslint "$FILE_PATH" 2>&1 || true)
+LINT_OUTPUT=$($RUNNER eslint "$FILE_PATH" 2>&1 || true)
 if [ -n "$LINT_OUTPUT" ]; then
     echo "[ts-guard] eslint findings in $PROJECT_ROOT:"
     echo "$LINT_OUTPUT" | head -30
