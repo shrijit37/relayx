@@ -14,7 +14,7 @@ const idle: RunState = { phase: "idle" };
 
 describe("runReducer", () => {
   test("idle → start → running", () => {
-    expect(runReducer(idle, { type: "start" })).toEqual({ phase: "running", streamOutput: "" });
+    expect(runReducer(idle, { type: "start" })).toEqual({ phase: "running" });
   });
 
   test("running → completed carries the real result envelope", () => {
@@ -38,7 +38,7 @@ describe("runReducer", () => {
       result: ok,
     });
     expect(runReducer({ phase: "running" }, { type: "cancel" })).toEqual({ phase: "cancelled" });
-    expect(runReducer({ phase: "streaming", streamOutput: "hi" }, { type: "cancel" })).toEqual({
+    expect(runReducer({ phase: "streaming" }, { type: "cancel" })).toEqual({
       phase: "cancelled",
     });
   });

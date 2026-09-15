@@ -112,23 +112,6 @@ export async function allocateSnapshotVersion(
   return { ...wire, snapshot_version };
 }
 
-/**
- * Build the coherent wire bundle: lanes resolved, snapshot version allocated.
- * For paths that validate BEFORE publishing, prefer `buildCoherentWireNoVersion`
- * + `allocateSnapshotVersion` to avoid burning versions on failed validates.
- * This function is the legacy entrypoint used by rehydrate (no validation step)
- * and by callers that validate-and-publish in one step.
- */
-export async function buildCoherentWire(
-  flows: BundleWorkflow[],
-  getLane: (id: string) => Promise<LaneRowWithCred | null>,
-  nextSnapshotVersion: () => Promise<number>,
-): Promise<WireSnapshot | { error: string }> {
-  const wire = await buildCoherentWireNoVersion(flows, getLane);
-  if ("error" in wire) return wire;
-  return allocateSnapshotVersion(wire, nextSnapshotVersion);
-}
-
 export type PublishResult = {
   status: "published" | "error";
   snapshot_version?: number;
@@ -155,21 +138,7 @@ export function createPublishService(deps: {
   nextSnapshotVersion: () => Promise<number>;
   gateway: { validate(p: unknown): Promise<GatewayResult>; publish(p: unknown): Promise<GatewayResult> };
 }) {
-  /** Build the coherent wire bundle for an EXPLICIT workflow set. Shared by
-   *  `buildWire` (normal publish, with the target first) and rehydrate
-   *  (all active workflows). Lanes resolve credentials identically; the
-   *  bundle's snapshot version is global, not per-workflow (review #1/#9). */
-  async function buildWireForFlows(
-    flows: BundleWorkflow[],
-    getLane: (id: string) => Promise<LaneRowWithCred | null>,
-    nextSnapshotVersion: () => Promise<number>,
-  ): Promise<WireSnapshot | { error: string }> {
-    const wire = await buildCoherentWireNoVersion(flows, getLane);
-    if ("error" in wire) return wire;
-    return allocateSnapshotVersion(wire, nextSnapshotVersion);
-  }
-  /**
-   * Build the coherent wire bundle WITHOUT allocating a snapshot version.
+  /** Build the coherent wire bundle WITHOUT allocating a snapshot version.
    * The version is a placeholder (0) that must be patched via
    * `allocateSnapshotVersion` before sending to the gateway for publish.
    * Validation does not need a real version — the plan hash is deterministic
@@ -193,12 +162,6 @@ export function createPublishService(deps: {
   return {
     /** Build the coherent wire bundle (validate/compile proxy uses this). */
     buildWire,
-
-    /** Build a coherent wire bundle over an EXPLICIT workflow set (rehydrate
-     *  uses this: all active workflows, no "target"). Shared with buildWire so
-     *  credentials, lane union, and the global snapshot version are resolved
-     *  identically on every path (review #1, #2, #9, #10). */
-    buildWireForFlows,
 
     /**
      * Full publish pipeline for one workflow version.

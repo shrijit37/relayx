@@ -536,13 +536,13 @@ pub fn admin_router_with_publication(
         req_uri: axum::http::Uri,
         axum::Json(req): axum::Json<RunRequest>,
     ) -> Result<axum::response::Response, crate::errors::GatewayError> {
-        // Parse ?stream=true from the query string.
+        // Parse ?stream=true from the query string (URL-decode safe).
         let params = RunParams {
             stream: req_uri
                 .query()
                 .map(|q| {
-                    q.split('&')
-                        .any(|kv| kv == "stream=true" || kv == "stream=1")
+                    url::form_urlencoded::parse(q.as_bytes())
+                        .any(|(k, v)| k == "stream" && (v == "true" || v == "1"))
                 })
                 .unwrap_or(false),
         };

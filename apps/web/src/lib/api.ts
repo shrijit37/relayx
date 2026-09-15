@@ -242,23 +242,27 @@ export async function* runWorkflowStream(
           boundary = buffer.indexOf("\n\n");
           continue;
         }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(event.data);
+        } catch {
+          yield { type: "error", error: `malformed ${event.eventType} event` };
+          return;
+        }
         if (event.eventType === "token") {
-          const parsed = JSON.parse(event.data) as { delta: string };
-          yield { type: "token", delta: parsed.delta };
+          yield { type: "token", delta: (parsed as { delta: string }).delta };
         } else if (event.eventType === "done") {
-          const parsed = JSON.parse(event.data);
           yield {
             type: "done",
-            request_id: parsed.request_id,
-            workflow_id: parsed.workflow_id,
-            workflow_version: parsed.workflow_version ?? 0,
-            snapshot_version: parsed.snapshot_version,
-            plan_hash: parsed.plan_hash,
-            output: parsed.output,
+            request_id: parsed["request_id"] as string,
+            workflow_id: parsed["workflow_id"] as string,
+            workflow_version: (parsed["workflow_version"] as number) ?? 0,
+            snapshot_version: parsed["snapshot_version"] as number,
+            plan_hash: parsed["plan_hash"] as string,
+            output: parsed["output"],
           };
         } else if (event.eventType === "error") {
-          const parsed = JSON.parse(event.data) as { error: string };
-          yield { type: "error", error: parsed.error };
+          yield { type: "error", error: (parsed as { error: string }).error };
         }
         boundary = buffer.indexOf("\n\n");
       }

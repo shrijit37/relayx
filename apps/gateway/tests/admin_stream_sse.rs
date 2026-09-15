@@ -200,3 +200,50 @@ async fn streamed_done_carries_real_workflow_version() {
         Some("echo-wf")
     );
 }
+
+/// Dropping the client mid-SSE stream must not leak the upstream task —
+/// the gateway's CancellationToken propagation (tx.closed() → cancel) should
+/// fire. This test verifies the gateway stays healthy after a mid-stream abort.
+#[tokio::test]
+async fn sse_client_disconnect_cancels_upstream() -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let admin = spawn_gateway().await;
+    let body = r#"{"workflow_id":"echo-wf","body":{"hi":1}}"#;
+    let req = format!(
+        "POST /run?stream=true HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        body.len(),
+        body,
+    );
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", admin)).await?;
+    stream.write_all(req.as_bytes()).await?;
+    stream.flush().await?;
+
+    // Read some bytes to confirm the stream started, then drop.
+    let mut buf = [0u8; 256];
+    let n = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf)).await??;
+    assert!(n > 0, "should receive at least part of the SSE response");
+
+    drop(stream);
+
+    // Give the gateway time to observe the disconnect and cancel the run.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The gateway must still be healthy — the cancelled run must not poison it.
+    let health_url = format!("http://127.0.0.1:{admin}/healthz");
+    let (status, _) = test_harness::get_hyper(&health_url).await?;
+    assert_eq!(
+        status,
+        http::StatusCode::OK,
+        "gateway healthz must remain OK after client abort"
+    );
+
+    Ok(())
+}

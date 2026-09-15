@@ -20,8 +20,6 @@ export type RunPhase =
 
 export type RunState = {
   phase: RunPhase;
-  /** Accumulated token text during streaming. */
-  streamOutput?: string;
   /** Real backend-truth envelope only (not user/fabricated). */
   result?: {
     requestId: string;
@@ -46,12 +44,9 @@ export type RunAction =
 export function runReducer(state: RunState, action: RunAction): RunState {
   switch (action.type) {
     case "start":
-      return { phase: "running", streamOutput: "" };
+      return { phase: "running" };
     case "streaming":
-      return {
-        phase: "streaming",
-        streamOutput: (state.streamOutput ?? "") + action.delta,
-      };
+      return { phase: "streaming" };
     case "completed":
       return { phase: "completed", result: action.result };
     case "failed":

@@ -448,11 +448,13 @@ function Canvas({ workflowId }: { workflowId: string }) {
 
     const { data: providers = [] } = useProviders();
     const providerOptions = providers.map((p) => ({ value: p.name, label: p.name }));
+    const canonicalNode = useMemo(
+        () => inspectorCanonical(inspectorNode),
+        [inspectorNode],
+    );
     const modelOptions = useMemo(() => {
-        if (!inspectorNode) return [];
-        const canonical = inspectorCanonical(inspectorNode);
-        if (!canonical) return [];
-        const cfg = canonical.config;
+        if (!canonicalNode) return [];
+        const cfg = canonicalNode.config;
         if (cfg.kind !== "llm" || !cfg.config.provider) return [];
         const match = providers.find((p) => p.name === cfg.config.provider);
         if (!match) return [];
@@ -460,7 +462,7 @@ function Canvas({ workflowId }: { workflowId: string }) {
         if (cfg.config.model && cfg.config.model !== match.model) opts.push({ value: cfg.config.model, label: cfg.config.model });
         opts.push({ value: match.model, label: match.model });
         return opts;
-    }, [providers, inspectorNode]);
+    }, [providers, canonicalNode]);
 
     const navigate = useNavigate();
 
@@ -682,17 +684,13 @@ function Canvas({ workflowId }: { workflowId: string }) {
         runDispatch({ type: "cancel" });
     }, [runDispatch]);
 
-    const addNodeAtCenter = useCallback(
-        (kind: string) => {
-            const center = screenToFlowPosition({
-                x: window.innerWidth / 2,
-                y: window.innerHeight / 2,
-            });
+    const createNode = useCallback(
+        (kind: string, position: { x: number; y: number }): RelayNode => {
             nodeSeq += 1;
-            const newNode: RelayNode = {
+            return {
                 id: `${kind}-${nodeSeq}`,
                 type: "relay",
-                position: center,
+                position,
                 data: {
                     kind: kind as RelayNode["data"]["kind"],
                     title: kind,
@@ -701,11 +699,22 @@ function Canvas({ workflowId }: { workflowId: string }) {
                     status: "idle",
                 },
             };
+        },
+        [],
+    );
+
+    const addNodeAtCenter = useCallback(
+        (kind: string) => {
+            const center = screenToFlowPosition({
+                x: window.innerWidth / 2,
+                y: window.innerHeight / 2,
+            });
+            const node = createNode(kind, center);
             undo.record();
-            setNodes((ns) => [...ns, newNode]);
+            setNodes((ns) => [...ns, node]);
             markDirty();
         },
-        [screenToFlowPosition, setNodes, undo],
+        [createNode, screenToFlowPosition, setNodes, undo],
     );
 
     // Context menu state.
@@ -713,15 +722,15 @@ function Canvas({ workflowId }: { workflowId: string }) {
     useEffect(() => {
         if (!contextMenu) return;
         const close = () => setContextMenu(null);
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") close();
+        };
         window.addEventListener("click", close, { once: true });
-        window.addEventListener(
-            "keydown",
-            (e) => {
-                if (e.key === "Escape") close();
-            },
-            { once: true },
-        );
-        return () => window.removeEventListener("click", close);
+        window.addEventListener("keydown", onKey, { once: true });
+        return () => {
+            window.removeEventListener("click", close);
+            window.removeEventListener("keydown", onKey);
+        };
     }, [contextMenu]);
 
     // Keyboard shortcuts.
@@ -737,9 +746,10 @@ function Canvas({ workflowId }: { workflowId: string }) {
                     (e.target as HTMLElement).tagName === "TEXTAREA"
                 )
                     return;
-                if (nodes.some((n) => n.selected)) {
+                if (nodes.some((n) => n.selected) || edges.some((e) => e.selected)) {
                     undo.record();
                     setNodes((ns) => ns.filter((n) => !n.selected));
+                    setEdges((es) => es.filter((e) => !e.selected));
                     markDirty();
                 }
             }
@@ -757,7 +767,7 @@ function Canvas({ workflowId }: { workflowId: string }) {
         };
         el.addEventListener("keydown", handler);
         return () => el.removeEventListener("keydown", handler);
-    }, [undo, setNodes, onSave, nodes]);
+    }, [undo, setNodes, setEdges, onSave, nodes, edges]);
 
     return (
         <div className="flex min-h-0 flex-1 flex-col">
@@ -802,21 +812,9 @@ function Canvas({ workflowId }: { workflowId: string }) {
                             x: event.clientX,
                             y: event.clientY,
                         });
-                        nodeSeq += 1;
-                        const newNode: RelayNode = {
-                            id: `${kind}-${nodeSeq}`,
-                            type: "relay",
-                            position,
-                            data: {
-                                kind: kind as RelayNode["data"]["kind"],
-                                title: kind,
-                                lines: [],
-                                metaLeft: "draft",
-                                status: "idle",
-                            },
-                        };
+                        const node = createNode(kind, position);
                         undo.record();
-                        setNodes((ns) => [...ns, newNode]);
+                        setNodes((ns) => [...ns, node]);
                         markDirty();
                     }}
                     onDragOver={(e) => {
@@ -980,8 +978,8 @@ function Canvas({ workflowId }: { workflowId: string }) {
                 {inspectorOpen && (
                     <Inspector
                         className="w-[268px] shrink-0 border-l border-border"
-                        node={inspectorCanonical(inspectorNode)}
-                        onConfigChange={(id, config) => onConfigChange(id, config)}
+                        node={canonicalNode}
+                        onConfigChange={onConfigChange}
                         onTitleChange={onTitleChange}
                         planHash={planHash}
                         onClose={() => setInspectorOpen(false)}

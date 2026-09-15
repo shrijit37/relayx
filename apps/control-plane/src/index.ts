@@ -113,7 +113,7 @@ let gatewayUpAtBoot = boot.ok;
 let gatewayHealthy = boot.ok;
 let rehydrating = false;
 
-setInterval(async () => {
+const watchdogHandle = setInterval(async () => {
   // No re-entrancy: a rehydrate that outlasts the poll interval must not
   // overlap a second one (two concurrent publishes interleave snapshot
   // versions and the gateway can hot-swap onto a stale bundle).
@@ -151,6 +151,7 @@ setInterval(async () => {
 // Control plane is durable + independent of the data plane: leaving this
 // running keeps serving CRUD; gateway publish cadence is driven by calls.
 process.on("SIGINT", async () => {
+  clearInterval(watchdogHandle);
   await app.close();
   await pool.end();
   process.exit(0);

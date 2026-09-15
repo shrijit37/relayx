@@ -594,9 +594,7 @@ impl StreamFold {
                     b'\t' => wire.extend_from_slice(b"\\t"),
                     b if b < 0x20 => {
                         // Control characters: \u00XX (4 hex digits, no ambiguity).
-                        wire.extend_from_slice(
-                            format!("\\u{:04x}", b).as_bytes(),
-                        );
+                        wire.extend_from_slice(format!("\\u{:04x}", b).as_bytes());
                     }
                     b => wire.push(b),
                 }
@@ -827,8 +825,8 @@ fn decode_response(
 ) -> Result<protocol_core::canonical::CanonicalResponse, NodeError> {
     match target {
         Protocol::OpenAiChatCompletions => {
-            let resp: openai_chat::ChatCompletionResponse =
-                serde_json::from_value(payload).map_err(|e| {
+            let resp: openai_chat::ChatCompletionResponse = serde_json::from_value(payload)
+                .map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid OpenAI Chat response: {e}"),
                     })
