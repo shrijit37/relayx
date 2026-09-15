@@ -109,7 +109,7 @@ Rust wire-compat tests (`crates/workflow-schema/tests/wire_compat.rs`) prove the
 
 ## 10. Known limitations
 
-- `Run test` panel and Undo/Redo toolbar buttons are non-functional stubs (Phase 6.5 scope — flagged in review, intentionally deferred, not regressed here).
+- Undo/Redo toolbar buttons are non-functional stubs (deferred, not regressed here).
 - Publish/compile still requires the live control-plane+gates wiring (Phase 6.5) — local validation is surface-level; the backend remains authoritative.
 - The view node's `canonicalConfig` is the inspector's source of truth; newly drag-added nodes start from the typed default until configured.
 

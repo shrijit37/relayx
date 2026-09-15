@@ -107,6 +107,10 @@
 
 **Success criteria — all met (see [PHASE6.5_IMPLEMENTATION_REPORT.md](../PHASE6.5_IMPLEMENTATION_REPORT.md)):**
 - Every frontend page that shows domain data fetches it from the backend (no `relay-data.ts` in production code paths) ✅
+
+## Phase 6.6 — Canonical Workflow Model + Editor Hardening (COMPLETE)
+
+**What was built:** Typed workflow model with canonical serialization from the React Flow canvas. The editor now emits a schema-contractually correct `workflow_json` through the `workflow-serializer.ts` module (kind/port mapping, lane folding, condition validation, reject-on-invalid editor state). Wire-compat tests (`crates/workflow-schema/tests/wire_compat.rs`) prove the web serializer's JSON parses through the Rust `workflow_schema` crate — no schema-contract drift is possible. See [PHASE6.6_REPORT.md](../PHASE6.6_REPORT.md).
 - The Run button calls the real gateway execution path and surfaces actual results/errors ✅
 - The workflow editor loads a saved workflow version and reconstructs the React Flow canvas ✅
 - Empty/invalid workflows are rejected with a clear error (backed by the real `/validate` endpoint) ✅

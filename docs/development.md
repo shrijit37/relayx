@@ -5,15 +5,16 @@
 ```text
 .
 ├── apps/
-│   ├── gateway/                # Rust data plane (Phase 1 complete)
-│   ├── control-plane/          # TypeScript/Fastify control plane + PostgreSQL (Phase 6 complete)
+│   ├── gateway/                # Rust data plane (Phases 1–6.5 complete)
+│   ├── control-plane/          # TypeScript/Fastify control plane + PostgreSQL + models.dev sync (Phases 6/7 complete)
 │   └── web/                    # React/React Flow visual editor (TanStack Start, backend-authoritative)
 ├── crates/
 │   ├── mock-upstream/          # Configurable mock LLM for tests/benchmarks
 │   ├── test-harness/           # In-process gateway+mock spawn helpers
-│   ├── protocol-core/          # Canonical protocol model + 3 adapters (Phase 2 complete)
+│   ├── protocol-core/          # Canonical protocol model + 3 adapters + catalog (Phases 2/7 complete)
+│   │   └── data/catalog.json   # Vendored models.dev catalog (400 models, compile-time embedded)
 │   ├── workflow-schema/        # Workflow types + graph validation (Phase 4 complete)
-│   └── workflow-runtime/       # Node execution engine + compiler + snapshots (Phase 4/5 complete)
+│   └── workflow-runtime/       # Node execution engine + compiler + snapshots (Phases 4/5/6.5 complete)
 ├── docs/
 │   ├── architecture.md         # System topology and domain model
 │   ├── state.md                # Current implementation state

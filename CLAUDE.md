@@ -93,7 +93,7 @@ If an exception is genuinely required, stop and ask for explicit user authorizat
 
 This policy applies to all Rust source files, including `src/`, `tests/`, `benches/`, examples, binaries, workspace crates, and build scripts — except `.unwrap()` and `.expect(...)` which are allowed in test files.
 
-Enforcement is layered: these instructions, `.claude/hooks/check-rust-policy.sh` (PostToolUse + pre-commit), and CI (`--all` plus `cargo clippy -- -D warnings`).
+Enforcement is layered: these instructions, `.claude/hooks/check-rust-policy.sh` (PostToolUse), and CI (`--all` plus `cargo clippy -- -D warnings`). There is no pre-commit hook — wire one up if a commit-time gate is wanted.
 
 ## Build, Test, and Development Commands
 

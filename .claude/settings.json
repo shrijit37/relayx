@@ -26,35 +26,30 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/check-rust-policy.sh"
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/check-rust-policy.sh"
           },
           {
             "type": "command",
-            "command": ".claude/hooks/ts-guard.sh"
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/ts-guard.sh"
           },
           {
             "type": "command",
-            "command": ".claude/hooks/shell-guard.sh"
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/shell-guard.sh"
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit.*(Cargo\\.lock|pnpm-lock\\.yaml|pnpm-lock\\.yml|bun\\.lockb|yarn\\.lock)",
+        "matcher": "Edit|Write",
         "hooks": [
           {
             "type": "command",
-            "command": "echo '⚠️  Blocked: lock files must not be manually edited. They are managed by the package manager.' && exit 1"
-          }
-        ]
-      },
-      {
-        "matcher": "Edit.*\\.env",
-        "hooks": [
+            "command": "f=$(jq -r '.tool_input.file_path // empty' 2>/dev/null); case \"${f##*/}\" in Cargo.lock|pnpm-lock.yaml|pnpm-lock.yml|bun.lockb|yarn.lock) echo '⚠️  Blocked: lock files are managed by the package manager — do not hand-edit.' >&2; exit 2;; esac"
+          },
           {
             "type": "command",
-            "command": "echo '🔒 Blocked: .env files must be edited manually, not by Claude.' && exit 1"
+            "command": "f=$(jq -r '.tool_input.file_path // empty' 2>/dev/null); b=${f##*/}; case \"$b\" in .env.example|.env.sample|.env.template) exit 0;; .env|.env.*) echo '🔒 Blocked: .env holds secrets and must be edited manually, not by Claude.' >&2; exit 2;; esac"
           }
         ]
       }
