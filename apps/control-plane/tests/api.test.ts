@@ -252,6 +252,26 @@ describe("REST API streaming run", () => {
     const rec = runs.find((r) => r.workflow_id === wfId)!;
     expect(rec.status).toBe("completed");
   });
+
+  test("stream that 502s before hijack still records a failed run (no silent gap)", async () => {
+    await rebuildWithGateway({
+      mustValidate: true,
+      failStreamWith: "gateway rejected stream",
+    });
+    const wfId = await seedPublishedWf();
+
+    const res = await fetch(`${base()}/workflows/${wfId}/run?stream=true`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: {} }),
+    });
+    expect(res.status).toBe(502);
+
+    const runs = (await (await fetch(`${base()}/runs`)).json()) as Array<{ workflow_id: string; status: string; error: string | null }>;
+    const rec = runs.find((r) => r.workflow_id === wfId)!;
+    expect(rec.status).toBe("failed");
+    expect(rec.error).toContain("gateway rejected stream");
+  });
 });
 
 describe("REST API", () => {

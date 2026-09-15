@@ -143,6 +143,55 @@ test("GET /catalog/models filters by provider", async () => {
   }
 });
 
+test("GET /catalog/models filters by provider display name (not just slug)", async () => {
+  // The web picker sends the provider row's display name ("Anthropic"), not
+  // the models.dev slug ("anthropic"). The route must accept both.
+  await seedCatalog(db!.pool);
+  const resp = await fetch(`${base()}/catalog/models?provider=Anthropic`);
+  expect(resp.ok).toBe(true);
+  const body = await resp.json();
+  expect(body.length).toBe(1);
+  expect(body[0].id).toBe("anthropic/claude-sonnet-4-6");
+});
+
+test("GET /catalog/models returns ALL models (no silent LIMIT truncation)", async () => {
+  // Regression guard for the LIMIT 500 bug: seed more than 500 models and
+  // assert every one comes back.
+  const pool = db!.pool;
+  await seedCatalog(pool);
+  await pool.query(
+    `INSERT INTO catalog_providers (id, display_name, updated_at)
+     VALUES ('bulk', 'Bulk Provider', now()) ON CONFLICT (id) DO NOTHING`,
+  );
+  const values: string[] = [];
+  const inserts: string[] = [];
+  for (let i = 0; i < 600; i++) {
+    const id = `bulk/model-${i}`;
+    inserts.push(
+      `($${values.length + 1}, 'bulk', 'Bulk Model ${i}', 'bulk', 'bulk',
+        '{"input":["text"],"output":["text"]}',
+        '{"tool_call":false,"reasoning":false,"structured_output":false,"attachment":false,"temperature":true}',
+        NULL, NULL, NULL, NULL, false, now())`,
+    );
+    values.push(id);
+  }
+  await pool.query(
+    `INSERT INTO catalog_models
+       (id, provider_id, name, description, family, modalities,
+        capabilities, cost, limits, knowledge_cutoff, release_date,
+        open_weights, updated_at)
+     VALUES ${inserts.join(",")}
+     ON CONFLICT (id) DO NOTHING`,
+    values,
+  );
+
+  const resp = await fetch(`${base()}/catalog/models`);
+  expect(resp.ok).toBe(true);
+  const body = (await resp.json()) as Array<{ id: string }>;
+  // 3 seeded + 600 bulk = 603; a LIMIT 500 would have returned 500.
+  expect(body.length).toBe(603);
+});
+
 test("GET /catalog/models filters by capability", async () => {
   await seedCatalog(db!.pool);
   // claude-sonnet-4-6 has reasoning=true, gpt-4o does not

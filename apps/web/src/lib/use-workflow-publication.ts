@@ -225,6 +225,9 @@ export function useDeleteWorkflowMutation() {
     mutationFn: deleteWorkflow,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: publicationKeys.workflows });
+      // Runs for the deleted workflow cascade in the DB; drop the stale
+      // cached rows too, or they keep rendering and 404 on click.
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
     },
   });
 }
@@ -244,6 +247,10 @@ export function useRun(runId: string) {
   return useQuery<RunRow>({
     queryKey: ["runs", "detail", runId],
     queryFn: () => fetchRun(runId),
+    // Keep polling while the run is still live so the detail page actually
+    // leaves `running` — the list polls, the detail page must too.
+    refetchInterval: (query) =>
+      query.state.data?.status === "running" ? 10_000 : false,
   });
 }
 

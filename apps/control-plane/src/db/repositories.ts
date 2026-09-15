@@ -379,13 +379,15 @@ export const runs = {
   async list(pool: Pool, workflowId?: string): Promise<RunRow[]> {
     if (workflowId) {
       const { rows } = await pool.query<RunRow>(
-        "SELECT * FROM runs WHERE workflow_id = $1 ORDER BY started_at DESC LIMIT 100",
+        `SELECT * FROM runs WHERE workflow_id = $1
+         ORDER BY (status = 'running') DESC, started_at DESC LIMIT 200`,
         [workflowId],
       );
       return rows;
     }
     const { rows } = await pool.query<RunRow>(
-      "SELECT * FROM runs ORDER BY started_at DESC LIMIT 100",
+      `SELECT * FROM runs
+       ORDER BY (status = 'running') DESC, started_at DESC LIMIT 200`,
     );
     return rows;
   },

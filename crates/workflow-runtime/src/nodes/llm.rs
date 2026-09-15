@@ -301,6 +301,10 @@ fn build_canonical_request(
     model: String,
     input: &RuntimeValue,
 ) -> Result<CanonicalRequest, NodeError> {
+    // `model` is the bare provider-native id ("gpt-4o"), stored by the web
+    // picker by stripping the "provider/" catalog prefix. Adapters pass it
+    // through verbatim to the provider wire; a prefixed catalog key here
+    // would be sent upstream and 400/404.
     // Extract messages from the input.
     let messages = extract_messages(input);
 

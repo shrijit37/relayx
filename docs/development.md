@@ -12,8 +12,7 @@
 ├── crates/
 │   ├── mock-upstream/          # Configurable mock LLM for tests/benchmarks
 │   ├── test-harness/           # In-process gateway+mock spawn helpers
-│   ├── protocol-core/          # Canonical protocol model + 3 adapters + catalog (Phases 2/7 complete)
-│   │   └── data/catalog.json   # Vendored models.dev catalog (400 models, compile-time embedded)
+│   ├── protocol-core/          # Canonical protocol model + 3 adapters (Phases 2/7 complete)
 │   ├── workflow-schema/        # Workflow types + graph validation (Phase 4 complete)
 │   └── workflow-runtime/       # Node execution engine + compiler + snapshots (Phases 4/5/6.5 complete)
 ├── docs/

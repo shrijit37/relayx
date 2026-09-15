@@ -1,7 +1,8 @@
 -- relay-x model catalog tables (Phase 7)
 --
 -- Populated by the control-plane sync from models.dev; consumed by the
--- data-plane as an ArcSwap in-memory snapshot + the vendored JSON fallback.
+-- catalog API. The data plane does not embed a catalog snapshot — model ids
+-- are stored bare by the web picker and passed through to the provider wire.
 
 -- ── Sync metadata ────────────────────────────────────────────────────
 -- Key-value store for sync state (ETag, last sync timestamp, etc.).

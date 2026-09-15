@@ -474,18 +474,29 @@ function Canvas({ workflowId }: { workflowId: string }) {
         if (cfg.kind !== "llm" || !cfg.config.provider) return [];
         const match = providers.find((p) => p.name === cfg.config.provider);
         const opts: { value: string; label: string }[] = [];
-        if (cfg.config.model && !catalogModels.some((m) => m.id === cfg.config.model)) {
+        // Catalog ids are "provider/model" keys (models.dev shape). The
+        // picker stores the bare provider-native id ("gpt-4o") — the wire
+        // model — not the prefixed catalog key, which the upstream APIs
+        // reject. The label keeps the rich "Name · Provider · ctx" text.
+        const bareModel = (catalogId: string) =>
+            catalogId.split("/").slice(1).join("/");
+        if (
+            cfg.config.model &&
+            !catalogModels.some((m) => bareModel(m.id) === cfg.config.model)
+        ) {
             opts.push({ value: cfg.config.model, label: cfg.config.model });
         }
         // Prefer catalog models for the selected provider, then the provider
-        // row's stored default model as a last resort.
+        // row's stored default model as a genuine fallback (only when the
+        // catalog has no rows for this provider — e.g. sync hasn't run yet).
         for (const m of catalogModels) {
             opts.push({
-                value: m.id,
+                value: bareModel(m.id),
                 label: `${m.name} · ${m.provider_name}${m.limits ? ` · ${m.limits.context.toLocaleString()} ctx` : ""}`,
             });
         }
-        if (opts.length === 0 && match?.model) opts.push({ value: match.model, label: match.model });
+        if (catalogModels.length === 0 && match?.model)
+            opts.push({ value: match.model, label: match.model });
         return opts;
     }, [catalogModels, providers, canonicalNode]);
 

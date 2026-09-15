@@ -56,8 +56,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
     if (!wf) return reply.code(404).send({ error: "workflow not found" });
     // Never delete an ACTIVE (Production) workflow — the gateway is serving
     // its published snapshot. Deleting would leave a live-but-orphaned plan
-    // (review: delete guard). Deactivate/roll back first.
-    if (wf.status === "active") {
+    // (review: delete guard). The authoritative active-pointer row is
+    // workflow_active (workflows.status is a denormalized auxiliary flag that
+    // publish doesn't reliably set). Deactivate/roll back first.
+    if (await repo.workflows.getActiveVersion(pool, id)) {
       return reply.code(409).send({
         error: "Cannot delete an active workflow. Roll back to deactivate it first.",
       });
@@ -220,7 +222,31 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
       try {
         gatewayResp = await gateway.runStream({ workflow_id: id, body });
       } catch (e) {
+        // A stream that fails BEFORE hijack never reaches the pump, so the
+        // durable run record must be created + finalized here — otherwise
+        // this failure leaves NO trace, contradicting the non-stream path's
+        // "a failed run still appears in run history" contract.
         const message = e instanceof Error ? e.message : String(e);
+        const failedRow = await repo.runs
+          .create(pool, {
+            workflow_id: id,
+            workflow_version: active.workflow_version,
+            snapshot_version: active.snapshot_version,
+            plan_hash: active.plan_hash,
+            input_body: body,
+          })
+          .catch(() => null);
+        if (failedRow) {
+          await repo.runs
+            .update(pool, failedRow.id, {
+              status: "failed",
+              error: message,
+              completed_at: new Date().toISOString(),
+            })
+            .catch((err) =>
+              console.error("[runs] failed to finalize stream-failure record:", err),
+            );
+        }
         return reply.code(502).send({ error: message });
       }
       const upstream = gatewayResp.body;
@@ -310,7 +336,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
           // event, and let the finally block classify via `reply.raw.destroyed`.
           const isAbort =
             err instanceof Error &&
-            (err.name === "AbortError" || /aborted|abort/i.test(err.message ?? ""));
+            (err.name === "AbortError" || /^abort(ed)?\b/i.test(err.message ?? ""));
           if (!isAbort) sawError = true;
           if (!reply.raw.destroyed && !isAbort) {
             try {
@@ -378,7 +404,27 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
       })
       .catch(() => null);
 
-    const result = await gateway.run({ workflow_id: id, body });
+    let result: Awaited<ReturnType<GatewayClient["run"]>>;
+    try {
+      result = await gateway.run({ workflow_id: id, body });
+    } catch (e) {
+      // An unexpected throw (transport, timeout, malformed response) must
+      // not leave a forever-'running' row. Finalize as failed — mirrors the
+      // typed `!result.ok` path below.
+      const message = e instanceof Error ? e.message : String(e);
+      if (runRow) {
+        await repo.runs
+          .update(pool, runRow.id, {
+            status: "failed",
+            error: message,
+            completed_at: new Date().toISOString(),
+          })
+          .catch((err) =>
+            console.error("[runs] failed to finalize run record after throw:", err),
+          );
+      }
+      return reply.code(502).send({ error: message });
+    }
 
     // Finalize the run record with the honest outcome — failed for gateway
     // errors, completed for success. Failures are logged, never swallowed, so

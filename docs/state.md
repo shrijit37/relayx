@@ -15,7 +15,7 @@ Machine-checked counts — the single source of truth for numbers quoted anywher
 | rust_tests_workflow_runtime | 64 |
 | rust_tests_mock_upstream | 4 |
 | web_tests | 38 |
-| control_plane_tests | 40 |
+| control_plane_tests | 48 |
 | page_routes | 15 |
 <!-- END CANONICAL FACTS -->
 ## Status
@@ -26,15 +26,14 @@ Machine-checked counts — the single source of truth for numbers quoted anywher
 
 ### Phase 7 — models.dev catalog integration (COMPLETE)
 
-Read-only model intelligence from [models.dev](https://models.dev), owned by the control plane, consumed as an in-memory snapshot by the data plane and web.
+Read-only model intelligence from [models.dev](https://models.dev), owned by the control plane and served to the web via the catalog API. The data plane does not consume a catalog snapshot — model ids are stored bare by the web picker and passed through to the provider wire.
 
-- **Vendored catalog** — `crates/protocol-core/data/catalog.json` (400 models, 37 providers) embedded at compile time via `include_str!`. Rust types in `crates/protocol-core/src/catalog.rs` (`ModelDef`, `Modalities`, `Limit`, `Cost`, `ProviderDef`, `CatalogData`) with `OnceLock` singleton (`get_catalog()`).
 - **Control-plane sync** — `apps/control-plane/src/models-dev/sync.ts` fetches `https://models.dev/api.json` with ETag/If-None-Match, exponential backoff retry (3 attempts), 24h TTL, fail-open to existing DB rows. Sync state is closure-owned (no module-level singletons); ETag + last-sync timestamp live in a dedicated `catalog_meta` key-value table (no sentinel rows in domain tables). Postgres migration `003_catalog.sql` adds `catalog_providers`, `catalog_models`, and `catalog_meta` tables.
 - **Catalog API** — `GET /catalog/status`, `GET /catalog/models?provider=&capability=&search=`, `GET /catalog/providers`, `GET /catalog/logos/:id.svg` (in-memory cached SVG proxy). Wired into the Fastify app via `registerCatalogRoutes`.
-- **Web model picker** — `useCatalogModels` React Query hook fetches from `/catalog/models`. The Inspector's model field now shows live catalog models (name, provider, context window) instead of only the provider's stored default.
-- **Gateway** — reads the vendored catalog at startup via `get_catalog()`. No per-request network fetch, no DB round-trip. ArcSwap hot-reload infrastructure deferred to when the control-plane push path is implemented.
+- **Web model picker** — `useCatalogModels` React Query hook fetches from `/catalog/models`. The Inspector's model field shows live catalog models (name, provider, context window) and stores the bare provider-native model id (the `provider/` prefix is stripped) so the wire request is valid.
+- **Run-history reaper** — `apps/control-plane/src/domain/reaper.ts` marks crash-stuck `running` rows older than 5 minutes as `failed`, so the frontend never polls a zombie row forever.
 
-**Test count (Phase 7): 5 Rust catalog tests, 40 control-plane integration tests, 38 web tests. Full workspace: Rust clippy clean, fmt clean, tsc clean (web + control plane), production build clean.**
+**Test count (Phase 7): 5 Rust catalog tests, 48 control-plane integration tests, 38 web tests. Full workspace: Rust clippy clean, fmt clean, tsc clean (web + control plane), production build clean.**
 
 ### Phase 6 — Control plane & durable configuration (COMPLETE)
 
@@ -47,7 +46,7 @@ See [`PHASE6_REPORT.md`](archive/PHASE6_REPORT.md) for the full completion repor
 - **Frontend wired to real backend** — versions page + workflows index fetch from the control plane; publish returns backend-authoritative version/plan-hash. **Phase 6.5 closes the mock gap:** the editor loads persisted versions into the canvas, Save/Validate are wired end-to-end, and a real Run contract (control-plane → gateway → provider) executes the published ACTIVE version with the real envelope shown in the UI. Management pages show real persisted rows or honest unavailable states; `relay-data.ts` is deleted.
 - **Gateway restart preservation** — the control plane rehydrates the last ACTIVE version of every workflow on boot.
 
-**Test count (Phase 6): Rust 294 passing, zero failures.** Baseline 267 → +27 (control-plane e2e, gateway `/run`, SQL injection defense-in-depth). **Control plane: 40 integration tests** (api 17, publish 4, sql-injection 4, catalog 15) against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 38 tests (workflow-serializer + run-state + WorkflowBuilder interaction tests), production build clean.**
+**Test count (Phase 6): Rust 294 passing, zero failures.** Baseline 267 → +27 (control-plane e2e, gateway `/run`, SQL injection defense-in-depth). **Control plane: 48 integration tests** (api 18, publish 4, sql-injection 4, catalog 17, reaper 5) against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 38 tests (workflow-serializer + run-state + WorkflowBuilder interaction tests), production build clean.**
 
 ### Phase 5 — Runtime publication & frontend wiring (COMPLETE)
 
@@ -176,7 +175,7 @@ Audited findings, current status:
 ## Test counts
 
 - **Rust: 294 tests** (workspace, zero failures).
-- **Control plane: 40 tests** (api 17, publish 4, sql-injection 4, catalog 15) against a real Postgres 16 + in-process mock gateway.
+- **Control plane: 48 tests** (api 18, publish 4, sql-injection 4, catalog 17, reaper 5) against a real Postgres 16 + in-process mock gateway.
 - **Frontend: 38 tests** (workflow-serializer + run-state reducer + 3 WorkflowBuilder interaction tests) run via `bun test` with happy-dom + @testing-library/react. Interaction tests guard against dead-UI regressions (stubbed `RunPanel`, unwired toolbar buttons).
 - **Gateway admin auth: 5 tests** in `apps/gateway/tests/admin_auth.rs` proving anonymous rejection, wrong-key rejection, valid-key acceptance, `/healthz` stays open, and no-key backward compat.
 

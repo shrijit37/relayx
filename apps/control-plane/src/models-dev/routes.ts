@@ -60,8 +60,13 @@ export function registerCatalogRoutes(
     let i = 1;
 
     if (provider) {
-      sql += ` AND m.provider_id = $${i++}`;
+      // Accept both the models.dev slug ("openai") and the display name
+      // ("OpenAI"): the control-plane provider rows use arbitrary display
+      // names, and the web picker sends the provider row's `name`. Matching
+      // either keeps the catalog visible regardless of which side is used.
+      sql += ` AND (m.provider_id = $${i} OR p.display_name = $${i})`;
       params.push(provider);
+      i++;
     }
     if (capability) {
       // `capability` is used as a JSONB key name (e.g. `tool_call`), not a
@@ -81,7 +86,10 @@ export function registerCatalogRoutes(
     }
 
     sql += " ORDER BY p.display_name, m.name";
-    sql += " LIMIT 500";
+    // models.dev ships 600+ models; a LIMIT 500 would silently truncate the
+    // catalog. 2000 covers the current catalog with headroom — the route is
+    // read-only, so a generous bound just caps a single response.
+    sql += " LIMIT 2000";
 
     const result = await pool.query(sql, params);
     return result.rows;

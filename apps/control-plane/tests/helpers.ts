@@ -65,6 +65,10 @@ export async function mockGateway(opts: {
    *  frame, or omit both to simulate a truncated stream. */
   streamChunks?: string[];
   streamChunkDelayMs?: number;
+  /** When set, the mock `/run?stream=true` endpoint throws a 502-style
+   *  response (gateway rejected the stream before any bytes), so the
+   *  control-plane stream path sees `gateway.runStream` throw. */
+  failStreamWith?: string;
 }) {
   const app = Fastify();
 
@@ -104,6 +108,11 @@ export async function mockGateway(opts: {
     // `event: error` frames from the forwarded bytes.
     const query = (req.query ?? {}) as { stream?: string };
     if (query.stream === "true") {
+      if (opts.failStreamWith) {
+        return reply
+          .code(502)
+          .send({ error: opts.failStreamWith });
+      }
       const chunks = opts.streamChunks ?? [
         "data: {\"delta\":\"hi\"}\n\n",
         "event: done\ndata: {}\n\n",
