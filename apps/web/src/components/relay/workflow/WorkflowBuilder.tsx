@@ -566,7 +566,15 @@ function Canvas({ workflowId }: { workflowId: string }) {
     // backend error), aborted → cancelled. `running` is DERIVED from the
     // reducer — there is no second boolean that can drift (Phase 6.5 §3.1/§6).
     const [run, setRun] = useState<RunState>({ phase: "idle" });
-    const running = run.phase === "running";
+    // A streaming run (tokens arriving) is still an active run: the toolbar
+    // must keep showing Stop, or a user can start a second concurrent run
+    // that orphans the first stream (unabortable).
+    const running = run.phase === "running" || run.phase === "streaming";
+    // Live token output is written imperatively into a leaf <pre> (one span
+    // per token, O(1)/token) instead of re-dispatching every token through
+    // the top-level reducer — that re-rendered the whole editor tree at
+    // token cadence and re-copied the full transcript per token (O(n²)).
+    const streamOutRef = useRef<HTMLPreElement | null>(null);
     const [runBody, setRunBody] = useState(
         JSON.stringify(
             { messages: [{ role: "user", content: "hello from the run panel" }] },
@@ -603,13 +611,38 @@ function Canvas({ workflowId }: { workflowId: string }) {
         runDispatch({ type: "start" });
         setRunPanelOpen(true);
 
+        // Imperative stream sink: clear any previous run's spans now (the panel
+        // is already mounted on subsequent runs). On the very first run the ref
+        // is still null here — the lazy reset inside the token handler covers
+        // that case, and a token-less first run shows "—" anyway.
+        const sink = streamOutRef; // ref, not element — resolve per token
+        if (sink.current) {
+            sink.current.textContent = "";
+            delete sink.current.dataset["started"];
+        }
+
         try {
             const { runWorkflowStream } = await import("@/lib/api");
+            let streamingDispatched = false;
             for await (const event of runWorkflowStream(workflowId, body, controller.signal)) {
                 switch (event.type) {
-                    case "token":
-                        runDispatch({ type: "streaming", delta: event.delta });
+                    case "token": {
+                        const el = sink.current;
+                        if (el) {
+                            if (el.dataset["started"] !== "1") {
+                                el.textContent = "";
+                                el.dataset["started"] = "1";
+                            }
+                            const span = document.createElement("span");
+                            span.textContent = event.delta;
+                            el.appendChild(span);
+                        }
+                        if (!streamingDispatched) {
+                            streamingDispatched = true;
+                            runDispatch({ type: "streaming", delta: "" });
+                        }
                         break;
+                    }
                     case "done":
                         runDispatch({
                             type: "completed",
@@ -795,15 +828,12 @@ function Canvas({ workflowId }: { workflowId: string }) {
                         nodes={nodes}
                         edges={edges}
                         onNodesChange={(changes) => {
-                            // Record before drag starts (not on every pixel) and before removes.
-                            if (
-                                changes.some(
-                                    (c) =>
-                                        c.type === "remove" ||
-                                        (c.type === "position" && c.dragging),
-                                )
-                            )
-                                undo.record();
+                            // Record once per gesture via onNodeDragStart;
+                            // removes are recorded here (node drags may also
+                            // emit position changes on every frame, which
+                            // would flood undo with one entry per animation
+                            // frame and evict the pre-drag snapshot).
+                            if (changes.some((c) => c.type === "remove")) undo.record();
                             onNodesChange(changes);
                             if (
                                 changes.some(
@@ -833,6 +863,12 @@ function Canvas({ workflowId }: { workflowId: string }) {
                             undo.record();
                             onConnect(c);
                             markDirty();
+                        }}
+                        onNodeDragStart={() => {
+                            // Record the pre-drag snapshot once per gesture
+                            // (xyflow's onNodeDrag fires per move frame; that
+                            // floods undo and can evict the real snapshot).
+                            undo.record();
                         }}
                         onSelectionChange={onSelectionChange}
                         isValidConnection={isValidConnection}
@@ -962,7 +998,7 @@ function Canvas({ workflowId }: { workflowId: string }) {
                     phase={run.phase}
                     result={run.result}
                     error={run.error}
-                    streamOutput={run.streamOutput ?? ""}
+                    streamOutRef={streamOutRef}
                     onBodyChange={(v) => setRunBody(v)}
                     body={runBody}
                     onSubmit={submitRun}
@@ -1019,7 +1055,7 @@ function RunPanel({
     phase,
     result,
     error = undefined,
-    streamOutput = "",
+    streamOutRef,
     body,
     onBodyChange,
     onSubmit,
@@ -1029,7 +1065,8 @@ function RunPanel({
     phase: RunState["phase"];
     result: RunState["result"];
     error: string | undefined;
-    streamOutput: string;
+    /** Imperative sink for live token output (avoids re-render per token). */
+    streamOutRef: React.RefObject<HTMLPreElement | null>;
     body: string;
     onBodyChange: (v: string) => void;
     onSubmit: () => void;
@@ -1088,12 +1125,13 @@ function RunPanel({
 
             <div className="flex min-w-0 max-w-[50%] flex-1 flex-col gap-1.5">
                 <div className="label-xs">Output</div>
-                <pre className="num max-h-[120px] min-h-0 flex-1 overflow-auto rounded-sm border border-border bg-canvas px-2 py-1.5 font-mono text-[11px]">
-                    {phase === "streaming" && streamOutput
-                        ? streamOutput
-                        : phase === "completed" && result
-                          ? JSON.stringify(result.output, null, 2)
-                          : "—"}
+                <pre
+                    ref={streamOutRef}
+                    className="num max-h-[120px] min-h-0 flex-1 overflow-auto rounded-sm border border-border bg-canvas px-2 py-1.5 font-mono text-[11px]"
+                >
+                    {phase === "completed" && result
+                        ? JSON.stringify(result.output, null, 2)
+                        : "—"}
                 </pre>
             </div>
 

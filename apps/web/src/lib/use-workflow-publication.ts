@@ -17,11 +17,9 @@ import {
   fetchWorkflowVersions,
   fetchWorkflows,
   publishWorkflow,
-  runWorkflow,
   saveWorkflowVersion,
   validateWorkflow,
   type ProviderRow,
-  type RunResult,
   type VersionInfo,
   type VersionRow,
 } from "@/lib/api";
@@ -96,20 +94,6 @@ export function useSaveWorkflowMutation(workflowId: string) {
 export function useValidateMutation() {
   return useMutation<{ plan_hash: string | null; status: string }, Error, WorkflowJson>({
     mutationFn: (workflow) => validateWorkflow(workflow),
-  });
-}
-
-/** Run the workflow's ACTIVE (published) version through the real gateway.
- *  The mutation's status is the only execution-state source: pending →
- *  running, success → completed (real output), error → failed/cancelled (real
- *  backend envelope). No fabricated states. */
-export function useRunWorkflowMutation() {
-  return useMutation<
-    RunResult,
-    Error,
-    { workflowId: string; body: unknown; signal?: AbortSignal }
-  >({
-    mutationFn: ({ workflowId, body, signal }) => runWorkflow(workflowId, body, signal),
   });
 }
 

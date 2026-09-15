@@ -53,22 +53,31 @@ if [ -n "$PRETTIER_OUTPUT" ]; then
     echo "$PRETTIER_OUTPUT" | head -10
 fi
 
-# eslint — enforced for @typescript-eslint/no-explicit-any
+# eslint — enforced for @typescript-eslint/no-explicit-any (and parse errors)
 # Capture exit code properly: set -e + || true makes $? always 0.
 set +e
 ESLINT_OUTPUT=$($RUNNER eslint "$ABS_FILE_PATH" 2>&1)
 ESLINT_EXIT=$?
 set -euo pipefail
 
-if [ $ESLINT_EXIT -ne 0 ] && echo "$ESLINT_OUTPUT" | grep -q "no-explicit-any"; then
+# eslint exits 1 BOTH for rule violations and for a parse error. A parse error
+# stops eslint before it runs any rules, so an explicit `any` behind a syntax
+# error would never produce the "no-explicit-any" string — the guard would
+# silently pass. Blocking on parse errors too closes that hole (a file whose
+# syntax is broken must be fixed first; the `any` then surfaces).
+if [ $ESLINT_EXIT -ne 0 ] && { echo "$ESLINT_OUTPUT" | grep -q "no-explicit-any" || echo "$ESLINT_OUTPUT" | grep -qE "Parsing error|Parse error"; }; then
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║  ❌ BLOCKED: Explicit 'any' type detected.                ║"
-    echo "║  Fix the violation before continuing.                     ║"
-    echo "║  Use 'unknown' + narrowing/validation instead.            ║"
+    echo "║  ❌ BLOCKED: Explicit 'any' type (or parse error).        ║"
+    if echo "$ESLINT_OUTPUT" | grep -q "no-explicit-any"; then
+        echo "║  Fix the violation before continuing.                     ║"
+        echo "║  Use 'unknown' + narrowing/validation instead.            ║"
+    else
+        echo "║  Fix the syntax error before continuing.                   ║"
+    fi
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
-    echo "$ESLINT_OUTPUT" | grep "no-explicit-any"
+    echo "$ESLINT_OUTPUT" | grep -E "no-explicit-any|Parsing error|Parse error"
     echo ""
     exit 1
 fi

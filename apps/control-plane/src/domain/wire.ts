@@ -15,6 +15,8 @@ export type WireWorkflow = {
   id: string;
   workflow: Record<string, unknown>;
   lanes: Record<string, WireLane>;
+  /** The ACTIVE version this workflow was compiled from (run identity). */
+  version: number;
 };
 
 export type WireSnapshot = {

@@ -183,36 +183,6 @@ export async function validateWorkflow(
   });
 }
 
-/** The real run envelope returned by the control plane after the gateway
- *  executes the workflow's ACTIVE (published) version. Every field is
- *  backend-truth: request_id, the executed workflow_version/snapshot, the
- *  plan hash of the executed plan, and the actual execution output. */
-export type RunResult = {
-  status: "ok";
-  request_id: string;
-  workflow_id: string;
-  workflow_version: number;
-  snapshot_version: number;
-  plan_hash: string;
-  output: unknown;
-};
-
-/** Execute the published ACTIVE version of a workflow through the real
- *  control-plane → gateway run path. The control plane 409s when the
- *  workflow has no ACTIVE version (must be published first). */
-export async function runWorkflow(
-  workflowId: string,
-  body: unknown,
-  signal?: AbortSignal,
-): Promise<RunResult> {
-  const init: RequestInit = {
-    method: "POST",
-    body: JSON.stringify({ body }),
-  };
-  if (signal !== undefined) init.signal = signal;
-  return req<RunResult>(`/workflows/${workflowId}/run`, init);
-}
-
 /** SSE stream events from the gateway's token-level run. */
 export type StreamTokenEvent = { type: "token"; delta: string };
 export type StreamDoneEvent = {
@@ -247,7 +217,10 @@ export async function* runWorkflowStream(
     const data = (await resp.json().catch(() => null)) as { error?: string } | null;
     throw new Error(data?.error ?? `HTTP ${resp.status}`);
   }
-  const reader = resp.body!.getReader();
+  // Move `resp.body!` inside the generator so a 200-with-empty body (proxy
+  // stripping) throws the typed error instead of a raw TypeError at call time.
+  if (!resp.body) throw new Error("empty response body");
+  const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
 
@@ -257,13 +230,18 @@ export async function* runWorkflowStream(
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      // SSE events are terminated by a blank line.
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop()!; // trailing fragment may be incomplete
-
-      for (const part of parts) {
+      // SSE events are terminated by a blank line. Scan for the NEXT boundary
+      // and slice off only complete events — re-splitting the whole buffer from
+      // byte 0 each chunk is O(n²) at token cadence for a long transcript.
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const part = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
         const event = parseSseEvent(part);
-        if (!event) continue;
+        if (!event) {
+          boundary = buffer.indexOf("\n\n");
+          continue;
+        }
         if (event.eventType === "token") {
           const parsed = JSON.parse(event.data) as { delta: string };
           yield { type: "token", delta: parsed.delta };
@@ -282,6 +260,7 @@ export async function* runWorkflowStream(
           const parsed = JSON.parse(event.data) as { error: string };
           yield { type: "error", error: parsed.error };
         }
+        boundary = buffer.indexOf("\n\n");
       }
     }
   } finally {
@@ -349,7 +328,11 @@ export async function createProvider(input: {
  * instead of orphaning a UUID row per publish (review #3).
  */
 async function ensureWorkflow(workflow: WorkflowJson): Promise<WorkflowRow> {
-  const existing = (await req<WorkflowRow[]>(`/workflows`)).find((w) => w.id === workflow.id);
+  // Fetch the single row by id (404 → create) instead of paging the whole
+  // /workflows table on every publish/validate.
+  const existing = await req<WorkflowRow>(
+    `/workflows/${encodeURIComponent(workflow.id)}`,
+  ).catch(() => null);
   if (existing) return existing;
   const created = await req<WorkflowRow>(`/workflows`, {
     method: "POST",

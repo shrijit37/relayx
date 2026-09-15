@@ -58,6 +58,8 @@ pub struct ExecutionMetadata {
     pub snapshot_version: u64,
     /// Plan hash of the compiled workflow.
     pub plan_hash: String,
+    /// The workflow's own version (the ACTIVE version being executed).
+    pub workflow_version: u64,
 }
 
 impl ExecutionMetadata {
@@ -69,6 +71,7 @@ impl ExecutionMetadata {
                 .plan_hash_for(workflow_id)
                 .unwrap_or_default()
                 .to_owned(),
+            workflow_version: snapshot.workflow_version_for(workflow_id).unwrap_or(0),
         }
     }
 }

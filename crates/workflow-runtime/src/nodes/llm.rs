@@ -74,32 +74,54 @@ pub async fn execute(
     // Send the request with timeout and cancellation support.
     let response = send_request_with_timeout(&client, req, &ctx.cancel_token).await?;
 
-    if !response.status().is_success() {
-        return Err(handle_error_response(response).await);
+    if response.status().is_success() {
+        let canonical_response = decode_response_body(
+            response,
+            &ctx.cancel_token,
+            ctx.deadline,
+            target_protocol,
+            config.stream,
+            ctx.token_sender.clone(),
+        )
+        .await?;
+
+        tracing::debug!(
+            node_id = %ctx.node_id,
+            response_id = %canonical_response.id,
+            model = %canonical_response.model,
+            content_blocks = canonical_response.content.len(),
+            "LLM node received response"
+        );
+
+        // Serialize the canonical response as JSON.
+        let json = serde_json::to_value(&canonical_response)
+            .map_err(|e| NodeError::Internal(format!("failed to serialize response: {e}")))?;
+
+        Ok(NodeOutput::message(RuntimeValue::Json(json)))
+    } else {
+        // A streaming LLM node ending on an upstream error must still emit a
+        // terminal `error` SSE event, or the browser's stream terminates
+        // silently mid-run.
+        if config.stream && ctx.token_sender.is_some() {
+            let err_json = serde_json::json!({
+                "error": format!("provider returned {}", response.status()),
+            });
+            emit_terminal_wire(&err_json, ctx.token_sender.as_ref()).await;
+        }
+        Err(handle_error_response(response).await)
     }
+}
 
-    let canonical_response = decode_response_body(
-        response,
-        &ctx.cancel_token,
-        target_protocol,
-        config.stream,
-        ctx.token_sender.clone(),
-    )
-    .await?;
-
-    tracing::debug!(
-        node_id = %ctx.node_id,
-        response_id = %canonical_response.id,
-        model = %canonical_response.model,
-        content_blocks = canonical_response.content.len(),
-        "LLM node received response"
-    );
-
-    // Serialize the canonical response as JSON.
-    let json = serde_json::to_value(&canonical_response)
-        .map_err(|e| NodeError::Internal(format!("failed to serialize response: {e}")))?;
-
-    Ok(NodeOutput::message(RuntimeValue::Json(json)))
+/// Best-effort terminal SSE event on error paths; a dropped receiver means
+/// the run is already gone, so the send failure is ignored.
+async fn emit_terminal_wire(
+    payload: &serde_json::Value,
+    tx: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>,
+) {
+    if let Some(tx) = tx {
+        let wire = protocol_core::sse::format_sse_event(&payload.to_string(), Some("error"));
+        let _ = tx.send(bytes::Bytes::from(wire)).await;
+    }
 }
 
 /// Resolve the protocol from configuration.
@@ -233,6 +255,7 @@ async fn handle_error_response(response: hyper::Response<hyper::body::Incoming>)
 async fn decode_response_body(
     response: hyper::Response<hyper::body::Incoming>,
     cancel: &tokio_util::sync::CancellationToken,
+    deadline: Option<tokio::time::Instant>,
     target_protocol: Protocol,
     stream: bool,
     wire_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
@@ -241,17 +264,53 @@ async fn decode_response_body(
         return decode_streamed_response_incremental(
             axum::body::Body::new(response.into_body()),
             cancel,
+            deadline,
             target_protocol,
             wire_tx,
         )
         .await;
     }
-    // Non-streaming: buffer the full body, decode the JSON response.
+    // Non-streaming: buffer the full body, decompress gzip, decode the JSON.
     let body = http_body_util::BodyExt::collect(response.into_body())
         .await
         .map_err(|e| NodeError::Internal(format!("failed to read response body: {e}")))?
         .to_bytes();
-    decode_response(target_protocol, &body)
+
+    // Fail closed on non-JSON output (mirrors the buffered /run path): a
+    // silent null would mask corrupted upstream data.
+    let payload: Vec<u8> = if body.starts_with(b"\x1f\x8b") {
+        inflate(&body)?
+    } else {
+        body.to_vec()
+    };
+    let json: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
+        NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
+            message: format!("invalid provider JSON response: {e}"),
+        })
+    })?;
+
+    if !json.is_object() && !json.is_array() {
+        return Err(NodeError::Provider(
+            protocol_core::error::ProtocolEngineError::InvalidPayload {
+                message: "provider returned non-object JSON response".into(),
+            },
+        ));
+    }
+
+    match json {
+        // A 2xx with an `error` object is a streamable protocol-level error
+        // (OpenAI-style); surface it instead of treating it as success.
+        serde_json::Value::Object(ref o) if o.contains_key("error") && o.get("error").is_some() => {
+            return Err(NodeError::Provider(
+                protocol_core::error::ProtocolEngineError::ProviderError {
+                    message: format!("provider returned error at 2xx: {json}"),
+                },
+            ));
+        }
+        _ => {}
+    }
+
+    decode_response(target_protocol, &json)
 }
 
 /// Build a canonical request from configuration and input.
@@ -446,6 +505,7 @@ fn encode_request(target: Protocol, canonical: &CanonicalRequest) -> Result<Vec<
 async fn decode_streamed_response_incremental(
     body: axum::body::Body,
     cancel: &tokio_util::sync::CancellationToken,
+    deadline: Option<tokio::time::Instant>,
     protocol: Protocol,
     wire_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
 ) -> Result<protocol_core::canonical::CanonicalResponse, NodeError> {
@@ -457,8 +517,14 @@ async fn decode_streamed_response_incremental(
     let mut stream = std::pin::pin!(body.into_data_stream());
     loop {
         // Bound each frame wait so a dead-but-open stream can't hang forever.
+        // Also enforce the run's ABSOLUTE deadline each frame: an upstream
+        // that keeps a stream alive one frame at a time (each under the 30s
+        // frame window) must not run past the workflow's overall deadline.
         let frame = tokio::select! {
             _ = cancel.cancelled() => return Err(NodeError::Internal("cancelled".into())),
+            _ = timeout_deadline(deadline) => {
+                return Err(NodeError::Internal("workflow deadline exceeded".into()))
+            }
             frame = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 tokio_stream::StreamExt::next(&mut stream),
@@ -489,6 +555,15 @@ async fn decode_streamed_response_incremental(
     }
 
     fold.into_response()
+}
+
+/// A future that wakes when the run deadline is reached (or never, if none).
+async fn timeout_deadline(deadline: Option<tokio::time::Instant>) {
+    if let Some(d) = deadline {
+        tokio::time::sleep_until(d).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Accumulator for folding SSE events into a canonical response.
@@ -732,15 +807,27 @@ struct ToolAccum {
     args: String,
 }
 
-/// Decode a canonical response from the target protocol response body.
+/// Decompress a gzip payload (some providers deliver gzipped response bodies
+/// even without an explicit Content-Encoding, e.g. OpenAI Responses).
+fn inflate(compressed: &[u8]) -> Result<Vec<u8>, NodeError> {
+    let mut decoder = flate2::read::GzDecoder::new(compressed);
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut out)
+        .map_err(|e| NodeError::Internal(format!("failed to decompress gzip response: {e}")))?;
+    Ok(out)
+}
+
+/// Decode a canonical response from the target protocol response JSON.
 fn decode_response(
     target: Protocol,
-    body: &[u8],
+    payload: &serde_json::Value,
 ) -> Result<protocol_core::canonical::CanonicalResponse, NodeError> {
+    let body = serde_json::to_vec(payload)
+        .map_err(|e| NodeError::Internal(format!("failed to re-encode response: {e}")))?;
     match target {
         Protocol::OpenAiChatCompletions => {
             let resp: openai_chat::ChatCompletionResponse =
-                serde_json::from_slice(body).map_err(|e| {
+                serde_json::from_slice(&body).map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid OpenAI Chat response: {e}"),
                     })
@@ -749,7 +836,7 @@ fn decode_response(
         }
         Protocol::AnthropicMessages => {
             let resp: protocol_core::adapters::anthropic_messages::MessagesResponse =
-                serde_json::from_slice(body).map_err(|e| {
+                serde_json::from_slice(&body).map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid Anthropic Messages response: {e}"),
                     })
@@ -758,7 +845,7 @@ fn decode_response(
         }
         Protocol::OpenAiResponses => {
             let resp: protocol_core::adapters::openai_responses::ResponsesResponse =
-                serde_json::from_slice(body).map_err(|e| {
+                serde_json::from_slice(&body).map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid OpenAI Responses response: {e}"),
                     })

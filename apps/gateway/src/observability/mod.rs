@@ -289,6 +289,9 @@ pub struct WireWorkflow {
     pub workflow: workflow_schema::Workflow,
     /// Lane name → runtime lane config (base URL + optional auth header).
     pub lanes: std::collections::HashMap<String, WireLane>,
+    /// The ACTIVE version this workflow was compiled from (run identity).
+    #[serde(default)]
+    pub version: u64,
 }
 
 impl PublicationState {
@@ -332,7 +335,8 @@ impl PublicationState {
             .map_err(|e| format!("workflow '{}' failed to compile: {e}", wf.id))?;
             builder = builder
                 .with_lanes(lane_registry.clone())
-                .with_plan(wf.id.clone(), plan);
+                .with_plan(wf.id.clone(), plan)
+                .with_plan_version(wf.id.clone(), wf.version);
         }
 
         Ok(Arc::new(builder.build()))
@@ -596,6 +600,10 @@ pub fn admin_router_with_publication(
 
         if params.stream {
             let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
+            // When the browser aborts, this receiver's channel goes away; the
+            // stream then ends, and the run task cancels its token so the node
+            // runtime aborts the upstream request instead of streaming it to
+            // completion (token burn after cancel).
             let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
             let wf_id = req.workflow_id.clone();
@@ -606,18 +614,31 @@ pub fn admin_router_with_publication(
             let bb = body_bytes;
 
             tokio::spawn(async move {
-                let result = crate::execution::execute_workflow(
-                    &snap,
-                    &pl,
-                    bb,
-                    &wf_id,
-                    &rid,
-                    client,
-                    None,
-                    deadline,
-                    Some(tx.clone()),
-                )
-                .await;
+                let cancel = tokio_util::sync::CancellationToken::new();
+
+                // Not-yet-cancelled flag shared with the completion block:
+                // once the browser aborts (receiver dropped), `tx.closed()`
+                // fires and the token cancels the in-flight upstream request.
+                let cancel_run = cancel.clone();
+
+                let result = tokio::select! {
+                    r = crate::execution::execute_workflow(
+                        &snap,
+                        &pl,
+                        bb,
+                        &wf_id,
+                        &rid,
+                        client,
+                        None,
+                        deadline,
+                        Some(tx.clone()),
+                        cancel_run,
+                    ) => r,
+                    _ = tx.closed() => {
+                        cancel.cancel();
+                        return;
+                    }
+                };
 
                 match result {
                     Ok(response) => {
@@ -626,12 +647,29 @@ pub fn admin_router_with_publication(
                         match body_result {
                             Ok(collected) => {
                                 let bytes = collected.to_bytes();
-                                let output: serde_json::Value =
-                                    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+
+                                // Fail closed on non-JSON output: an unexpected
+                                // (non-JSON) body must not ship a successful done
+                                // with null output and mask corrupted data.
+                                let output: serde_json::Value = match serde_json::from_slice(&bytes)
+                                {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        let err = serde_json::json!({
+                                            "error": format!("workflow returned non-JSON output: {e}")
+                                        });
+                                        let wire = protocol_core::sse::format_sse_event(
+                                            &err.to_string(),
+                                            Some("error"),
+                                        );
+                                        let _ = tx.send(bytes::Bytes::from(wire)).await;
+                                        return;
+                                    }
+                                };
                                 let envelope = serde_json::json!({
                                     "request_id": rid,
                                     "workflow_id": wf_id2,
-                                    "workflow_version": 0,
+                                    "workflow_version": snap.workflow_version_for(&wf_id2).unwrap_or(0),
                                     "snapshot_version": snap.version(),
                                     "plan_hash": snap.plan_hash_for(&wf_id2).unwrap_or_default(),
                                     "output": output,
@@ -664,8 +702,7 @@ pub fn admin_router_with_publication(
                 // tx drops here → stream ends
             });
 
-            let sse_body =
-                axum::body::Body::from_stream(stream.map(Ok::<_, std::io::Error>));
+            let sse_body = axum::body::Body::from_stream(stream.map(Ok::<_, std::io::Error>));
             let resp = axum::response::Response::builder()
                 .status(200)
                 .header(http::header::CONTENT_TYPE, "text/event-stream")
@@ -687,6 +724,7 @@ pub fn admin_router_with_publication(
             None,
             deadline,
             None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await?;
 
@@ -711,6 +749,7 @@ pub fn admin_router_with_publication(
             "status": "ok",
             "request_id": request_id,
             "workflow_id": req.workflow_id,
+            "workflow_version": snapshot.workflow_version_for(&req.workflow_id).unwrap_or(0),
             "snapshot_version": snapshot.version(),
             "plan_hash": snapshot.plan_hash_for(&req.workflow_id).unwrap_or_default(),
             "output": output,

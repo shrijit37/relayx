@@ -224,14 +224,42 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
       const pump = async () => {
         try {
           while (true) {
+            if (reply.raw.destroyed) break;
             const { done, value } = await reader.read();
             if (done) break;
-            if (!reply.raw.destroyed) reply.raw.write(value);
+            // Respect backpressure: Node's `write()` returns `false` when the
+            // socket's high-water mark is hit (await `drain` before reading
+            // more), `true` when it flushed directly. A slow/stalled client
+            // must not let the run's full output accumulate in memory.
+            if (!reply.raw.write(value)) {
+              await new Promise((resolve) => reply.raw.once("drain", resolve));
+            }
+          }
+        } catch (err) {
+          // Mid-stream failure must still reach the browser as a terminal
+          // SSE `error` event — a silent stream end makes the frontend mark a
+          // completed run as failed.
+          if (!reply.raw.destroyed) {
+            try {
+              const wire = `event: error\ndata: ${JSON.stringify({
+                error: err instanceof Error ? err.message : String(err),
+              })}\n\n`;
+              reply.raw.write(wire);
+            } catch {
+              /* response already gone */
+            }
           }
         } finally {
           if (!reply.raw.destroyed) reply.raw.end();
         }
       };
+      // On pump failure OR browser abort the raw stream closes (destroy); make
+      // sure the upstream reader is cancelled so the gateway's run task sees
+      // `tx.closed()` and aborts the in-flight provider request instead of
+      // streaming it to completion (provider spend after cancel).
+      reply.raw.on("close", () => {
+        if (!reply.raw.writableEnded) reader.cancel().catch(() => {});
+      });
       pump().catch(() => reader.cancel());
       return reply;
     }

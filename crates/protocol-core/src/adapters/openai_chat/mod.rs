@@ -349,7 +349,10 @@ mod tests {
             4,
             "expected exactly 4 messages; got {}: {:?}",
             messages.len(),
-            messages.iter().map(|m| (&m.role, m.tool_call_id.as_deref())).collect::<Vec<_>>()
+            messages
+                .iter()
+                .map(|m| (&m.role, m.tool_call_id.as_deref()))
+                .collect::<Vec<_>>()
         );
 
         // assistant message carries tool_calls
@@ -374,7 +377,10 @@ mod tests {
             Some(s) => s,
             None => panic!("tool message content should be a string"),
         };
-        assert!(content_text.contains("72"), "tool content should carry result payload");
+        assert!(
+            content_text.contains("72"),
+            "tool content should carry result payload"
+        );
     }
 
     /// A tool-role message with no tool_call_id must never appear in the
@@ -386,14 +392,12 @@ mod tests {
             system: None,
             messages: vec![Message {
                 role: Role::Tool,
-                content: MessageContent::Blocks(vec![ContentBlock::ToolResult(
-                    ToolResultBlock {
-                        tool_use_id: "call_777".into(),
-                        name: None,
-                        content: ToolResultContent::Text("ok".into()),
-                        is_error: None,
-                    },
-                )]),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult(ToolResultBlock {
+                    tool_use_id: "call_777".into(),
+                    name: None,
+                    content: ToolResultContent::Text("ok".into()),
+                    is_error: None,
+                })]),
             }],
             tools: vec![],
             tool_choice: None,
@@ -413,7 +417,11 @@ mod tests {
         };
 
         // Exactly one tool message, with the correct tool_call_id.
-        assert_eq!(wire.messages.len(), 1, "tool-role message should appear exactly once");
+        assert_eq!(
+            wire.messages.len(),
+            1,
+            "tool-role message should appear exactly once"
+        );
         assert_eq!(wire.messages[0].role, "tool");
         assert_eq!(
             wire.messages[0].tool_call_id.as_deref(),

@@ -68,6 +68,7 @@ bun test          # Integration tests (real Postgres + in-process mock gateway)
 - Rust stable (1.88+) via `rustup`
 - Postgres 16 for the control plane (infra/docker/compose.dev.yml)
 - `scripts/dev.sh` brings up mock upstream + gateway + control plane + Postgres
+- `scripts/logs.sh` merges all service logs into a single color-coded stream
 - `cargo-watch` (for auto-rebuild; `cargo install cargo-watch`)
 
 ### Build
@@ -97,6 +98,12 @@ and execution:
    rebuild + restart automatically on any source change. The control plane runs
    `bun run dev` (bun's own `--watch`), and web hot-reloads via Vite, so the
    whole stack adapts to edits without restarting the script.
+   Watch all services together with `scripts/logs.sh` (or filter to specific
+   ones, e.g. `scripts/logs.sh gateway web`). Every service is followed live
+   with a service label, locale-formatted timestamp, and severity coloring
+   (errors red, warnings yellow); control-plane pino JSON is reduced to
+   readable `[level] message` lines. Missing log files are polled until they
+   appear, so the viewer can be started before `dev.sh`.
 2. Open the editor on `:5173`.
 3. **Create** a workflow in the editor (Save in `new` mode creates the durable
    workflow row, then navigates to `/workflows/<real-id>`).

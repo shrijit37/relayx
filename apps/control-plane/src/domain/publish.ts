@@ -88,7 +88,7 @@ export async function buildCoherentWire(
       if (!lane) return { error: `workflow '${flow.id}' references unknown lane '${id}'` };
       flowLanes[id] = await toWireLane(lane);
     }
-    workflows.push({ id: flow.id, workflow: flow.workflowJson, lanes: flowLanes });
+    workflows.push({ id: flow.id, workflow: flow.workflowJson, lanes: flowLanes, version: flow.version });
   }
 
   return { snapshot_version, workflows };
