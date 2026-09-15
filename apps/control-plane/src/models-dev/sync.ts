@@ -149,65 +149,80 @@ async function upsertCatalog(
   try {
     await client.query("BEGIN");
 
-    for (const p of providers) {
-      await client.query(
-        `INSERT INTO catalog_providers (id, display_name, updated_at)
-         VALUES ($1, $2, now())
-         ON CONFLICT (id) DO UPDATE SET display_name = $2, updated_at = now()`,
-        [p.id, p.display_name],
-      );
+    // Bulk upsert for providers: one round-trip instead of N. Includes
+    // provider rows derived from model ids that weren't in api.json.
+    const providerRows = new Map<string, string>();
+    for (const p of providers) providerRows.set(p.id, p.display_name);
+    for (const mid of Object.keys(models)) {
+      const pid = mid.includes("/") ? mid.split("/")[0] : "unknown";
+      if (!providerRows.has(pid)) providerRows.set(pid, pid);
     }
+    await client.query(
+      `INSERT INTO catalog_providers (id, display_name, updated_at)
+       SELECT r.id, r.display_name, now()
+       FROM jsonb_to_recordset($1::jsonb) AS r(id text, display_name text)
+       ON CONFLICT (id) DO UPDATE SET
+          display_name = EXCLUDED.display_name, updated_at = now()`,
+      [JSON.stringify([...providerRows].map(([id, display_name]) => ({ id, display_name })))],
+    );
 
-    // Collect all model IDs so we can delete stale ones after upsert.
-    const modelIds: string[] = [];
-
+    // Bulk upsert for models: one round-trip instead of ~600 sequential
+    // INSERTs (models.dev ships 600+ entries; the O(N) loop wasted a
+    // round-trip per row inside an already-open transaction).
+    const modelRows: unknown[] = [];
     for (const [mid, model] of Object.entries(models)) {
       const providerId = mid.includes("/") ? mid.split("/")[0] : "unknown";
-      // Ensure the provider row exists (handles models whose provider
-      // wasn't in api.json or has a different shape).
-      if (!providers.find((p) => p.id === providerId)) {
-        await client.query(
-          `INSERT INTO catalog_providers (id, display_name, updated_at)
-           VALUES ($1, $1, now())
-           ON CONFLICT (id) DO NOTHING`,
-          [providerId],
-        );
-      }
-      modelIds.push(mid);
-
-      await client.query(
-        `INSERT INTO catalog_models (id, provider_id, name, description, family,
+      modelRows.push({
+        id: mid,
+        provider_id: providerId,
+        name: model.name,
+        description: model.description,
+        family: model.family ?? null,
+        modalities: model.modalities,
+        capabilities: {
+          tool_call: model.tool_call,
+          reasoning: model.reasoning,
+          structured_output: model.structured_output ?? false,
+          attachment: model.attachment,
+          temperature: model.temperature,
+        },
+        cost: model.cost ?? null,
+        limits: model.limit ?? null,
+        knowledge_cutoff: model.knowledge ?? null,
+        release_date: model.release_date ?? null,
+        open_weights: model.open_weights,
+      });
+    }
+    await client.query(
+      `INSERT INTO catalog_models (id, provider_id, name, description, family,
             modalities, capabilities, cost, limits, knowledge_cutoff,
             release_date, open_weights, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
-         ON CONFLICT (id) DO UPDATE SET
-            provider_id=$2, name=$3, description=$4, family=$5,
-            modalities=$6, capabilities=$7, cost=$8, limits=$9,
-            knowledge_cutoff=$10, release_date=$11, open_weights=$12, updated_at=now()`,
-        [
-          mid,
-          providerId,
-          model.name,
-          model.description,
-          model.family ?? null,
-          JSON.stringify(model.modalities),
-          JSON.stringify({
-            tool_call: model.tool_call,
-            reasoning: model.reasoning,
-            structured_output: model.structured_output ?? false,
-            attachment: model.attachment,
-            temperature: model.temperature,
-          }),
-          model.cost ? JSON.stringify(model.cost) : null,
-          model.limit ? JSON.stringify(model.limit) : null,
-          model.knowledge ?? null,
-          model.release_date ?? null,
-          model.open_weights,
-        ],
-      );
-    }
+       SELECT r.id, r.provider_id, r.name, r.description, r.family,
+            r.modalities, r.capabilities, r.cost, r.limits,
+            r.knowledge_cutoff, r.release_date,
+            COALESCE(r.open_weights, false), now()
+       FROM jsonb_to_recordset($1::jsonb) AS r(
+            id text, provider_id text, name text, description text, family text,
+            modalities jsonb, capabilities jsonb, cost jsonb, limits jsonb,
+            knowledge_cutoff text, release_date text, open_weights boolean)
+       ON CONFLICT (id) DO UPDATE SET
+            provider_id = EXCLUDED.provider_id,
+            name = EXCLUDED.name,
+            description = EXCLUDED.description,
+            family = EXCLUDED.family,
+            modalities = EXCLUDED.modalities,
+            capabilities = EXCLUDED.capabilities,
+            cost = EXCLUDED.cost,
+            limits = EXCLUDED.limits,
+            knowledge_cutoff = EXCLUDED.knowledge_cutoff,
+            release_date = EXCLUDED.release_date,
+            open_weights = EXCLUDED.open_weights,
+            updated_at = now()`,
+      [JSON.stringify(modelRows)],
+    );
 
     // Remove models that no longer appear in the catalog.
+    const modelIds = Object.keys(models);
     if (modelIds.length > 0) {
       await client.query(
         `DELETE FROM catalog_models WHERE id != ALL($1)`,

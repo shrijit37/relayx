@@ -2,4 +2,12 @@
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
-exec "$root/.claude/hooks/check-rust-policy.sh"
+
+# Rust policy: forbidden patterns in changed .rs files.
+"$root/.claude/hooks/check-rust-policy.sh"
+
+# Documentation truth: only when docs, markdown, or the verifier are staged,
+# so unrelated commits stay fast.
+if git diff --cached --name-only | grep -qE '(^docs/|\.md$|^scripts/verify-docs\.sh$)'; then
+  "$root/scripts/verify-docs.sh"
+fi

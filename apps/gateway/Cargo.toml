@@ -2,7 +2,13 @@
 name = "relay-gateway"
 edition.workspace = true
 version.workspace = true
+rust-version.workspace = true
 description = "Ultra-low-latency LLM proxy data plane"
+# `benches/harness.rs` is a helper module (`mod harness;` in proxy_latency.rs),
+# not a benchmark in its own right. Without this, Cargo auto-discovers it as a
+# second bench target and compiles it twice on every `cargo bench` and
+# `cargo clippy --all-targets`.
+autobenches = false
 
 [dependencies]
 tokio.workspace = true
@@ -11,11 +17,8 @@ tokio-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 http.workspace = true
-http-body.workspace = true
 http-body-util.workspace = true
 axum.workspace = true
-tower.workspace = true
-tower-http.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,15 +40,13 @@ arc-swap = "1.9"
 
 [dev-dependencies]
 criterion.workspace = true
-proptest.workspace = true
+# `tower::ServiceExt` is used only by `#[cfg(test)] mod tests` in src/server/mod.rs.
+tower.workspace = true
 mock-upstream = { path = "../../crates/mock-upstream" }
 test-harness = { path = "../../crates/test-harness" }
 
 [lints]
 workspace = true
-
-[features]
-load-test = []
 
 [[bench]]
 name = "proxy_latency"

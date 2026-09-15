@@ -1,4 +1,5 @@
 # Phase 5: Runtime Publication & Real Workflow Wiring — Completion Report
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 ## Summary
 

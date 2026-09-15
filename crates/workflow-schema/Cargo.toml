@@ -2,6 +2,7 @@
 name = "workflow-schema"
 edition.workspace = true
 version.workspace = true
+rust-version.workspace = true
 description = "Workflow definition types for the relay-x node-based runtime"
 
 [dependencies]

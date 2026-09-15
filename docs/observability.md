@@ -1,4 +1,5 @@
 # OBSERVABILITY.md
+> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** Metrics, logging, and tracing contract.
 
 ## Principles
 

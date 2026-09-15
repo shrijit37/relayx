@@ -1,4 +1,5 @@
 # Phase 6: Control Plane & Durable Configuration — Completion Report
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 ## 1. Implementation summary
 

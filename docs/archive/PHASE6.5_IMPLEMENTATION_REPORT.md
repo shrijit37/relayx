@@ -1,7 +1,8 @@
 # PHASE 6.5 — Frontend/Backend Integration Hardening — Implementation Report
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 **Branch:** `feat/phase6.5-workflow-editor-integration`
-**Baseline evidence:** [`docs/phase-6.5-reality-audit.md`](docs/phase-6.5-reality-audit.md)
+**Baseline evidence:** [`phase-6.5-reality-audit.md`](phase-6.5-reality-audit.md)
 **Status:** COMPLETE — all audit CRITICALs resolved; primary success criterion proven live.
 
 ---

@@ -37,14 +37,15 @@ Client → Gateway (Rust) → Providers (Anthropic, OpenAI, …)
 
 **Backend: Phase 1 complete** — high-performance HTTP proxy with streaming, timeouts, connection pooling, and observability. **Phase 2 complete** — protocol translation engine (OpenAI Chat, Anthropic Messages, OpenAI Responses). **Phase 4–6 complete** — workflow schema/compiler/runtime, atomic runtime publication, control plane + PostgreSQL. **Phase 6.5 complete** — frontend/backend integration hardening: no fabricated data, backend-authoritative UI, real end-to-end Run. Workflow execution from compiled plans works end-to-end through the gateway.
 
-**Frontend: backend-authoritative (Phase 6.5 complete).** The workflow editor loads persisted versions from the control plane, and Save/Validate/Publish/Run are all real control-plane operations. Run executes the published ACTIVE version through the gateway admin `/run` → workflow runtime → provider, with the real envelope shown in the UI; a 409 surfaces when a workflow is unpublished. All previously-fabricated data (`relay-data.ts`, inline fixtures, `Math.sin` time series) is gone — every page fetches real backend rows or displays an honest "not available yet" state (runs history, telemetry/observability, MCP/Skills/policies/secrets). See [`docs/state.md`](docs/state.md) and [`PHASE6.5_IMPLEMENTATION_REPORT.md`](PHASE6.5_IMPLEMENTATION_REPORT.md).
+**Frontend: backend-authoritative (Phase 6.5 complete).** The workflow editor loads persisted versions from the control plane, and Save/Validate/Publish/Run are all real control-plane operations. Run executes the published ACTIVE version through the gateway admin `/run` → workflow runtime → provider, with the real envelope shown in the UI; a 409 surfaces when a workflow is unpublished. All previously-fabricated data (`relay-data.ts`, inline fixtures, `Math.sin` time series) is gone — every page fetches real backend rows or displays an honest "not available yet" state (runs history, telemetry/observability, MCP/Skills/policies/secrets). See [`docs/state.md`](docs/state.md) and [`PHASE6.5_IMPLEMENTATION_REPORT.md`](docs/archive/PHASE6.5_IMPLEMENTATION_REPORT.md).
 
 | Metric | Target | Actual |
 |--------|--------|--------|
 | Simple proxy p50 overhead | < 1 ms | ~0.105 ms |
 | SSE streaming overhead | low-ms | ~0.022 ms |
 | Rust tests | — | 294 passing |
-| Control-plane integration tests | — | 16 passing |
+| Frontend tests | — | 38 passing |
+| Control-plane integration tests | — | 40 passing |
 | Gateway `/run` integration test | — | included (publication_hot_swap) |
 
 ## Quick start
@@ -77,7 +78,7 @@ crates/
   protocol-core/        Canonical protocol model + 3 adapters
   workflow-schema/      Workflow definition types + validation
   workflow-runtime/     Node-based execution engine + compiler + snapshots
-docs/                   Architecture, ADRs, specs
+docs/                   Architecture, ADRs, specs (docs/README.md is the index)
 ```
 
 ## Development

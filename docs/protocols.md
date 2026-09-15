@@ -1,4 +1,5 @@
 # PROTOCOLS.md — Protocol Translation Contract
+> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** Protocol translation contract and capability-loss rules.
 
 ## Goal
 

@@ -1,8 +1,15 @@
+import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { AlertTriangle, ArrowLeft, GitCompare, RotateCcw } from "lucide-react";
+import { toast } from "sonner";
 import { AppShell } from "@/components/relay/AppShell";
 import { KV, PageHeader, Panel, StatusText, TableShell, Td } from "@/components/relay/primitives";
-import { useWorkflowVersions } from "@/lib/use-workflow-publication";
+import { VersionCompare } from "@/components/relay/VersionCompare";
+import {
+  useRollbackWorkflowMutation,
+  useWorkflowVersions,
+} from "@/lib/use-workflow-publication";
+import type { VersionRow } from "@/lib/api";
 
 export const Route = createFileRoute("/workflows/$workflowId/versions")({
   head: () => ({
@@ -21,7 +28,58 @@ export const Route = createFileRoute("/workflows/$workflowId/versions")({
 function VersionsPage() {
   const { workflowId } = Route.useParams();
   const { data: liveVersions, isPending, isError, error } = useWorkflowVersions(workflowId);
+  const rollback = useRollbackWorkflowMutation();
+
+  // Compare selection — max 2 versions.
+  const [compareA, setCompareA] = useState<VersionRow | null>(null);
+  const [compareB, setCompareB] = useState<VersionRow | null>(null);
+  const [compareOpen, setCompareOpen] = useState(false);
+  // Rollback confirmation per version.
+  const [confirmRollback, setConfirmRollback] = useState<number | null>(null);
+
   const active = liveVersions?.find((v) => v.status === "active");
+
+  const toggleCompare = (v: VersionRow) => {
+    if (compareA && compareB) return; // max 2 selected; force deselect first
+    if (compareA?.version === v.version) {
+      setCompareA(null);
+      return;
+    }
+    if (compareB?.version === v.version) {
+      setCompareB(null);
+      return;
+    }
+    if (!compareA) setCompareA(v);
+    else if (!compareB) setCompareB(v);
+  };
+
+  const openCompare = () => {
+    if (!compareA || !compareB) return;
+    // Order older -> newer for a sensible diff.
+    const [older, newer] =
+      compareA.version < compareB.version ? [compareA, compareB] : [compareB, compareA];
+    setCompareA(older);
+    setCompareB(newer);
+    setCompareOpen(true);
+  };
+
+  const closeCompare = () => {
+    setCompareOpen(false);
+    setCompareA(null);
+    setCompareB(null);
+  };
+
+  // Backend-authoritative: rollback always targets the previous validated
+  // version; there is no version param to pass.
+  const doRollback = (workflowId: string) => {
+    rollback.mutate(workflowId, {
+      onSuccess: (result) => {
+        toast.success(`Rolled back to v${result.to_version} · plan ${result.plan_hash.slice(0, 8)}`);
+        setConfirmRollback(null);
+      },
+      onError: (err) => toast.error(`Rollback failed — ${err.message}`),
+    });
+  };
 
   return (
     <AppShell>
@@ -39,8 +97,17 @@ function VersionsPage() {
         }
         actions={
           <>
-            <button className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs hover:border-border-strong">
-              <GitCompare className="size-3.5" /> Compare
+            <button
+              onClick={compareOpen ? closeCompare : openCompare}
+              disabled={!compareA || !compareB}
+              className="focus-ring flex h-7 items-center gap-1.5 rounded-sm border border-border px-2 text-xs hover:border-border-strong disabled:opacity-40"
+            >
+              <GitCompare className="size-3.5" />{" "}
+              {compareOpen
+                ? "Close compare"
+                : compareA && compareB
+                  ? `Compare v${compareA.version}..v${compareB.version}`
+                  : "Compare"}
             </button>
             <Link
               to="/workflows/$workflowId"
@@ -52,6 +119,12 @@ function VersionsPage() {
           </>
         }
       />
+
+      {compareOpen && compareA && compareB && (
+        <div className="border-b border-border bg-panel">
+          <VersionCompare oldVersion={compareA} newVersion={compareB} />
+        </div>
+      )}
 
       <div className="grid gap-3 p-4 xl:grid-cols-3">
         <Panel title="Lifecycle" className="xl:col-span-2">
@@ -93,9 +166,18 @@ function VersionsPage() {
           ) : isError ? (
             <div className="p-4 text-xs text-fail">control plane unreachable — {String(error)}</div>
           ) : liveVersions && liveVersions.length > 0 ? (
-            <TableShell head={["Version", "Status", "Plan", "When", ""]}>
+            <TableShell head={["", "Version", "Status", "Plan", "When", ""]}>
               {liveVersions.map((v) => (
                 <tr key={v.version} className="hover:bg-panel-raised/50">
+                  <Td className="w-8">
+                    <input
+                      type="checkbox"
+                      checked={compareA?.version === v.version || compareB?.version === v.version}
+                      disabled={compareOpen || (compareA !== null && compareB !== null && compareA.version !== v.version && compareB.version !== v.version)}
+                      onChange={() => toggleCompare(v)}
+                      className="accent-primary"
+                    />
+                  </Td>
                   <Td className="num font-medium">v{v.version}</Td>
                   <Td>
                     <StatusText status={v.status === "active" ? "Production" : v.status === "compiled" ? "Staging" : "Draft"} />
@@ -103,15 +185,53 @@ function VersionsPage() {
                   <Td className="num text-muted-foreground">{shortHash(v.plan_hash)}</Td>
                   <Td className="num text-muted-foreground">{new Date(v.created_at).toLocaleString()}</Td>
                   <Td className="text-right">
-                    <button className="focus-ring rounded-sm border border-border px-1.5 py-0.5 text-[10px] hover:border-primary hover:text-primary">
-                      {v.status === "active" ? "Active" : "Draft"}
-                    </button>
+                    {v.status === "active" ? (
+                      <button
+                        className="focus-ring rounded-sm border border-border px-1.5 py-0.5 text-[10px] hover:border-border-strong"
+                        disabled
+                      >
+                        Active
+                      </button>
+                    ) : confirmRollback === v.version ? (
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => doRollback(workflowId)}
+                          disabled={rollback.isPending}
+                          className="focus-ring rounded-sm border border-fail/40 bg-fail/10 px-1.5 py-0.5 text-[10px] text-fail hover:bg-fail/20"
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          onClick={() => setConfirmRollback(null)}
+                          className="focus-ring rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:border-border-strong"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : v.status === "compiled" ? (
+                      <button
+                        onClick={() => setConfirmRollback(v.version)}
+                        className="focus-ring rounded-sm border border-warn/40 px-1.5 py-0.5 text-[10px] text-warn hover:border-warn"
+                      >
+                        Rollback
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-muted-foreground">draft</span>
+                    )}
                   </Td>
                 </tr>
               ))}
             </TableShell>
           ) : (
             <div className="p-4 text-xs text-muted-foreground">no versions persisted yet — open the editor and publish.</div>
+          )}
+
+          {!compareOpen && (compareA || compareB) && (
+            <p className="px-3 pt-2 text-[11px] text-muted-foreground">
+              {compareA && compareB
+                ? "2 selected — click Compare to view the diff."
+                : "Select one more version to compare."}
+            </p>
           )}
         </Panel>
       </div>

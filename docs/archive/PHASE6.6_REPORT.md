@@ -1,4 +1,5 @@
 # PHASE 6.6 REPORT — Canonical Workflow Model & Lossless Editor Architecture
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 **Status:** Implemented (with fixes from code review) · **Branch:** `feat/phase6.5-review`
 

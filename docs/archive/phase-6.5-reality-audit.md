@@ -1,4 +1,5 @@
 # Phase 6.5 — Frontend/Backend Reality Audit
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 **Date:** 2026-09-12
 **Scope:** Read-only, evidence-driven reality audit of the entire Relay-X repository

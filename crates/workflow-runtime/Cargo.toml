@@ -2,6 +2,7 @@
 name = "workflow-runtime"
 edition.workspace = true
 version.workspace = true
+rust-version.workspace = true
 description = "Node-based workflow runtime for relay-x"
 
 [dependencies]
@@ -20,7 +21,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 url.workspace = true
-uuid.workspace = true
 sha2.workspace = true
 async-trait = "0.1"
 arc-swap = "1.9"

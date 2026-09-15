@@ -1,4 +1,5 @@
 # MCP_SKILLS.md — Capability Discovery Architecture
+> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** MCP server and Agent Skills discovery design contract (Phase 7 target).
 
 ## Unified capability model
 

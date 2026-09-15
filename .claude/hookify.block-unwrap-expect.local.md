@@ -2,6 +2,7 @@
 name: block-unwrap-expect
 enabled: true
 event: file
+action: block
 conditions:
   - field: file_path
     operator: regex_match
@@ -11,7 +12,7 @@ conditions:
   - field: file_path
     operator: not_contains
     pattern: test
-  - field: new_text
+  - field: content
     operator: regex_match
     pattern: \.unwrap\(\)|\.expect\(
 
@@ -29,3 +30,5 @@ This violates the project's Rust Engineering Policy (CLAUDE.md). These macros pa
 - Avoid `.unwrap_or(...)`-style shortcuts only where an error is genuinely impossible
 
 No exceptions without explicit user authorization.
+
+Enforced at `PreToolUse` with `action: block`, so a violating edit is denied before it lands. Matching runs against the `content` field, which resolves to `new_string` for `Edit`/`MultiEdit` and to `content` for `Write`; `new_text` maps to `new_string` only and would silently miss whole-file writes.

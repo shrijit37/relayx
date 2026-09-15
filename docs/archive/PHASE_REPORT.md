@@ -1,4 +1,5 @@
 # Phase: Core Engine Foundation — Completion Report
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 ## Summary
 

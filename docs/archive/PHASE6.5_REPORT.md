@@ -1,4 +1,5 @@
 # Phase 6.5 — Reality, Security & Correctness Remediation Report
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 **Date:** 2026-09-13
 **Status:** ✅ COMPLETE — all critical/high findings resolved

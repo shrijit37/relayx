@@ -1,4 +1,5 @@
 # SECURITY.md — Security Model
+> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** Threat model and explicit security boundaries.
 
 ## Threat model
 

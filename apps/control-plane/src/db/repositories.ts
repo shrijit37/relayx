@@ -175,6 +175,10 @@ export const workflows = {
     );
   },
 
+  async remove(pool: Pool, id: string): Promise<void> {
+    await pool.query("DELETE FROM workflows WHERE id = $1", [id]);
+  },
+
   async getActiveVersion(pool: Pool, workflowId: string): Promise<WorkflowActiveRow | null> {
     const { rows } = await pool.query<WorkflowActiveRow>(
       "SELECT * FROM workflow_active WHERE workflow_id = $1",
@@ -296,6 +300,94 @@ export const lanes = {
 
   async remove(pool: Pool, id: string): Promise<void> {
     await pool.query("DELETE FROM lanes WHERE id = $1", [id]);
+  },
+};
+
+// ── Runs ────────────────────────────────────────────────────────────────
+
+export type RunRow = {
+  id: string;
+  workflow_id: string;
+  workflow_version: number;
+  snapshot_version: number;
+  plan_hash: string | null;
+  status: string;
+  input_body: unknown;
+  output: unknown;
+  error: string | null;
+  started_at: string;
+  completed_at: string | null;
+};
+
+export const runs = {
+  async create(
+    pool: Pool,
+    data: {
+      workflow_id: string;
+      workflow_version: number;
+      snapshot_version: number;
+      plan_hash?: string | null;
+      input_body?: unknown;
+    },
+  ): Promise<RunRow> {
+    const { rows } = await pool.query<RunRow>(
+      `INSERT INTO runs (id, workflow_id, workflow_version, snapshot_version, plan_hash, status, input_body)
+       VALUES ($1,$2,$3,$4,$5,'running',$6) RETURNING *`,
+      [
+        newId(),
+        data.workflow_id,
+        data.workflow_version,
+        data.snapshot_version,
+        data.plan_hash ?? null,
+        data.input_body ?? null,
+      ],
+    );
+    return rows[0]!;
+  },
+
+  async update(
+    pool: Pool,
+    id: string,
+    patch: { status?: string; output?: unknown; error?: string | null; completed_at?: string },
+  ): Promise<RunRow | null> {
+    // Guard: only allow known columns to prevent SQL injection through future
+    // callers that might pass untrusted field names.
+    const ALLOWED = new Set(["status", "output", "error", "completed_at"]);
+    const fields: string[] = [];
+    const values: unknown[] = [id];
+    let idx = 2;
+    for (const [key, val] of Object.entries(patch)) {
+      if (val !== undefined && ALLOWED.has(key)) {
+        fields.push(`${key} = $${idx}`);
+        values.push(val);
+        idx++;
+      }
+    }
+    if (fields.length === 0) return runs.get(pool, id);
+    const { rows } = await pool.query<RunRow>(
+      `UPDATE runs SET ${fields.join(", ")} WHERE id = $1 RETURNING *`,
+      values,
+    );
+    return rows[0] ?? null;
+  },
+
+  async get(pool: Pool, id: string): Promise<RunRow | null> {
+    const { rows } = await pool.query<RunRow>("SELECT * FROM runs WHERE id = $1", [id]);
+    return rows[0] ?? null;
+  },
+
+  async list(pool: Pool, workflowId?: string): Promise<RunRow[]> {
+    if (workflowId) {
+      const { rows } = await pool.query<RunRow>(
+        "SELECT * FROM runs WHERE workflow_id = $1 ORDER BY started_at DESC LIMIT 100",
+        [workflowId],
+      );
+      return rows;
+    }
+    const { rows } = await pool.query<RunRow>(
+      "SELECT * FROM runs ORDER BY started_at DESC LIMIT 100",
+    );
+    return rows;
   },
 };
 

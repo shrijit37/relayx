@@ -1,4 +1,5 @@
 # relay-x: Phase 1 & 2 Implementation Report
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 **Date:** 2026-09-10
 **Repository:** `shrijit37/relay-x`

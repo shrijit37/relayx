@@ -1,4 +1,5 @@
 # DEVELOPMENT.md
+> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** Repository layout, local dev setup, and the CI pipeline.
 
 ## Repository layout
 
@@ -16,28 +17,37 @@
 │   ├── workflow-schema/        # Workflow types + graph validation (Phase 4 complete)
 │   └── workflow-runtime/       # Node execution engine + compiler + snapshots (Phases 4/5/6.5 complete)
 ├── docs/
+│   ├── README.md               # Doc index + conventions (read first)
 │   ├── architecture.md         # System topology and domain model
-│   ├── state.md                # Current implementation state
+│   ├── state.md                # Current implementation state + canonical facts
 │   ├── performance.md          # Performance budget and benchmarks
 │   ├── testing.md              # Test strategy and coverage
 │   ├── observability.md        # Metrics and logging
 │   ├── development.md          # This file
-│   ├── roadmap.md              # Phase 0-8 task breakdown
+│   ├── roadmap.md              # Phase 0-9 task breakdown
 │   ├── protocols.md            # Protocol translation contract
 │   ├── security.md             # Threat model
 │   ├── workflow-ir.md          # Workflow IR design
 │   ├── mcp-skills.md           # MCP/Skills discovery
-│   └── adr-*.md                # Architecture Decision Records
+│   ├── adr-*.md                # Architecture Decision Records
+│   └── archive/                # Immutable historical snapshots
+├── .agents/skills/             # Skill sources (`.claude/skills/` symlinks here)
 ├── .claude/
 │   ├── settings.json           # Hooks + permissions
 │   ├── hooks/
-│   │   └── check-rust-policy.sh
-│   ├── skills/
-│   │   └── architecture-guard/
+│   │   ├── check-rust-policy.sh
+│   │   ├── check-rust-gates.sh
+│   │   ├── ts-guard.sh
+│   │   ├── shell-guard.sh
+│   │   └── check-docs.sh
 │   └── agents/
 │       ├── hot-path-auditor.md
 │       └── protocol-fidelity-reviewer.md
-├── .github/workflows/ci.yml   # CI: SHA-pinned actions, clippy, test
+├── .githooks/pre-commit        # Rust policy + docs-truth gate
+├── scripts/verify-docs.sh      # Documentation truth verifier
+├── .github/
+│   ├── workflows/ci.yml        # CI: rust, msrv, web, control-plane, docs
+│   └── dependabot.yml          # weekly grouped dependency updates
 ├── Cargo.toml                  # Workspace root
 └── rust-toolchain.toml         # stable, rustfmt + clippy
 ```
@@ -58,7 +68,7 @@ bun test          # Serializer + run-state reducer + WorkflowBuilder interaction
 ```bash
 cd apps/control-plane
 bun install
-bun run dev       # Fastify API on :9091 (needs Postgres, see infra/docker/compose.dev.yml)
+bun run dev       # Fastify API on :9091 (needs Postgres on 127.0.0.1:5433)
 bun test          # Integration tests (real Postgres + in-process mock gateway)
 ```
 
@@ -66,17 +76,47 @@ bun test          # Integration tests (real Postgres + in-process mock gateway)
 
 ### Prerequisites
 
-- Rust stable (1.88+) via `rustup`
-- Postgres 16 for the control plane (infra/docker/compose.dev.yml)
+- Rust stable, at least the workspace MSRV (`rust-version` in `Cargo.toml`,
+  currently **1.88**) — enforced by the CI `msrv` job
+- **bun 1.4.0** — the version CI pins; both `apps/*` use it for install, test, run
+- Postgres 16 for the control plane on `127.0.0.1:5433` — the `RELAYX_PG_*`
+  defaults in `apps/control-plane/src/db/db.ts`. There is no compose file in this
+  repo: `scripts/dev.sh` prints the exact `docker run` command and exits if the
+  container is not already running.
 - `scripts/dev.sh` brings up mock upstream + gateway + control plane + Postgres
 - `scripts/logs.sh` merges all service logs into a single color-coded stream
 - `cargo-watch` (for auto-rebuild; `cargo install cargo-watch`)
 
+No C toolchain (`cmake`, a C compiler) is required to build the workspace: the
+Prometheus exporter is declared with `default-features = false`, which keeps
+`rustls`/`aws-lc-sys`/`cmake` out of the dependency graph.
+
 ### Build
 
 ```bash
-cargo build --all-features --workspace
+cargo build --all-features --workspace           # dev profile
+cargo build --release --all-features --workspace # release profile
 ```
+
+All profiles live in the workspace root manifest — members must not define their
+own, because Cargo only honours profiles declared by the workspace root.
+
+| Profile | Used by | Settings |
+| ------- | ------- | -------- |
+| `dev` | `cargo run`, `scripts/dev.sh` | workspace `opt-level = 1`, `debug = 1`; **dependencies `opt-level = 3`** |
+| `release` | deployment | `lto = "thin"`, `codegen-units = 1`, `debug = 1`, `strip = "debuginfo"` |
+| `bench` | `cargo bench` | inherits `release`, overriding `debug = true`, `strip = false` |
+
+Two consequences worth knowing:
+
+- Dependencies are compiled at `opt-level = 3` even in dev, so the gateway's proxy
+  path is representative under `cargo run` — that is what makes the latency budget
+  in `docs/performance.md` observable in the local stack.
+- `panic = "abort"` is deliberately **not** set for release: the data plane relies
+  on unwinding for per-request panic isolation. Adding it needs an ADR.
+
+Benchmark figures are only comparable under an identical profile — record the
+profile in `docs/performance.md` whenever numbers are re-measured.
 
 ### Run the gateway
 
@@ -159,8 +199,23 @@ cargo clippy --all-targets --all-features --workspace -- -D warnings
 
 1. **Rust policy check** — forbidden patterns (unwrap, expect, todo, dead_code suppression)
 2. **Format check** — `cargo fmt --check`
-3. **Clippy** — `cargo clippy -- -D warnings`
-4. **Test** — `cargo test --all-features --workspace`
+3. **Clippy** — `cargo clippy --locked --all-targets --all-features --workspace -- -D warnings`
+4. **Test** — `cargo test --locked --all-features --workspace`
+
+Every cargo invocation passes `--locked`, so a stale `Cargo.lock` fails the job
+instead of being silently re-resolved: the committed lock is the build input.
+
+### MSRV job
+
+1. **Check on MSRV** — `cargo +1.88.0 check --locked --all-features --workspace` on a
+   pinned 1.88.0 toolchain
+
+This is the only job that verifies the `rust-version = "1.88"` claim (inherited by
+every member from `[workspace.package]`). Resolver `"3"` makes `cargo update`
+refuse dependency versions that would raise the MSRV, and this job catches
+everything resolution cannot see — API use, language features, `cfg` gates.
+`+1.88.0` is explicit because `rust-toolchain.toml` pins `channel = "stable"`,
+which overrides whatever toolchain `rustup default` points at.
 
 ### Web job
 
@@ -169,12 +224,28 @@ cargo clippy --all-targets --all-features --workspace -- -D warnings
 3. **Test** — `bun test` (workflow-serializer + run-state reducer + WorkflowBuilder interaction tests, runs in happy-dom)
 4. **Build** — `vite build` (production bundle check)
 
+### Control-plane job
+
+1. **Install** — `bun install --frozen-lockfile`
+2. **Typecheck** — `tsc --noEmit`
+3. **Test** — `bun test` against a real Postgres 16 service container
+
+The `postgres:16-alpine` service is published on host port **5433**, matching the
+`RELAYX_PG_PORT` default the app and test helpers read
+(`apps/control-plane/src/db/db.ts`); no env override is needed.
+
+### Docs job
+
+1. **Documentation truth** — `scripts/verify-docs.sh` recomputes counts from the source and fails on drift, a broken relative doc link, a snapshot left at `docs/` top level, or a living doc missing its convention header
+
 Features:
 
 - Actions pinned to full commit SHAs (supply-chain security)
 - `permissions: contents: read` (least-privilege)
-- `timeout-minutes: 30` (Rust), `timeout-minutes: 20` (web)
+- `timeout-minutes: 30` (Rust, MSRV), `timeout-minutes: 20` (web, control-plane), `timeout-minutes: 5` (docs)
 - `concurrency` group with cancel-in-progress for PRs
+- Dependabot (`.github/dependabot.yml`) opens grouped weekly PRs for cargo, both
+  bun apps, and GitHub Actions; every one still has to pass all five jobs
 
 ## Rust policy
 

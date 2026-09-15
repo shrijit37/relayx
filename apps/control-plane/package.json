@@ -6,7 +6,7 @@
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --timeout 20000",
     "migrate": "bun run src/db/migrate.ts"
   },
   "dependencies": {

@@ -1,4 +1,5 @@
 # Documentation Audit — 2026-09-15
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 ## Verified Counts (Today)
 

@@ -64,8 +64,15 @@ export function registerCatalogRoutes(
       params.push(provider);
     }
     if (capability) {
-      sql += ` AND (m.capabilities->>$${i++})::boolean = true`;
-      params.push(capability);
+      // `capability` is used as a JSONB key name (e.g. `tool_call`), not a
+      // boolean value. Sanitize to [a-zA-Z0-9_] — the same safe charset as
+      // JSON keys — so an arbitrary string can't break the `::boolean` cast
+      // or probe non-key columns.
+      const safeCap = capability.replace(/[^a-zA-Z0-9_]/g, "");
+      if (safeCap) {
+        sql += ` AND (m.capabilities->>$${i++})::boolean = true`;
+        params.push(safeCap);
+      }
     }
     if (search) {
       sql += ` AND (m.name ILIKE $${i} OR m.id ILIKE $${i} OR m.description ILIKE $${i})`;

@@ -9,19 +9,29 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  createLane,
   createProvider,
+  deleteLane,
+  deleteProvider,
+  deleteWorkflow,
   fetchCatalogModels,
   fetchLanes,
   fetchProviders,
+  fetchRun,
+  fetchRuns,
   fetchSystemHealth,
   fetchWorkflowLatestVersion,
   fetchWorkflowVersions,
   fetchWorkflows,
   publishWorkflow,
+  rollbackWorkflow,
   saveWorkflowVersion,
+  updateLane,
+  updateProvider,
   validateWorkflow,
   type CatalogModel,
   type ProviderRow,
+  type RunRow,
   type VersionInfo,
   type VersionRow,
 } from "@/lib/api";
@@ -118,11 +128,122 @@ export function useCreateProviderMutation() {
   });
 }
 
+/** Update a real provider record (partial patch). */
+export function useUpdateProviderMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    ProviderRow,
+    Error,
+    { id: string; input: Parameters<typeof updateProvider>[1] }
+  >({
+    mutationFn: ({ id, input }) => updateProvider(id, input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["providers"] });
+    },
+  });
+}
+
+/** Delete a real provider record. */
+export function useDeleteProviderMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: deleteProvider,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["providers"] });
+    },
+  });
+}
+
 /** Real persisted lane rows. */
 export function useLanes() {
   return useQuery({
     queryKey: ["lanes"],
     queryFn: () => fetchLanes(),
+  });
+}
+
+/** Create a real lane record. */
+export function useCreateLaneMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<Awaited<ReturnType<typeof createLane>>, Error, Parameters<typeof createLane>[0]>({
+    mutationFn: createLane,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["lanes"] });
+    },
+  });
+}
+
+/** Update a real lane record (partial patch). */
+export function useUpdateLaneMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    Awaited<ReturnType<typeof updateLane>>,
+    Error,
+    { id: string; input: Parameters<typeof updateLane>[1] }
+  >({
+    mutationFn: ({ id, input }) => updateLane(id, input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["lanes"] });
+    },
+  });
+}
+
+/** Delete a real lane record. */
+export function useDeleteLaneMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: deleteLane,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["lanes"] });
+    },
+  });
+}
+
+/** Roll back a workflow to its previous validated version (backend republish). */
+export function useRollbackWorkflowMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    Awaited<ReturnType<typeof rollbackWorkflow>>,
+    Error,
+    string
+  >({
+    mutationFn: rollbackWorkflow,
+    // Invalidate on settled, not just success: a failed rollback must still
+    // refresh the cached versions/workflows so the UI shows backend truth
+    // (a stuck or partial republish shouldn't leave stale state visible).
+    onSettled: (_result, _error, workflowId) => {
+      queryClient.invalidateQueries({ queryKey: publicationKeys.versions(workflowId) });
+      queryClient.invalidateQueries({ queryKey: publicationKeys.workflows });
+    },
+  });
+}
+
+/** Delete a workflow row (cascades versions + runs). */
+export function useDeleteWorkflowMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: deleteWorkflow,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: publicationKeys.workflows });
+    },
+  });
+}
+
+/** Run-history rows (optionally filtered by workflow). */
+export function useRuns(workflowId?: string) {
+  return useQuery<RunRow[]>({
+    queryKey: ["runs", workflowId ?? "all"],
+    queryFn: () => fetchRuns(workflowId),
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((r) => r.status === "running") ? 10_000 : false,
+  });
+}
+
+/** Single run record for the detail page. */
+export function useRun(runId: string) {
+  return useQuery<RunRow>({
+    queryKey: ["runs", "detail", runId],
+    queryFn: () => fetchRun(runId),
   });
 }
 
@@ -147,14 +268,17 @@ export function useWorkflowRow(workflowId: string) {
   });
 }
 
-/** Catalog models from the models.dev sync (background-populated by control-plane). */
-export function useCatalogModels(params?: {
-  provider?: string;
-  capability?: string;
-}) {
+/** Catalog models from the models.dev sync (background-populated by control-plane).
+ *  `enabled` lets callers avoid fetching until a relevant provider is selected
+ *  (React Query dedupes identical keys, so stray calls are merely wasteful). */
+export function useCatalogModels(
+  params?: { provider?: string; capability?: string },
+  options?: { enabled?: boolean },
+) {
   return useQuery<CatalogModel[]>({
     queryKey: ["catalog-models", params],
     queryFn: () => fetchCatalogModels(params),
     staleTime: 60_000, // catalog refreshes every 24h; no need to re-fetch rapidly
+    enabled: options?.enabled ?? true,
   });
 }

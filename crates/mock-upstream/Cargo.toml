@@ -2,6 +2,7 @@
 name = "mock-upstream"
 edition.workspace = true
 version.workspace = true
+rust-version.workspace = true
 description = "Reusable mock LLM upstream for tests and benchmarks"
 
 [dependencies]
@@ -11,7 +12,6 @@ hyper-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 bytes.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 clap.workspace = true

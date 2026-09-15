@@ -459,10 +459,14 @@ function Canvas({ workflowId }: { workflowId: string }) {
     const catalogProvider = canonicalNode?.config.kind === "llm"
         ? canonicalNode.config.config.provider
         : undefined;
+    // Only fetch catalog models when a provider is actually selected — the
+    // model picker is useless without one, and the fallback is the provider
+    // row's stored default model (no catalog needed).
     const { data: catalogModels = [] } = useCatalogModels(
         catalogProvider
             ? { provider: catalogProvider, capability: "tool_call" }
-            : { capability: "tool_call" },
+            : undefined,
+        { enabled: Boolean(catalogProvider) },
     );
     const modelOptions = useMemo(() => {
         if (!canonicalNode) return [];

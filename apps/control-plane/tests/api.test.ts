@@ -59,6 +59,201 @@ const helperWf = (lane: string) => ({
   ],
 });
 
+// Seed lane + workflow + publish → ACTIVE, returning the workflow id.
+// Mirrors the inline seed used by the earlier tests.
+async function seedPublishedWf(): Promise<string> {
+  await fetch(`${base()}/lanes`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: "lane-a", name: "primary", project_id: "proj_default", endpoint: "/chat", base_url: "http://127.0.0.1:9001", egress: "direct", policies: [] }),
+  });
+  const wfRes = await fetch(`${base()}/workflows`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "stream-test", project_id: "proj_default" }),
+  });
+  const wf = (await wfRes.json()) as { id: string };
+  await fetch(`${base()}/workflows/${wf.id}/versions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workflow_json: helperWf("lane-a") }),
+  });
+  await fetch(`${base()}/workflows/${wf.id}/publish`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workflow_json: helperWf("lane-a"), version: 1 }),
+  });
+  return wf.id;
+}
+
+/** Rebuild app + gateway with the given mock gateway options. */
+async function rebuildWithGateway(opts: Parameters<typeof mockGateway>[0]) {
+  await app?.close();
+  await gatewayApp?.close();
+  await db?.close();
+
+  const db2 = await freshDb("api-stream");
+  const gw2 = await mockGateway(opts);
+  await gw2.listen({ port: 0, host: "127.0.0.1" });
+  const gw2Base = `http://127.0.0.1:${(gw2.server.address() as { port: number }).port}`;
+  app = await buildApp({ pool: db2.pool, gateway: new GatewayClient(gw2Base) });
+  await app.listen({ port: 0, host: "127.0.0.1" });
+  db = db2;
+  gatewayApp = gw2;
+}
+
+describe("REST API streaming run", () => {
+  test("stream with a terminal `event: done` records the run as completed", async () => {
+    await rebuildWithGateway({
+      mustValidate: true,
+      streamChunks: [
+        'data: {"delta":"hi"}\n\n',
+        "event: done\ndata: {}\n\n",
+      ],
+    });
+    const wfId = await seedPublishedWf();
+
+    const res = await fetch(`${base()}/workflows/${wfId}/run?stream=true`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: { messages: [{ role: "user", content: "hi" }] } }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const text = await res.text();
+    expect(text).toContain("event: done");
+
+    const runs = (await (await fetch(`${base()}/runs`)).json()) as Array<{ workflow_id: string; status: string }>;
+    const rec = runs.find((r) => r.workflow_id === wfId)!;
+    expect(rec.status).toBe("completed");
+  });
+
+  test("stream with a terminal `event: error` records the run as failed", async () => {
+    await rebuildWithGateway({
+      mustValidate: true,
+      streamChunks: [
+        'data: {"delta":"hi"}\n\n',
+        'event: error\ndata: {"error":"provider exploded"}\n\n',
+      ],
+    });
+    const wfId = await seedPublishedWf();
+
+    const res = await fetch(`${base()}/workflows/${wfId}/run?stream=true`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: {} }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+
+    const runs = (await (await fetch(`${base()}/runs`)).json()) as Array<{ workflow_id: string; status: string; error: string | null }>;
+    const rec = runs.find((r) => r.workflow_id === wfId)!;
+    expect(rec.status).toBe("failed");
+  });
+
+  test("truncated stream (no terminal event) records the run as failed, not completed", async () => {
+    await rebuildWithGateway({
+      mustValidate: true,
+      // No `event: done` / `event: error` — gateway closes the connection
+      // mid-stream. Must NOT be recorded as a silent success.
+      streamChunks: ['data: {"delta":"partial"}\n\n'],
+    });
+    const wfId = await seedPublishedWf();
+
+    const res = await fetch(`${base()}/workflows/${wfId}/run?stream=true`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: {} }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+
+    const runs = (await (await fetch(`${base()}/runs`)).json()) as Array<{ workflow_id: string; status: string; error: string | null }>;
+    const rec = runs.find((r) => r.workflow_id === wfId)!;
+    expect(rec.status).toBe("failed");
+    expect(rec.error).toContain("terminal event");
+  });
+
+  test("client abort (socket destroyed mid-stream) records the run as cancelled", async () => {
+    await rebuildWithGateway({
+      mustValidate: true,
+      // First chunk flushes immediately; the delay keeps the stream open so
+      // the client can abort before the terminal `event: done` frame.
+      streamChunks: ['data: {"delta":"ping"}\n\n', "event: done\ndata: {}\n\n"],
+      streamChunkDelayMs: 200,
+    });
+    const wfId = await seedPublishedWf();
+
+    const ctrl = new AbortController();
+    const res = await fetch(`${base()}/workflows/${wfId}/run?stream=true`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: {} }),
+      signal: ctrl.signal,
+    });
+    expect(res.status).toBe(200);
+    // Abort after the response starts; the pump should see the socket close
+    // and finalize as cancelled (no terminal event seen).
+    ctrl.abort();
+
+    // Give the pump a moment to observe the destroy and write the row.
+    for (let i = 0; i < 40; i++) {
+      const runs = (await (await fetch(`${base()}/runs`)).json()) as Array<{ workflow_id: string; status: string }>;
+      const rec = runs.find((r) => r.workflow_id === wfId);
+      if (rec && rec.status !== "running") {
+        expect(rec.status).toBe("cancelled");
+        return;
+      }
+      await Bun.sleep(50);
+    }
+    throw new Error("run never left 'running' after client abort");
+  });
+
+  test("streaming run record is created (status running → terminal) and reachable via GET /runs", async () => {
+    await rebuildWithGateway({
+      mustValidate: true,
+      streamChunks: ["event: done\ndata: {}\n\n"],
+      streamChunkDelayMs: 200,
+    });
+    const wfId = await seedPublishedWf();
+
+    // During the run the row exists as 'running'.
+    const res = await fetch(`${base()}/workflows/${wfId}/run?stream=true`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: {} }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+
+    const detail = (await (await fetch(`${base()}/runs`)).json()) as Array<{ workflow_id: string; status: string }>;
+    const rec = detail.find((r) => r.workflow_id === wfId)!;
+    expect(rec.status).toBe("completed");
+  });
+
+  test("run record is created even when the stream content has no newline-terminated frames (byte-scan robustness)", async () => {
+    await rebuildWithGateway({
+      mustValidate: true,
+      // Terminal marker split across chunks — the pump's remainder scan
+      // must still detect `event: done`.
+      streamChunks: ['data: x\n\nevent: do', "ne\ndata: {}\n\n"],
+    });
+    const wfId = await seedPublishedWf();
+
+    const res = await fetch(`${base()}/workflows/${wfId}/run?stream=true`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: {} }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+
+    const runs = (await (await fetch(`${base()}/runs`)).json()) as Array<{ workflow_id: string; status: string }>;
+    const rec = runs.find((r) => r.workflow_id === wfId)!;
+    expect(rec.status).toBe("completed");
+  });
+});
+
 describe("REST API", () => {
   test("workflow CRUD + version creation", async () => {
     const res = await fetch(`${base()}/workflows`, {
@@ -331,5 +526,139 @@ describe("REST API", () => {
     expect(runRes.status).toBe(400);
     const body = (await runRes.json()) as { error: string };
     expect(body.error).toContain("provider 500");
+  });
+
+  test("run: persists a run record accessible via GET /runs", async () => {
+    // Seed lane + workflow + publish → ACTIVE.
+    await fetch(`${base()}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "lane-a", name: "primary", project_id: "proj_default", endpoint: "/chat", base_url: "http://127.0.0.1:9001", egress: "direct", policies: [] }),
+    });
+    const wfRes = await fetch(`${base()}/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "echo", project_id: "proj_default" }),
+    });
+    const wf = (await wfRes.json()) as { id: string };
+    await fetch(`${base()}/workflows/${wf.id}/versions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: helperWf("lane-a") }),
+    });
+    await fetch(`${base()}/workflows/${wf.id}/publish`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: helperWf("lane-a"), version: 1 }),
+    });
+
+    // Run the workflow.
+    await fetch(`${base()}/workflows/${wf.id}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: { messages: [{ role: "user", content: "hi" }] } }),
+    });
+
+    // The run list should contain one completed record.
+    const listRes = await fetch(`${base()}/runs`);
+    expect(listRes.status).toBe(200);
+    const runs = (await listRes.json()) as Array<{ id: string; status: string; workflow_id: string }>;
+    expect(runs.length).toBeGreaterThanOrEqual(1);
+    const rec = runs.find((r) => r.workflow_id === wf.id)!;
+    expect(rec.status).toBe("completed");
+
+    // Single run fetch.
+    const getRes = await fetch(`${base()}/runs/${rec.id}`);
+    expect(getRes.status).toBe(200);
+    const detail = (await getRes.json()) as { input_body: unknown; output: unknown; completed_at: string | null };
+    expect(detail.input_body).toBeTruthy();
+    expect(detail.output).toBeTruthy();
+    expect(detail.completed_at).toBeTruthy();
+
+    // Filter by workflow.
+    const filterRes = await fetch(`${base()}/runs?workflow_id=${wf.id}`);
+    expect(filterRes.status).toBe(200);
+    const filtered = (await filterRes.json()) as Array<{ workflow_id: string }>;
+    expect(filtered.every((r) => r.workflow_id === wf.id)).toBe(true);
+  });
+
+  test("workflow DELETE removes the row and cascades versions", async () => {
+    const wfRes = await fetch(`${base()}/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "to-delete", project_id: "proj_default" }),
+    });
+    expect(wfRes.status).toBe(201);
+    const wf = (await wfRes.json()) as { id: string };
+
+    // Create a version.
+    await fetch(`${base()}/workflows/${wf.id}/versions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: { id: wf.id, name: "to-delete", version: 1, nodes: [], edges: [] } }),
+    });
+    const versionsBefore = (await (await fetch(`${base()}/workflows/${wf.id}/versions`)).json()) as Array<{ version: number }>;
+    expect(versionsBefore.length).toBe(1);
+
+    // Delete.
+    const delRes = await fetch(`${base()}/workflows/${wf.id}`, { method: "DELETE" });
+    expect(delRes.status).toBe(204);
+
+    // Confirm gone.
+    const getRes = await fetch(`${base()}/workflows/${wf.id}`);
+    expect(getRes.status).toBe(404);
+
+    // Versions cascade-deleted.
+    const versionsAfter = (await (await fetch(`${base()}/workflows/${wf.id}/versions`)).json()) as { error?: string };
+    expect(versionsAfter.error).toContain("not found");
+  });
+
+  test("rollback endpoint republishes a previous valid version", async () => {
+    await fetch(`${base()}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "lane-a", name: "primary", project_id: "proj_default", endpoint: "/chat", base_url: "http://127.0.0.1:9001", egress: "direct", policies: [] }),
+    });
+    const wfRes = await fetch(`${base()}/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "rollback-test", project_id: "proj_default" }),
+    });
+    const wf = (await wfRes.json()) as { id: string };
+
+    // v1
+    await fetch(`${base()}/workflows/${wf.id}/versions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: helperWf("lane-a") }),
+    });
+    await fetch(`${base()}/workflows/${wf.id}/publish`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: helperWf("lane-a"), version: 1 }),
+    });
+
+    // v2 (also published)
+    await fetch(`${base()}/workflows/${wf.id}/versions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: helperWf("lane-a") }),
+    });
+    await fetch(`${base()}/workflows/${wf.id}/publish`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workflow_json: helperWf("lane-a"), version: 2 }),
+    });
+
+    // Rollback → back to v1.
+    const rbRes = await fetch(`${base()}/workflows/${wf.id}/rollback`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(rbRes.status).toBe(200);
+    const rb = (await rbRes.json()) as { status: string; to_version: number };
+    expect(rb.status).toBe("rolled_back");
+    expect(rb.to_version).toBe(1);
   });
 });

@@ -83,7 +83,11 @@ impl PublicationState {
 ///
 /// Uses `RUST_LOG` env-filter with a sensible default for relay-x.
 pub fn init_tracing() {
-    let default_filter = "relay_x=info,tower_http=info";
+    // `relay_x` is this workspace's tracing target. There is no `tower_http`
+    // directive: the gateway never installs a tower-http layer (request IDs are
+    // generated explicitly in src/proxy/mod.rs), so that directive only ever
+    // silenced nothing and referenced a crate that is no longer a dependency.
+    let default_filter = "relay_x=info";
 
     tracing_subscriber::registry()
         .with(

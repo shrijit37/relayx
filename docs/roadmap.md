@@ -1,4 +1,5 @@
 # ROADMAP.md
+> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** Phase 0–9 task breakdown and completion status.
 
 ## Phase 0 — Foundation
 
@@ -91,7 +92,7 @@
 
 ## Phase 6.5 — Frontend/Backend Reality & Integration Hardening (AUDIT COMPLETE, IMPLEMENTATION COMPLETE)
 
-**Why this phase exists:** The Phase 6.5 reality audit ([phase-6.5-reality-audit.md](phase-6.5-reality-audit.md)) found that the Rust backend and control plane are real, but the frontend presents a high-fidelity mock: 13 of 15 pages render fabricated data, the Run button is a `setTimeout` animation, the editor cannot load saved workflows, and the Save/Validate buttons are non-functional. The backend correctly rejects invalid workflows, but the frontend never asks it.
+**Why this phase exists:** The Phase 6.5 reality audit ([phase-6.5-reality-audit.md](archive/phase-6.5-reality-audit.md)) found that the Rust backend and control plane are real, but the frontend presents a high-fidelity mock: 13 of 15 pages render fabricated data, the Run button is a `setTimeout` animation, the editor cannot load saved workflows, and the Save/Validate buttons are non-functional. The backend correctly rejects invalid workflows, but the frontend never asks it.
 
 **Confirmed gaps → implementation status (all closed):**
 - Run button was entirely fabricated (setTimeout animation, zero API calls) → **REAL**: control-plane `POST /workflows/:id/run` → gateway admin `/run` → workflow runtime → provider, with the real envelope (request id, snapshot version, plan hash, output) shown in the UI; AbortController cancels the real request
@@ -105,12 +106,12 @@
 - Observability charts used Math.sin/cos fabricated time series → **honest** "No telemetry available" state
 - `fetchLanes()` and `validateWorkflow()` defined in api.ts but never called → **wired**: lanes page lists persisted lanes; Validate button calls the real endpoint
 
-**Success criteria — all met (see [PHASE6.5_IMPLEMENTATION_REPORT.md](../PHASE6.5_IMPLEMENTATION_REPORT.md)):**
+**Success criteria — all met (see [PHASE6.5_IMPLEMENTATION_REPORT.md](archive/PHASE6.5_IMPLEMENTATION_REPORT.md)):**
 - Every frontend page that shows domain data fetches it from the backend (no `relay-data.ts` in production code paths) ✅
 
 ## Phase 6.6 — Canonical Workflow Model + Editor Hardening (COMPLETE)
 
-**What was built:** Typed workflow model with canonical serialization from the React Flow canvas. The editor now emits a schema-contractually correct `workflow_json` through the `workflow-serializer.ts` module (kind/port mapping, lane folding, condition validation, reject-on-invalid editor state). Wire-compat tests (`crates/workflow-schema/tests/wire_compat.rs`) prove the web serializer's JSON parses through the Rust `workflow_schema` crate — no schema-contract drift is possible. See [PHASE6.6_REPORT.md](../PHASE6.6_REPORT.md).
+**What was built:** Typed workflow model with canonical serialization from the React Flow canvas. The editor now emits a schema-contractually correct `workflow_json` through the `workflow-serializer.ts` module (kind/port mapping, lane folding, condition validation, reject-on-invalid editor state). Wire-compat tests (`crates/workflow-schema/tests/wire_compat.rs`) prove the web serializer's JSON parses through the Rust `workflow_schema` crate — no schema-contract drift is possible. See [PHASE6.6_REPORT.md](archive/PHASE6.6_REPORT.md).
 - The Run button calls the real gateway execution path and surfaces actual results/errors ✅
 - The workflow editor loads a saved workflow version and reconstructs the React Flow canvas ✅
 - Empty/invalid workflows are rejected with a clear error (backed by the real `/validate` endpoint) ✅

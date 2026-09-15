@@ -1,7 +1,16 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { Pencil, Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { AppShell } from "@/components/relay/AppShell";
 import { KV, PageHeader, Panel, TableShell, Td } from "@/components/relay/primitives";
-import { useLanes } from "@/lib/use-workflow-publication";
+import {
+  useCreateLaneMutation,
+  useDeleteLaneMutation,
+  useLanes,
+  useUpdateLaneMutation,
+} from "@/lib/use-workflow-publication";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/lanes")({
   head: () => ({
@@ -19,13 +28,244 @@ export const Route = createFileRoute("/lanes")({
 
 function LanesPage() {
   const { data: lanes, isPending, isError, error } = useLanes();
+  const createLane = useCreateLaneMutation();
+  const updateLane = useUpdateLaneMutation();
+  const deleteLane = useDeleteLaneMutation();
+
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  // Form state for create + edit (shared shape).
+  const [formId, setFormId] = useState("");
+  const [endpoint, setEndpoint] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [egress, setEgress] = useState("direct");
+  const [policies, setPolicies] = useState("");
+
+  const resetForm = () => {
+    setFormId("");
+    setEndpoint("");
+    setBaseUrl("");
+    setEgress("direct");
+    setPolicies("");
+  };
+
+  const openAdd = () => {
+    resetForm();
+    setEditingId(null);
+    setAdding(true);
+  };
+
+  const openEdit = (l: { id: string; endpoint: string; base_url: string; egress: string; policies: string[] }) => {
+    setFormId(l.id);
+    setEndpoint(l.endpoint);
+    setBaseUrl(l.base_url);
+    setEgress(l.egress);
+    setPolicies(l.policies.join(", "));
+    setEditingId(l.id);
+    setAdding(false);
+  };
+
+  const submitCreate = () => {
+    if (!endpoint.trim() || !baseUrl.trim()) return;
+    const input: {
+      id?: string;
+      name: string;
+      project_id: string;
+      endpoint: string;
+      base_url: string;
+      egress?: string;
+      policies?: string[];
+    } = {
+      name: formId.trim() || endpoint.trim(),
+      project_id: "proj_default",
+      endpoint: endpoint.trim(),
+      base_url: baseUrl.trim(),
+      egress: egress.trim() || "direct",
+      policies: policies.split(",").map((p) => p.trim()).filter(Boolean),
+    };
+    if (formId.trim()) input.id = formId.trim();
+    createLane.mutate(input, {
+      onSuccess: () => {
+        toast.success(`Lane ${formId || endpoint} created`);
+        setAdding(false);
+        resetForm();
+      },
+      onError: (err) => toast.error(`Create failed — ${err.message}`),
+    });
+  };
+
+  const submitEdit = () => {
+    if (!editingId || !endpoint.trim() || !baseUrl.trim()) return;
+    updateLane.mutate(
+      {
+        id: editingId,
+        input: {
+          endpoint: endpoint.trim(),
+          base_url: baseUrl.trim(),
+          egress: egress.trim() || "direct",
+          policies: policies.split(",").map((p) => p.trim()).filter(Boolean),
+        },
+      },
+      {
+        onSuccess: () => {
+          toast.success(`Lane ${editingId} updated`);
+          setEditingId(null);
+          resetForm();
+        },
+        onError: (err) => toast.error(`Update failed — ${err.message}`),
+      },
+    );
+  };
+
+  const handleDelete = (id: string) => {
+    deleteLane.mutate(id, {
+      onSuccess: () => {
+        toast.success(`Lane ${id} deleted`);
+        setConfirmDelete(null);
+      },
+      onError: (err) => toast.error(`Delete failed — ${err.message}`),
+    });
+  };
+
+  const isWorking = createLane.isPending || updateLane.isPending || deleteLane.isPending;
 
   return (
     <AppShell>
       <PageHeader
         title="Lanes"
         subtitle="Persisted lane config only. Topology, health, latency and WireGuard state are not reported — there is no lane-health backend yet."
+        actions={
+          <button
+            onClick={() => (adding ? setAdding(false) : openAdd())}
+            disabled={isWorking}
+            className="focus-ring flex h-7 items-center gap-1.5 rounded-sm bg-primary px-2.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+          >
+            <Plus className="size-3.5" /> {adding ? "Cancel" : "Add lane"}
+          </button>
+        }
       />
+
+      {adding && (
+        <div className="border-b border-border bg-panel px-4 py-3">
+          <div className="max-w-3xl space-y-2">
+            <div className="grid gap-2 md:grid-cols-2">
+              <label className="block">
+                <span className="label-xs">Lane ID (optional)</span>
+                <input
+                  value={formId}
+                  onChange={(e) => setFormId(e.target.value)}
+                  placeholder="auto-generated if empty"
+                  className="mt-1 h-8 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+                />
+              </label>
+              <label className="block">
+                <span className="label-xs">Egress</span>
+                <input
+                  value={egress}
+                  onChange={(e) => setEgress(e.target.value)}
+                  placeholder="direct"
+                  className="mt-1 h-8 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+                />
+              </label>
+              <label className="block">
+                <span className="label-xs">Endpoint</span>
+                <input
+                  value={endpoint}
+                  onChange={(e) => setEndpoint(e.target.value)}
+                  placeholder="api.anthropic.com"
+                  className="mt-1 h-8 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+                />
+              </label>
+              <label className="block">
+                <span className="label-xs">Base URL</span>
+                <input
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  placeholder="https://api.anthropic.com"
+                  className="mt-1 h-8 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+                />
+              </label>
+              <label className="block md:col-span-2">
+                <span className="label-xs">Policies (comma-separated)</span>
+                <input
+                  value={policies}
+                  onChange={(e) => setPolicies(e.target.value)}
+                  placeholder="e.g. retry,timeout"
+                  className="mt-1 h-8 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+                />
+              </label>
+            </div>
+            <button
+              onClick={submitCreate}
+              disabled={!endpoint.trim() || !baseUrl.trim() || isWorking}
+              className="focus-ring h-7 rounded-sm bg-primary px-2.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+            >
+              Create lane
+            </button>
+            {createLane.isPending && <span className="num ml-2 text-[11px]">creating…</span>}
+          </div>
+        </div>
+      )}
+
+      {editingId && (
+        <div className="border-b border-border bg-panel px-4 py-3">
+          <div className="max-w-3xl space-y-2">
+            <div className="grid gap-2 md:grid-cols-2">
+              <label className="block">
+                <span className="label-xs">Endpoint</span>
+                <input
+                  value={endpoint}
+                  onChange={(e) => setEndpoint(e.target.value)}
+                  className="mt-1 h-8 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+                />
+              </label>
+              <label className="block">
+                <span className="label-xs">Base URL</span>
+                <input
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                  className="mt-1 h-8 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+                />
+              </label>
+              <label className="block">
+                <span className="label-xs">Egress</span>
+                <input
+                  value={egress}
+                  onChange={(e) => setEgress(e.target.value)}
+                  className="mt-1 h-8 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+                />
+              </label>
+              <label className="block">
+                <span className="label-xs">Policies (comma-separated)</span>
+                <input
+                  value={policies}
+                  onChange={(e) => setPolicies(e.target.value)}
+                  className="mt-1 h-8 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+                />
+              </label>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={submitEdit}
+                disabled={!endpoint.trim() || !baseUrl.trim() || isWorking}
+                className="focus-ring h-7 rounded-sm bg-primary px-2.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+              >
+                Save changes
+              </button>
+              <button
+                onClick={() => { setEditingId(null); resetForm(); }}
+                className="focus-ring h-7 rounded-sm border border-border px-2.5 text-xs text-muted-foreground hover:border-border-strong"
+              >
+                Cancel
+              </button>
+              {updateLane.isPending && <span className="num text-[11px]">saving…</span>}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="space-y-3 p-4">
         <Panel title="Lanes" dense>
           {isPending ? (
@@ -33,7 +273,7 @@ function LanesPage() {
           ) : isError ? (
             <div className="p-4 text-xs text-fail">control plane unreachable — {String(error)}</div>
           ) : lanes && lanes.length > 0 ? (
-            <TableShell head={["Lane", "Endpoint", "Base URL", "Egress", "Policies"]}>
+            <TableShell head={["Lane", "Endpoint", "Base URL", "Egress", "Policies", ""]}>
               {lanes.map((l) => (
                 <tr key={l.id} className="hover:bg-panel-raised/50">
                   <Td className="num font-medium">{l.id}</Td>
@@ -43,12 +283,48 @@ function LanesPage() {
                   <Td className="num text-muted-foreground">
                     {l.policies.length > 0 ? l.policies.join(", ") : "—"}
                   </Td>
+                  <Td className="text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        onClick={() => openEdit(l)}
+                        disabled={isWorking}
+                        className="focus-ring rounded-sm border border-border p-1 hover:border-primary hover:text-primary disabled:opacity-40"
+                      >
+                        <Pencil className="size-3" />
+                      </button>
+                      {confirmDelete === l.id ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleDelete(l.id)}
+                            disabled={isWorking}
+                            className="focus-ring rounded-sm border border-fail/40 bg-fail/10 px-1.5 py-0.5 text-[10px] text-fail hover:bg-fail/20"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => setConfirmDelete(null)}
+                            className="focus-ring rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:border-border-strong"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDelete(l.id)}
+                          disabled={isWorking}
+                          className="focus-ring rounded-sm border border-border p-1 hover:border-fail hover:text-fail disabled:opacity-40"
+                        >
+                          <Trash2 className="size-3" />
+                        </button>
+                      )}
+                    </div>
+                  </Td>
                 </tr>
               ))}
             </TableShell>
           ) : (
             <div className="p-4 text-xs text-muted-foreground">
-              no lanes persisted yet — create one from the control plane or a workflow lane node.
+              no lanes persisted yet — create one to start routing.
             </div>
           )}
         </Panel>

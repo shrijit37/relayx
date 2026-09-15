@@ -1,4 +1,5 @@
 # Phase 6.6 Reality Audit
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 **Date:** 2026-09-14
 **Auditor:** Adversarial QA / Verification Engineer

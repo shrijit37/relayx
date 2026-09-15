@@ -1,9 +1,10 @@
 # relay-x Current State
+> **Archived snapshot** — historical record, not current truth. Current state: [../state.md](../state.md).
 
 > **⚠️ DO NOT REFERENCE — superseded by Phase 5 (2026-09-12).** This file is a historical
 > snapshot and contains numerous outdated claims (test counts, feature status, missing
 > components that now exist). For the current implementation state, see
-> [`docs/state.md`](docs/state.md) (source of truth).
+> [`../state.md`](../state.md) (source of truth).
 
 **Audit date:** 2026-09-11
 **Test run:** 197 tests passing, 0 failing (at time of audit; **265 today**)
