@@ -289,6 +289,9 @@ pub struct WireWorkflow {
     pub workflow: workflow_schema::Workflow,
     /// Lane name → runtime lane config (base URL + optional auth header).
     pub lanes: std::collections::HashMap<String, WireLane>,
+    /// The ACTIVE version this workflow was compiled from (run identity).
+    #[serde(default)]
+    pub version: u64,
 }
 
 impl PublicationState {
@@ -332,7 +335,8 @@ impl PublicationState {
             .map_err(|e| format!("workflow '{}' failed to compile: {e}", wf.id))?;
             builder = builder
                 .with_lanes(lane_registry.clone())
-                .with_plan(wf.id.clone(), plan);
+                .with_plan(wf.id.clone(), plan)
+                .with_plan_version(wf.id.clone(), wf.version);
         }
 
         Ok(Arc::new(builder.build()))
@@ -377,6 +381,7 @@ pub fn admin_router_with_publication(
 ) -> axum::Router {
     use axum::extract::State;
     use axum::routing::{get, post};
+    use tokio_stream::StreamExt as _;
 
     /// Combined admin state: publication seam + auth key.
     #[derive(Clone)]
@@ -504,6 +509,14 @@ pub fn admin_router_with_publication(
         body: serde_json::Value,
     }
 
+    /// Optional query params on `/run`. `stream=true` requests SSE
+    /// token-by-token streaming instead of a buffered JSON envelope.
+    #[derive(serde::Deserialize)]
+    struct RunParams {
+        #[serde(default)]
+        stream: bool,
+    }
+
     /// Execute a workflow from the CURRENT published snapshot (compile-time
     /// validation, never a live draft). This is the frontend's Run contract:
     /// it reuses `execute_workflow` — the same path the proxy's workflow
@@ -512,11 +525,27 @@ pub fn admin_router_with_publication(
     /// that is not in the snapshot (unpublished or unknown) is a 404; a
     /// runtime failure (provider error, timeout, invalid plan) maps through
     /// the gateway's typed error → HTTP mapping to real 4xx/5xx.
+    ///
+    /// With `?stream=true` the response is `text/event-stream`: `token`
+    /// events carry text deltas as they arrive from the upstream provider,
+    /// followed by a final `done` event with the complete envelope (or an
+    /// `error` event on failure).
     async fn run(
         State(state): State<AdminState>,
         headers: http::HeaderMap,
+        req_uri: axum::http::Uri,
         axum::Json(req): axum::Json<RunRequest>,
-    ) -> Result<axum::Json<serde_json::Value>, crate::errors::GatewayError> {
+    ) -> Result<axum::response::Response, crate::errors::GatewayError> {
+        // Parse ?stream=true from the query string (URL-decode safe).
+        let params = RunParams {
+            stream: req_uri
+                .query()
+                .map(|q| {
+                    url::form_urlencoded::parse(q.as_bytes())
+                        .any(|(k, v)| k == "stream" && (v == "true" || v == "1"))
+                })
+                .unwrap_or(false),
+        };
         if check_auth(&headers, &state.api_key).is_err() {
             return Err(crate::errors::GatewayError::InvalidRequest {
                 status: http::StatusCode::UNAUTHORIZED,
@@ -569,6 +598,122 @@ pub fn admin_router_with_publication(
         // workflow executions from running indefinitely.
         let deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(120));
 
+        if params.stream {
+            let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
+            // When the browser aborts, this receiver's channel goes away; the
+            // stream then ends, and the run task cancels its token so the node
+            // runtime aborts the upstream request instead of streaming it to
+            // completion (token burn after cancel).
+            let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+            let wf_id = req.workflow_id.clone();
+            let wf_id2 = wf_id.clone();
+            let snap = snapshot.clone();
+            let pl = plan.clone();
+            let rid = request_id.clone();
+            let bb = body_bytes;
+
+            tokio::spawn(async move {
+                let cancel = tokio_util::sync::CancellationToken::new();
+
+                // Not-yet-cancelled flag shared with the completion block:
+                // once the browser aborts (receiver dropped), `tx.closed()`
+                // fires and the token cancels the in-flight upstream request.
+                let cancel_run = cancel.clone();
+
+                let result = tokio::select! {
+                    r = crate::execution::execute_workflow(
+                        &snap,
+                        &pl,
+                        bb,
+                        &wf_id,
+                        &rid,
+                        client,
+                        None,
+                        deadline,
+                        Some(tx.clone()),
+                        cancel_run,
+                    ) => r,
+                    _ = tx.closed() => {
+                        cancel.cancel();
+                        return;
+                    }
+                };
+
+                match result {
+                    Ok(response) => {
+                        let body_result =
+                            http_body_util::BodyExt::collect(response.into_body()).await;
+                        match body_result {
+                            Ok(collected) => {
+                                let bytes = collected.to_bytes();
+
+                                // Fail closed on non-JSON output: an unexpected
+                                // (non-JSON) body must not ship a successful done
+                                // with null output and mask corrupted data.
+                                let output: serde_json::Value = match serde_json::from_slice(&bytes)
+                                {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        let err = serde_json::json!({
+                                            "error": format!("workflow returned non-JSON output: {e}")
+                                        });
+                                        let wire = protocol_core::sse::format_sse_event(
+                                            &err.to_string(),
+                                            Some("error"),
+                                        );
+                                        let _ = tx.send(bytes::Bytes::from(wire)).await;
+                                        return;
+                                    }
+                                };
+                                let envelope = serde_json::json!({
+                                    "request_id": rid,
+                                    "workflow_id": wf_id2,
+                                    "workflow_version": snap.workflow_version_for(&wf_id2).unwrap_or(0),
+                                    "snapshot_version": snap.version(),
+                                    "plan_hash": snap.plan_hash_for(&wf_id2).unwrap_or_default(),
+                                    "output": output,
+                                });
+                                let wire = protocol_core::sse::format_sse_event(
+                                    &envelope.to_string(),
+                                    Some("done"),
+                                );
+                                let _ = tx.send(bytes::Bytes::from(wire)).await;
+                            }
+                            Err(e) => {
+                                let err = serde_json::json!({
+                                    "error": format!("failed to read response body: {e}")
+                                });
+                                let wire = protocol_core::sse::format_sse_event(
+                                    &err.to_string(),
+                                    Some("error"),
+                                );
+                                let _ = tx.send(bytes::Bytes::from(wire)).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err = serde_json::json!({"error": e.to_string()});
+                        let wire =
+                            protocol_core::sse::format_sse_event(&err.to_string(), Some("error"));
+                        let _ = tx.send(bytes::Bytes::from(wire)).await;
+                    }
+                }
+                // tx drops here → stream ends
+            });
+
+            let sse_body = axum::body::Body::from_stream(stream.map(Ok::<_, std::io::Error>));
+            let resp = axum::response::Response::builder()
+                .status(200)
+                .header(http::header::CONTENT_TYPE, "text/event-stream")
+                .header(http::header::CACHE_CONTROL, "no-cache")
+                .body(sse_body);
+            return resp.map_err(|e| {
+                crate::errors::GatewayError::Internal(format!("failed to build SSE response: {e}"))
+            });
+        }
+
+        // Buffered (non-streaming) path — unchanged.
         let response = crate::execution::execute_workflow(
             &snapshot,
             plan,
@@ -578,11 +723,11 @@ pub fn admin_router_with_publication(
             client,
             None,
             deadline,
+            None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await?;
 
-        // Stream the full body (bounded workflow output — the LLM response
-        // has already been folded server-side) into the run envelope.
         let body_bytes = http_body_util::BodyExt::collect(response.into_body())
             .await
             .map_err(|e| {
@@ -604,10 +749,12 @@ pub fn admin_router_with_publication(
             "status": "ok",
             "request_id": request_id,
             "workflow_id": req.workflow_id,
+            "workflow_version": snapshot.workflow_version_for(&req.workflow_id).unwrap_or(0),
             "snapshot_version": snapshot.version(),
             "plan_hash": snapshot.plan_hash_for(&req.workflow_id).unwrap_or_default(),
             "output": output,
-        })))
+        }))
+        .into_response())
     }
 
     axum::Router::new()

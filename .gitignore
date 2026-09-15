@@ -53,3 +53,8 @@ skills-lock.json
 .claude/skills/triage
 .claude/skills/wait-what
 .claude/skills/wayfinder
+
+# Tool-specific hook configs (not project code)
+.factory/
+.opencode/hook/
+.tmp-hook-probe.txt

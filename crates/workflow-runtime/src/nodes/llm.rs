@@ -19,7 +19,9 @@
 //! connection pool, decodes the response through the protocol engine, and
 //! returns the canonical response as JSON.
 
-use crate::context::ExecutionContext;
+use std::sync::Arc;
+
+use crate::context::{ExecutionContext, GatewayHttpClient};
 use crate::error::NodeError;
 use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
 use protocol_core::adapters::openai_chat;
@@ -39,26 +41,7 @@ pub async fn execute(
     // A lane-less LLM node is valid only when the registry has exactly one
     // lane (that lane is the unambiguous default). `None` with 0 or many
     // lanes is a configuration error, not a surprise "default" lookup.
-    let lane_id = match config.lane_id.clone() {
-        Some(id) => id,
-        None => {
-            let ids: Vec<&String> = ctx.lane_registry.iter().map(|(id, _)| id).collect();
-            match ids.as_slice() {
-                [single] => (*single).clone(),
-                [] => {
-                    return Err(NodeError::Internal(
-                        "LLM node has no lane_id and no lane is registered".into(),
-                    ));
-                }
-                _ => {
-                    return Err(NodeError::Internal(format!(
-                        "LLM node has no lane_id but {} lanes exist; a lane_id is required",
-                        ids.len()
-                    )));
-                }
-            }
-        }
-    };
+    let lane_id = resolve_lane_id(config, ctx)?;
 
     // Resolve the lane.
     let lane = ctx
@@ -66,19 +49,8 @@ pub async fn execute(
         .get(&lane_id)
         .ok_or_else(|| NodeError::Internal(format!("lane not found: {lane_id}")))?;
 
-    // Prefer the lane-bound connection pool (per-lane isolation); fall back to
-    // the shared client (Phase-1 single-pool deployments).
-    let client = match ctx
-        .lane_clients
-        .as_ref()
-        .and_then(|lc| lc.client_for_lane(&lane_id))
-    {
-        Some(c) => c,
-        None => ctx
-            .upstream_client
-            .clone()
-            .ok_or_else(|| NodeError::Internal("no upstream client configured".into()))?,
-    };
+    // Resolve the HTTP client (per-lane pool or shared fallback).
+    let client = resolve_client(ctx, &lane_id)?;
 
     tracing::debug!(
         node_id = %ctx.node_id,
@@ -96,93 +68,41 @@ pub async fn execute(
     let target_protocol = protocol_target(&protocol);
     let wire = encode_request(target_protocol, &canonical)?;
 
-    // Build the URL based on the target protocol.
-    let path = match target_protocol {
-        Protocol::OpenAiChatCompletions => "/v1/chat/completions",
-        Protocol::AnthropicMessages => "/v1/messages",
-        Protocol::OpenAiResponses => "/v1/responses",
-    };
-    let url = lane
-        .base_url
-        .join(path)
-        .map_err(|e| NodeError::Internal(format!("invalid lane URL: {e}")))?;
-
     // Build the HTTP request.
-    let mut builder = hyper::Request::builder()
-        .method(hyper::Method::POST)
-        .uri(url.as_str())
-        .header(http::header::CONTENT_TYPE, "application/json");
-    // Anthropic requires an explicit API version header.
-    if target_protocol == Protocol::AnthropicMessages {
-        builder = builder.header("anthropic-version", "2023-06-01");
-    }
-    // Attach the lane's resolved authorization header when the lane carries
-    // one (control-plane credential resolution, never in workflow JSON).
-    if let Some(auth) = &lane.authorization {
-        builder = builder.header(http::header::AUTHORIZATION, auth);
-    }
-    let req = builder
-        .body(axum::body::Body::from(wire))
-        .map_err(|e| NodeError::Internal(format!("failed to build request: {e}")))?;
+    let req = build_http_request(wire, lane, target_protocol)?;
 
-    // Send the request with timeout.
-    let response = tokio::select! {
-        result = client.request(req) => result,
-        _ = ctx.cancel_token.cancelled() => {
-            return Err(NodeError::Internal("cancelled".into()));
-        }
-    }
-    .map_err(|e| {
-        NodeError::Provider(protocol_core::error::ProtocolEngineError::ProviderError {
-            message: format!("upstream request failed: {e}"),
-        })
-    })?;
+    // Send the request with timeout and cancellation support.
+    let response = send_request_with_timeout(&client, req, &ctx.cancel_token).await?;
 
-    let status = response.status();
-
-    if !status.is_success() {
-        // Buffer the error body for a readable message, then surface it.
-        let body = http_body_util::BodyExt::collect(response.into_body())
-            .await
-            .map_err(|e| NodeError::Internal(format!("failed to read error body: {e}")))?
-            .to_bytes();
-        let body_text = String::from_utf8_lossy(&body).into_owned();
-        return Err(NodeError::Provider(
-            protocol_core::error::ProtocolEngineError::ProviderError {
-                message: format!("provider returned {status}: {body_text}"),
-            },
-        ));
-    }
-
-    let canonical_response = if config.stream {
-        decode_streamed_response_incremental(
-            axum::body::Body::new(response.into_body()),
+    if response.status().is_success() {
+        let canonical_response = decode_response_body(
+            response,
             &ctx.cancel_token,
+            ctx.deadline,
             target_protocol,
+            config.stream,
+            ctx.token_sender.clone(),
         )
-        .await?
+        .await?;
+
+        tracing::debug!(
+            node_id = %ctx.node_id,
+            response_id = %canonical_response.id,
+            model = %canonical_response.model,
+            content_blocks = canonical_response.content.len(),
+            "LLM node received response"
+        );
+
+        // Serialize the canonical response as JSON.
+        let json = serde_json::to_value(&canonical_response)
+            .map_err(|e| NodeError::Internal(format!("failed to serialize response: {e}")))?;
+
+        Ok(NodeOutput::message(RuntimeValue::Json(json)))
     } else {
-        // Non-streaming: buffer the full body, decode the JSON response.
-        let body = http_body_util::BodyExt::collect(response.into_body())
-            .await
-            .map_err(|e| NodeError::Internal(format!("failed to read response body: {e}")))?
-            .to_bytes();
-        decode_response(target_protocol, &body)?
-    };
-
-    tracing::debug!(
-        node_id = %ctx.node_id,
-        response_id = %canonical_response.id,
-        model = %canonical_response.model,
-        content_blocks = canonical_response.content.len(),
-        "LLM node received response"
-    );
-
-    // Serialize the canonical response as JSON.
-    let json = serde_json::to_value(&canonical_response)
-        .map_err(|e| NodeError::Internal(format!("failed to serialize response: {e}")))?;
-
-    Ok(NodeOutput::message(RuntimeValue::Json(json)))
+        // The admin /run handler reliably sends a terminal `error` SSE event
+        // for any Err, so the node layer must NOT emit its own duplicate.
+        Err(handle_error_response(response).await)
+    }
 }
 
 /// Resolve the protocol from configuration.
@@ -202,6 +122,176 @@ fn resolve_protocol(config: &LlmConfig) -> Option<Protocol> {
 /// The protocol the provider (target) speaks.
 fn protocol_target(source: &Protocol) -> Protocol {
     *source
+}
+
+/// Resolve the lane ID from configuration or registry.
+fn resolve_lane_id(config: &LlmConfig, ctx: &ExecutionContext) -> Result<String, NodeError> {
+    match config.lane_id.clone() {
+        Some(id) => Ok(id),
+        None => {
+            let ids: Vec<&String> = ctx.lane_registry.iter().map(|(id, _)| id).collect();
+            match ids.as_slice() {
+                [single] => Ok((*single).clone()),
+                [] => Err(NodeError::Internal(
+                    "LLM node has no lane_id and no lane is registered".into(),
+                )),
+                _ => Err(NodeError::Internal(format!(
+                    "LLM node has no lane_id but {} lanes exist; a lane_id is required",
+                    ids.len()
+                ))),
+            }
+        }
+    }
+}
+
+/// Resolve the HTTP client for a given lane.
+fn resolve_client(
+    ctx: &ExecutionContext,
+    lane_id: &str,
+) -> Result<Arc<GatewayHttpClient>, NodeError> {
+    // Prefer the lane-bound connection pool (per-lane isolation); fall back to
+    // the shared client (Phase-1 single-pool deployments).
+    match ctx
+        .lane_clients
+        .as_ref()
+        .and_then(|lc| lc.client_for_lane(lane_id))
+    {
+        Some(c) => Ok(c),
+        None => ctx
+            .upstream_client
+            .clone()
+            .ok_or_else(|| NodeError::Internal("no upstream client configured".into())),
+    }
+}
+
+/// Build an HTTP request for the given wire bytes, lane, and protocol.
+fn build_http_request(
+    wire: Vec<u8>,
+    lane: &crate::context::LaneEntry,
+    target_protocol: Protocol,
+) -> Result<hyper::Request<axum::body::Body>, NodeError> {
+    let path = match target_protocol {
+        Protocol::OpenAiChatCompletions => "/v1/chat/completions",
+        Protocol::AnthropicMessages => "/v1/messages",
+        Protocol::OpenAiResponses => "/v1/responses",
+    };
+    let url = lane
+        .base_url
+        .join(path)
+        .map_err(|e| NodeError::Internal(format!("invalid lane URL: {e}")))?;
+
+    let mut builder = hyper::Request::builder()
+        .method(hyper::Method::POST)
+        .uri(url.as_str())
+        .header(http::header::CONTENT_TYPE, "application/json");
+    // Anthropic requires an explicit API version header.
+    if target_protocol == Protocol::AnthropicMessages {
+        builder = builder.header("anthropic-version", "2023-06-01");
+    }
+    // Attach the lane's resolved authorization header when the lane carries
+    // one (control-plane credential resolution, never in workflow JSON).
+    if let Some(auth) = &lane.authorization {
+        builder = builder.header(http::header::AUTHORIZATION, auth);
+    }
+    builder
+        .body(axum::body::Body::from(wire))
+        .map_err(|e| NodeError::Internal(format!("failed to build request: {e}")))
+}
+
+/// Send an HTTP request with timeout and cancellation support.
+async fn send_request_with_timeout(
+    client: &GatewayHttpClient,
+    req: hyper::Request<axum::body::Body>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<hyper::Response<hyper::body::Incoming>, NodeError> {
+    tokio::select! {
+        result = client.request(req) => result,
+        _ = cancel.cancelled() => {
+            return Err(NodeError::Internal("cancelled".into()));
+        }
+    }
+    .map_err(|e| {
+        NodeError::Provider(protocol_core::error::ProtocolEngineError::ProviderError {
+            message: format!("upstream request failed: {e}"),
+        })
+    })
+}
+
+/// Buffer the error body of a failed response and surface it as a ProviderError.
+async fn handle_error_response(response: hyper::Response<hyper::body::Incoming>) -> NodeError {
+    let status = response.status();
+    let body = match http_body_util::BodyExt::collect(response.into_body()).await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => {
+            return NodeError::Internal(format!("failed to read error body: {e}"));
+        }
+    };
+    let body_text = String::from_utf8_lossy(&body).into_owned();
+    NodeError::Provider(protocol_core::error::ProtocolEngineError::ProviderError {
+        message: format!("provider returned {status}: {body_text}"),
+    })
+}
+
+/// Decode a successful response body into a canonical response.
+async fn decode_response_body(
+    response: hyper::Response<hyper::body::Incoming>,
+    cancel: &tokio_util::sync::CancellationToken,
+    deadline: Option<tokio::time::Instant>,
+    target_protocol: Protocol,
+    stream: bool,
+    wire_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+) -> Result<protocol_core::canonical::CanonicalResponse, NodeError> {
+    if stream {
+        return decode_streamed_response_incremental(
+            axum::body::Body::new(response.into_body()),
+            cancel,
+            deadline,
+            target_protocol,
+            wire_tx,
+        )
+        .await;
+    }
+    // Non-streaming: buffer the full body, decompress gzip, decode the JSON.
+    let body = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .map_err(|e| NodeError::Internal(format!("failed to read response body: {e}")))?
+        .to_bytes();
+
+    // Fail closed on non-JSON output (mirrors the buffered /run path): a
+    // silent null would mask corrupted upstream data.
+    let raw_bytes: Vec<u8> = if body.starts_with(b"\x1f\x8b") {
+        inflate(&body)?
+    } else {
+        body.to_vec()
+    };
+    let json: serde_json::Value = serde_json::from_slice(&raw_bytes).map_err(|e| {
+        NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
+            message: format!("invalid provider JSON response: {e}"),
+        })
+    })?;
+
+    if !json.is_object() && !json.is_array() {
+        return Err(NodeError::Provider(
+            protocol_core::error::ProtocolEngineError::InvalidPayload {
+                message: "provider returned non-object JSON response".into(),
+            },
+        ));
+    }
+
+    match &json {
+        // A 2xx with an `error` object is a streamable protocol-level error
+        // (OpenAI-style); surface it instead of treating it as success.
+        serde_json::Value::Object(o) if o.contains_key("error") && o.get("error").is_some() => {
+            return Err(NodeError::Provider(
+                protocol_core::error::ProtocolEngineError::ProviderError {
+                    message: format!("provider returned error at 2xx: {json}"),
+                },
+            ));
+        }
+        _ => {}
+    }
+
+    decode_response(target_protocol, json)
 }
 
 /// Build a canonical request from configuration and input.
@@ -396,18 +486,26 @@ fn encode_request(target: Protocol, canonical: &CanonicalRequest) -> Result<Vec<
 async fn decode_streamed_response_incremental(
     body: axum::body::Body,
     cancel: &tokio_util::sync::CancellationToken,
+    deadline: Option<tokio::time::Instant>,
     protocol: Protocol,
+    wire_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
 ) -> Result<protocol_core::canonical::CanonicalResponse, NodeError> {
     use protocol_core::sse::StreamingSseParser;
 
     let mut parser = StreamingSseParser::new();
-    let mut fold = StreamFold::new(protocol);
+    let mut fold = StreamFold::new(protocol, wire_tx);
 
     let mut stream = std::pin::pin!(body.into_data_stream());
     loop {
         // Bound each frame wait so a dead-but-open stream can't hang forever.
+        // Also enforce the run's ABSOLUTE deadline each frame: an upstream
+        // that keeps a stream alive one frame at a time (each under the 30s
+        // frame window) must not run past the workflow's overall deadline.
         let frame = tokio::select! {
             _ = cancel.cancelled() => return Err(NodeError::Internal("cancelled".into())),
+            _ = timeout_deadline(deadline) => {
+                return Err(NodeError::Internal("workflow deadline exceeded".into()))
+            }
             frame = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 tokio_stream::StreamExt::next(&mut stream),
@@ -417,7 +515,7 @@ async fn decode_streamed_response_incremental(
         match frame {
             Ok(Some(Ok(bytes))) => {
                 for event in parser.feed(&bytes) {
-                    fold.fold(&event);
+                    fold.fold(&event).await;
                 }
             }
             Ok(Some(Err(e))) => {
@@ -434,10 +532,19 @@ async fn decode_streamed_response_incremental(
         }
     }
     for event in parser.finish() {
-        fold.fold(&event);
+        fold.fold(&event).await;
     }
 
     fold.into_response()
+}
+
+/// A future that wakes when the run deadline is reached (or never, if none).
+async fn timeout_deadline(deadline: Option<tokio::time::Instant>) {
+    if let Some(d) = deadline {
+        tokio::time::sleep_until(d).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Accumulator for folding SSE events into a canonical response.
@@ -449,10 +556,12 @@ struct StreamFold {
     stop_reason: Option<protocol_core::canonical::FinishReason>,
     usage: Option<protocol_core::canonical::Usage>,
     tool_slots: std::collections::HashMap<u32, ToolAccum>,
+    /// Optional channel to forward raw SSE wire bytes for token-level streaming.
+    wire_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
 }
 
 impl StreamFold {
-    fn new(protocol: Protocol) -> Self {
+    fn new(protocol: Protocol, wire_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>) -> Self {
         Self {
             protocol,
             response_id: String::new(),
@@ -461,22 +570,53 @@ impl StreamFold {
             stop_reason: None,
             usage: None,
             tool_slots: std::collections::HashMap::new(),
+            wire_tx,
+        }
+    }
+
+    /// Emit a token SSE event through the wire channel, blocking on
+    /// backpressure instead of silently dropping tokens.
+    ///
+    /// Inlines the SSE wire format directly: pre-formatting avoids a
+    /// `serde_json::json!` + `to_string()` + `Bytes` allocation per token.
+    async fn emit_token(&self, delta: &str) {
+        if let Some(ref tx) = self.wire_tx {
+            // Worst case: every byte is escaped (\u00XX) → 6 bytes, plus
+            // the fixed SSE framing overhead of ~30 bytes.
+            let mut wire = Vec::with_capacity(delta.len() * 6 + 32);
+            wire.extend_from_slice(b"event: token\ndata: {\"delta\":\"");
+            for byte in delta.bytes() {
+                match byte {
+                    b'"' => wire.extend_from_slice(b"\\\""),
+                    b'\\' => wire.extend_from_slice(b"\\\\"),
+                    b'\n' => wire.extend_from_slice(b"\\n"),
+                    b'\r' => wire.extend_from_slice(b"\\r"),
+                    b'\t' => wire.extend_from_slice(b"\\t"),
+                    b if b < 0x20 => {
+                        // Control characters: \u00XX (4 hex digits, no ambiguity).
+                        wire.extend_from_slice(format!("\\u{:04x}", b).as_bytes());
+                    }
+                    b => wire.push(b),
+                }
+            }
+            wire.extend_from_slice(b"\"}\n\n");
+            let _ = tx.send(bytes::Bytes::from(wire)).await;
         }
     }
 
     /// Fold one parsed SSE event.
-    fn fold(&mut self, event: &protocol_core::sse::SseEvent) {
+    async fn fold(&mut self, event: &protocol_core::sse::SseEvent) {
         if event.is_done() {
             return;
         }
         match self.protocol {
-            Protocol::OpenAiResponses => self.fold_responses(event),
-            Protocol::AnthropicMessages => self.fold_anthropic(event),
-            Protocol::OpenAiChatCompletions => self.fold_chat(event),
+            Protocol::OpenAiResponses => self.fold_responses(event).await,
+            Protocol::AnthropicMessages => self.fold_anthropic(event).await,
+            Protocol::OpenAiChatCompletions => self.fold_chat(event).await,
         }
     }
 
-    fn fold_chat(&mut self, event: &protocol_core::sse::SseEvent) {
+    async fn fold_chat(&mut self, event: &protocol_core::sse::SseEvent) {
         use protocol_core::adapters::openai_chat::ChatCompletionChunk;
         let chunk: ChatCompletionChunk = match serde_json::from_str(&event.data) {
             Ok(c) => c,
@@ -510,6 +650,7 @@ impl StreamFold {
             }
             if let Some(delta) = &choice.delta.content {
                 self.text.push_str(delta);
+                self.emit_token(delta).await;
             }
             if let Some(tcs) = &choice.delta.tool_calls {
                 for tc in tcs {
@@ -539,7 +680,7 @@ impl StreamFold {
     /// discriminator: `message_start`, `content_block_delta`, `message_delta`,
     /// `message_stop`. Only text deltas / usage / stop are folded here; tool
     /// delta accumulation is delegated to the canonical fold path.
-    fn fold_anthropic(&mut self, event: &protocol_core::sse::SseEvent) {
+    async fn fold_anthropic(&mut self, event: &protocol_core::sse::SseEvent) {
         use protocol_core::adapters::anthropic_messages::MessagesStreamEvent;
         let parsed: MessagesStreamEvent = match serde_json::from_str(&event.data) {
             Ok(e) => e,
@@ -553,7 +694,10 @@ impl StreamFold {
             MessagesStreamEvent::ContentBlockDelta { delta, .. } => {
                 use protocol_core::adapters::anthropic_messages::MessagesDelta;
                 match delta {
-                    MessagesDelta::TextDelta { text } => self.text.push_str(&text),
+                    MessagesDelta::TextDelta { text } => {
+                        self.text.push_str(&text);
+                        self.emit_token(&text).await;
+                    }
                     MessagesDelta::InputJsonDelta { partial_json } => {
                         // Tool-call JSON accumulation — store for later parsing.
                         if let Some(last) = self.tool_slots.values_mut().last() {
@@ -587,7 +731,7 @@ impl StreamFold {
     /// Fold an OpenAI Responses stream event. Responses events use
     /// `response.output_text.delta` for text deltas and
     /// `response.completed` for usage / final status.
-    fn fold_responses(&mut self, event: &protocol_core::sse::SseEvent) {
+    async fn fold_responses(&mut self, event: &protocol_core::sse::SseEvent) {
         use protocol_core::adapters::openai_responses::ResponsesStreamEvent;
         let parsed: ResponsesStreamEvent = match serde_json::from_str(&event.data) {
             Ok(e) => e,
@@ -611,6 +755,7 @@ impl StreamFold {
                     && !text.is_empty()
                 {
                     self.text.push_str(&text);
+                    self.emit_token(&text).await;
                 }
             }
             _ => {}
@@ -663,15 +808,25 @@ struct ToolAccum {
     args: String,
 }
 
-/// Decode a canonical response from the target protocol response body.
+/// Decompress a gzip payload (some providers deliver gzipped response bodies
+/// even without an explicit Content-Encoding, e.g. OpenAI Responses).
+fn inflate(compressed: &[u8]) -> Result<Vec<u8>, NodeError> {
+    let mut decoder = flate2::read::GzDecoder::new(compressed);
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut out)
+        .map_err(|e| NodeError::Internal(format!("failed to decompress gzip response: {e}")))?;
+    Ok(out)
+}
+
+/// Decode a canonical response from the target protocol response JSON.
 fn decode_response(
     target: Protocol,
-    body: &[u8],
+    payload: serde_json::Value,
 ) -> Result<protocol_core::canonical::CanonicalResponse, NodeError> {
     match target {
         Protocol::OpenAiChatCompletions => {
-            let resp: openai_chat::ChatCompletionResponse =
-                serde_json::from_slice(body).map_err(|e| {
+            let resp: openai_chat::ChatCompletionResponse = serde_json::from_value(payload)
+                .map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid OpenAI Chat response: {e}"),
                     })
@@ -680,7 +835,7 @@ fn decode_response(
         }
         Protocol::AnthropicMessages => {
             let resp: protocol_core::adapters::anthropic_messages::MessagesResponse =
-                serde_json::from_slice(body).map_err(|e| {
+                serde_json::from_value(payload).map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid Anthropic Messages response: {e}"),
                     })
@@ -689,7 +844,7 @@ fn decode_response(
         }
         Protocol::OpenAiResponses => {
             let resp: protocol_core::adapters::openai_responses::ResponsesResponse =
-                serde_json::from_slice(body).map_err(|e| {
+                serde_json::from_value(payload).map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid OpenAI Responses response: {e}"),
                     })

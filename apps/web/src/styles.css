@@ -220,16 +220,34 @@
 }
 
 .relay-canvas .react-flow__handle {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  background: var(--color-panel-raised);
-  border: 1px solid var(--color-border-strong);
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-panel);
+  border: 2px solid var(--color-border-strong);
+  transition: all 0.15s ease;
 }
 
-.relay-canvas .react-flow__handle:hover {
+.relay-canvas .react-flow__handle::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+  pointer-events: all;
+}
+
+.relay-canvas .react-flow__handle:hover,
+.relay-canvas .react-flow__handle.connecting {
+  width: 14px;
+  height: 14px;
   border-color: var(--color-primary);
   background: var(--color-primary);
+  box-shadow: 0 0 0 3px oklch(0.6 0.18 270 / 20%);
+}
+
+.relay-canvas .react-flow__connection-line {
+  stroke: var(--color-primary);
+  stroke-width: 2;
 }
 
 .relay-canvas .react-flow__attribution {

@@ -47,7 +47,7 @@ const categories: { name: string; items: { kind: NodeKind; label: string; hint: 
   },
 ];
 
-export function NodeLibrary({ className }: { className?: string }) {
+export function NodeLibrary({ className, onAdd }: { className?: string; onAdd?: (kind: string) => void }) {
   const [q, setQ] = useState("");
   const query = q.trim().toLowerCase();
 
@@ -83,6 +83,7 @@ export function NodeLibrary({ className }: { className?: string }) {
                   <li key={i.kind}>
                     <div
                       draggable
+                      onClick={() => onAdd?.(i.kind)}
                       onDragStart={(e) => {
                         e.dataTransfer.setData("application/relay-node", i.kind);
                         e.dataTransfer.effectAllowed = "move";

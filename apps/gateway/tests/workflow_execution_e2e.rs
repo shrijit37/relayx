@@ -186,6 +186,7 @@ workflow_id = "{workflow_id}"
         workflows: vec![WireWorkflow {
             id: workflow_id.into(),
             workflow,
+            version: 1,
             lanes: lanes
                 .iter()
                 .map(|(k, v)| {

@@ -45,6 +45,10 @@ pub struct ExecutionContext {
     pub snapshot: Option<Arc<crate::snapshot::RuntimeSnapshot>>,
     /// Optional reporter of execution milestones.
     pub reporter: Arc<dyn crate::milestone::MilestoneReporter>,
+    /// Optional SSE wire-bytes sender for token-level streaming.
+    /// When present, LLM nodes send formatted SSE token deltas through
+    /// this channel as they arrive from upstream providers.
+    pub token_sender: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
 }
 
 /// What snapshot/plan state an execution carries.
@@ -54,6 +58,8 @@ pub struct ExecutionMetadata {
     pub snapshot_version: u64,
     /// Plan hash of the compiled workflow.
     pub plan_hash: String,
+    /// The workflow's own version (the ACTIVE version being executed).
+    pub workflow_version: u64,
 }
 
 impl ExecutionMetadata {
@@ -65,6 +71,7 @@ impl ExecutionMetadata {
                 .plan_hash_for(workflow_id)
                 .unwrap_or_default()
                 .to_owned(),
+            workflow_version: snapshot.workflow_version_for(workflow_id).unwrap_or(0),
         }
     }
 }
@@ -178,6 +185,7 @@ impl ExecutionContext {
             metadata: ExecutionMetadata::default(),
             snapshot: None,
             reporter: Arc::new(crate::milestone::NoopReporter),
+            token_sender: None,
         }
     }
 
@@ -198,6 +206,7 @@ impl ExecutionContext {
             metadata: self.metadata.clone(),
             snapshot: self.snapshot.clone(),
             reporter: self.reporter.clone(),
+            token_sender: self.token_sender.clone(),
         }
     }
 }

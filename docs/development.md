@@ -48,7 +48,8 @@ cd apps/web
 bun install
 bun run dev       # Vite dev server with TanStack Start SSR
 bun run build     # Production build to .output/
-bun test          # Serializer + run-state reducer tests
+bun run typecheck # tsc --noEmit
+bun test          # Serializer + run-state reducer + WorkflowBuilder interaction tests
 ```
 
 ### Control plane (apps/control-plane)
@@ -67,6 +68,8 @@ bun test          # Integration tests (real Postgres + in-process mock gateway)
 - Rust stable (1.88+) via `rustup`
 - Postgres 16 for the control plane (infra/docker/compose.dev.yml)
 - `scripts/dev.sh` brings up mock upstream + gateway + control plane + Postgres
+- `scripts/logs.sh` merges all service logs into a single color-coded stream
+- `cargo-watch` (for auto-rebuild; `cargo install cargo-watch`)
 
 ### Build
 
@@ -90,8 +93,18 @@ The editor talks to the control plane (`:9091`); the control plane talks to the
 gateway admin API (`:9090` for `/validate`, `/publish`, `/run`) for publication
 and execution:
 
-1. Start Postgres + mock upstream + gateway + control plane (`scripts/dev.sh`).
-2. `cd apps/web && bun run dev` → editor on `:5173`.
+1. Start Postgres + mock upstream + gateway + control plane + web (`scripts/dev.sh`).
+   The Rust services run under `cargo watch`: they build on first start and
+   rebuild + restart automatically on any source change. The control plane runs
+   `bun run dev` (bun's own `--watch`), and web hot-reloads via Vite, so the
+   whole stack adapts to edits without restarting the script.
+   Watch all services together with `scripts/logs.sh` (or filter to specific
+   ones, e.g. `scripts/logs.sh gateway web`). Every service is followed live
+   with a service label, locale-formatted timestamp, and severity coloring
+   (errors red, warnings yellow); control-plane pino JSON is reduced to
+   readable `[level] message` lines. Missing log files are polled until they
+   appear, so the viewer can be started before `dev.sh`.
+2. Open the editor on `:5173`.
 3. **Create** a workflow in the editor (Save in `new` mode creates the durable
    workflow row, then navigates to `/workflows/<real-id>`).
 4. **Load** — the editor deserializes `latest.workflow_json` from the control
@@ -141,15 +154,25 @@ cargo clippy --all-targets --all-features --workspace -- -D warnings
 
 `.github/workflows/ci.yml` runs on push to `master`/`main` and all PRs:
 
+### Rust job
+
 1. **Rust policy check** — forbidden patterns (unwrap, expect, todo, dead_code suppression)
 2. **Format check** — `cargo fmt --check`
 3. **Clippy** — `cargo clippy -- -D warnings`
 4. **Test** — `cargo test --all-features --workspace`
 
+### Web job
+
+1. **Typecheck** — `tsc --noEmit` (via `bun run typecheck`)
+2. **Lint (changed files only)** — `eslint` on PR-diffed `.ts`/`.tsx` files (repo-wide lint has pre-existing prettier debt; scoped to PR scope prevents false-red CI)
+3. **Test** — `bun test` (workflow-serializer + run-state reducer + WorkflowBuilder interaction tests, runs in happy-dom)
+4. **Build** — `vite build` (production bundle check)
+
 Features:
+
 - Actions pinned to full commit SHAs (supply-chain security)
 - `permissions: contents: read` (least-privilege)
-- `timeout-minutes: 30` (hung test protection)
+- `timeout-minutes: 30` (Rust), `timeout-minutes: 20` (web)
 - `concurrency` group with cancel-in-progress for PRs
 
 ## Rust policy
@@ -157,6 +180,7 @@ Features:
 Enforced by `.claude/hooks/check-rust-policy.sh` (also runs as git pre-commit hook):
 
 **Prohibited** (in all `.rs` files):
+
 - `#[allow(dead_code)]` / `#[expect(dead_code)]`
 - `todo!()` / `unimplemented!()`
 - `.unwrap()` / `.expect(...)`
@@ -173,12 +197,12 @@ Breaking changes require an ADR and migration plan.
 
 `crates/mock-upstream` supports:
 
-| Feature | Config |
-|---------|--------|
-| JSON mode | `--mode json --json-body '{"ok":true}'` |
-| SSE mode | `--mode sse --chunks 10 --chunk-size 512` |
-| TTFB delay | `--ttfb-ms 5000` |
-| Chunk delay | `--chunk-delay-ms 100` |
+| Feature         | Config                                            |
+| --------------- | ------------------------------------------------- |
+| JSON mode       | `--mode json --json-body '{"ok":true}'`           |
+| SSE mode        | `--mode sse --chunks 10 --chunk-size 512`         |
+| TTFB delay      | `--ttfb-ms 5000`                                  |
+| Chunk delay     | `--chunk-delay-ms 100`                            |
 | Error injection | `x-mock-error-at` / `x-mock-error-status` headers |
 
 Counters exposed at `/stats`: `requests_served`, `connections_accepted`, `bytes_sent`.

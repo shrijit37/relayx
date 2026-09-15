@@ -94,7 +94,7 @@ const LLM_FIELDS: FieldDef[] = [
   { name: "stream", label: "Streaming", type: "boolean", default: true },
 ];
 
-const EMPTY_LLM: LlmRequestConfig = { stream: true };
+const EMPTY_LLM: LlmRequestConfig = { temperature: 0.2, maxTokens: 1024, stream: true };
 
 const INPUT_PORT_TYPES = [
   { value: "message", label: "Message" },

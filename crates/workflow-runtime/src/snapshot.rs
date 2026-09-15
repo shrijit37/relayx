@@ -23,6 +23,10 @@ pub struct RuntimeSnapshot {
     wall_version: u64,
     /// Pre-compiled workflow plans keyed by workflow id.
     plans: HashMap<String, Arc<ExecutionPlan>>,
+    /// The workflow version each plan was compiled from (id → version), so a
+    /// run can report the exact ACTIVE version it executed. Defaults to 0 when
+    /// the compile path does not carry a version (pure-proxy/fast-path tests).
+    workflow_versions: HashMap<String, u64>,
     /// Registered lanes.
     lanes: Arc<LaneRegistry>,
     /// Registered providers.
@@ -37,6 +41,7 @@ impl RuntimeSnapshot {
         Self {
             wall_version,
             plans: HashMap::new(),
+            workflow_versions: HashMap::new(),
             lanes: Arc::new(LaneRegistry::new()),
             providers: HashMap::new(),
             published_at: Instant::now(),
@@ -56,6 +61,12 @@ impl RuntimeSnapshot {
     /// Get the plan hash for a workflow id (for observability).
     pub fn plan_hash_for(&self, workflow_id: &str) -> Option<&str> {
         self.plans.get(workflow_id).map(|p| p.plan_hash())
+    }
+
+    /// The workflow version a plan was compiled from (the ACTIVE version
+    /// executed); 0 when the publish path did not carry a version.
+    pub fn workflow_version_for(&self, workflow_id: &str) -> Option<u64> {
+        self.workflow_versions.get(workflow_id).copied()
     }
 
     /// All compiled workflow ids in this snapshot.
@@ -98,6 +109,7 @@ impl RuntimeSnapshot {
 pub struct RuntimeSnapshotBuilder {
     wall_version: u64,
     plans: HashMap<String, Arc<ExecutionPlan>>,
+    workflow_versions: HashMap<String, u64>,
     lanes: Arc<LaneRegistry>,
     providers: HashMap<String, Arc<ProviderEntry>>,
 }
@@ -108,6 +120,7 @@ impl RuntimeSnapshotBuilder {
         Self {
             wall_version,
             plans: HashMap::new(),
+            workflow_versions: HashMap::new(),
             lanes: Arc::new(LaneRegistry::new()),
             providers: HashMap::new(),
         }
@@ -125,6 +138,18 @@ impl RuntimeSnapshotBuilder {
         self
     }
 
+    /// Record the workflow version a plan was compiled from (the ACTIVE
+    /// version), so runs report the exact version executed.
+    pub fn with_plan_version(
+        mut self,
+        workflow_id: impl Into<String>,
+        workflow_version: u64,
+    ) -> Self {
+        self.workflow_versions
+            .insert(workflow_id.into(), workflow_version);
+        self
+    }
+
     /// Register a provider entry.
     pub fn with_provider(mut self, entry: ProviderEntry) -> Self {
         self.providers.insert(entry.id.clone(), Arc::new(entry));
@@ -136,6 +161,7 @@ impl RuntimeSnapshotBuilder {
         RuntimeSnapshot {
             wall_version: self.wall_version,
             plans: self.plans,
+            workflow_versions: self.workflow_versions,
             lanes: self.lanes,
             providers: self.providers,
             published_at: Instant::now(),

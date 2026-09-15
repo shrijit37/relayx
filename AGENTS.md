@@ -1,187 +1,107 @@
-# AGENTS.md — Repository Agent Guide
+# Repository Guidelines
 
-## Mission
+## Project Overview
 
-Build a production-grade AI gateway that makes complex routing, networking, protocol translation, MCP, skills, and workflow execution composable without imposing meaningful gateway overhead on the normal LLM request path.
+relay-x is an ultra-low-latency, visual, programmable AI gateway/orchestrator. It routes LLM traffic between clients and providers (Anthropic, OpenAI), performs loss-aware protocol translation, executes compiled workflows, and provides a visual editor built on React Flow.
 
-## First principles
+The architecture is split into a **data plane** (Rust, hot path) and a **control plane** (TypeScript, configuration).
 
-### 1. Fast path first
-
-The common request should look roughly like:
+## Project Structure
 
 ```text
-request
-  -> authenticate
-  -> resolve immutable config snapshot
-  -> select lane
-  -> acquire pooled upstream connection
-  -> translate minimally
-  -> stream
+apps/
+  gateway/              Rust data plane — the performance-critical proxy runtime
+  control-plane/        TypeScript/Fastify API — workflows, providers, credentials, runs
+  web/                  React/React Flow visual editor (TanStack Start)
+crates/
+  protocol-core/        Canonical protocol model + adapters (OpenAI, Anthropic, Responses)
+  workflow-schema/      Workflow definition types + graph validation
+  workflow-runtime/     Node execution engine + compiler + snapshots
+  mock-upstream/        Configurable mock LLM for tests and benchmarks
+  test-harness/         In-process gateway + mock spawn helpers
+docs/                   Architecture, ADRs, specs, phase reports
+scripts/                Dev stack launcher, log viewer, demo scripts
 ```
 
-Avoid unnecessary:
+## Build, Test, and Development Commands
 
-- database access
-- filesystem access
-- discovery calls
-- process spawning
-- dynamic code loading
-- JSON encode/decode cycles
-- full-body buffering
-- lock contention
+### Rust workspace (data plane)
 
-### 2. Control plane vs data plane
-
-Control plane:
-- creates providers/endpoints/lanes
-- stores workflow definitions
-- manages credentials and policy
-- indexes MCP/skills
-- compiles workflow versions
-- exposes admin APIs
-
-Data plane:
-- serves LLM traffic
-- executes compiled plans
-- handles streaming
-- applies policy
-- selects endpoints/lanes
-- performs protocol adaptation
-- executes permitted tools/connectors
-
-### 3. Workflow graph is source, not runtime
-
-React Flow state must compile into a canonical, validated IR. The data plane should consume the compiled plan, not inspect UI-specific node state.
-
-### 4. Preserve semantics
-
-Translation layers must preserve, where supported:
-
-- messages/content blocks
-- roles
-- tool calls/results
-- tool IDs
-- streaming events
-- structured outputs
-- reasoning/thought signatures where applicable
-- citations/annotations
-- cache hints
-- deferred tool references
-- provider-specific extensions
-
-If exact translation is impossible, report capability loss explicitly.
-
-## Common implementation tasks
-
-### Adding a provider
-
-1. Define capability matrix.
-2. Add protocol adapter.
-3. Add request/response streaming translator.
-4. Add provider-specific extension preservation.
-5. Add conformance fixtures.
-6. Add health-check strategy.
-7. Add lane configuration.
-8. Add observability fields.
-9. Benchmark against direct provider access.
-
-### Adding a network lane
-
-1. Define lane identity.
-2. Attach endpoint and network route.
-3. Pre-establish/reuse connection pools.
-4. Add health signals.
-5. Add routing policy.
-6. Add failure and failover semantics.
-7. Verify secret isolation.
-8. Verify DNS and egress behavior.
-
-### Adding MCP discovery
-
-1. Index lightweight metadata.
-2. Retrieve candidates.
-3. Apply policy filters.
-4. Load schemas only when required.
-5. Preserve deferred-tool semantics.
-6. Cache stable metadata.
-7. Record retrieval misses for evaluation.
-
-### Adding a Skill
-
-Use progressive disclosure:
-
-```text
-metadata -> skill instructions -> references/scripts/resources
+```bash
+cargo build --all-features --workspace    # Build everything
+cargo test --all-features --workspace     # Run all Rust tests
+cargo fmt --check                         # Check formatting
+cargo clippy --all-targets --all-features --workspace -- -D warnings  # Lint
+cargo bench --bench proxy_latency -p relay-gateway  # Benchmarks
+./.claude/hooks/check-rust-policy.sh --all          # Rust policy enforcement
 ```
 
-A Skill is procedural guidance/capability context, not a replacement for an executable tool.
+### Frontend (apps/web)
 
-## Testing expectations
+```bash
+cd apps/web
+bun install
+bun run dev          # Vite dev server (port 5173)
+bun run build        # Production build
+bun run typecheck    # TypeScript type checking
+bun test             # Workflow serializer + run-state + interaction tests
+```
 
-All major changes should add tests in the most local package plus integration tests when crossing a boundary.
+### Control plane (apps/control-plane)
 
-Important test categories:
+```bash
+cd apps/control-plane
+bun install
+bun run dev          # Fastify API on :9091 (requires Postgres)
+bun test             # Integration tests against real Postgres
+```
 
-- unit
-- protocol conformance
-- streaming
-- property-based translation tests
-- fault injection
-- load/concurrency
-- network lane isolation
-- security authorization
-- workflow compilation determinism
-- retrieval precision/recall
+### Full local stack
 
-## Performance expectations
+```bash
+scripts/dev.sh       # Starts Postgres, mock upstream, gateway, control plane, web
+scripts/logs.sh      # Merged color-coded log viewer for all services
+```
 
-Track:
+## Coding Style
 
-- gateway p50/p95/p99 overhead
-- time to first byte/event
-- streaming throughput
-- connection reuse ratio
-- allocations/request
-- CPU/request
-- memory under concurrency
-- translation cost
-- discovery cache hit rate
-- retrieval miss rate
+- **Rust**: Stable 1.88+, edition 2024, `rustfmt` with 100-char max width. No `.unwrap()`, `.expect()`, `todo!()`, `unimplemented!()`, or `#[allow(dead_code)]` in production code (`.unwrap()` and `.expect()` are allowed in tests). See `rustfmt.toml` and the full policy below.
+- **TypeScript**: 4-space indentation, LF line endings. Frontend uses Bun for package management and testing.
+- **Formatting**: EditorConfig is configured (`.editorconfig`). Spaces, 4-space indent for code, 2-space for TOML/YAML/JSON.
+- **Modules**: Keep them small and explicit. Prefer typed domain models over untyped JSON. Make failure behavior explicit. Avoid hidden global state in the data plane.
 
-Never optimize based on intuition alone when a benchmark can isolate the bottleneck.
+### Rust engineering policy
 
-## Rust engineering policy
+The following are **prohibited** in all `.rs` files (except tests for `.unwrap()` and `.expect()`):
 
-Forbidden unless the user explicitly authorizes an exception:
-
-- `#[allow(dead_code)]` / `#![allow(dead_code)]` / `#[expect(dead_code)]`
+- `#[allow(dead_code)]` / `#[expect(dead_code)]`
 - `todo!()` / `unimplemented!()`
 - `.unwrap()` / `.expect(...)`
 
-Do not hide dead code with `unused` allows. Other narrowly scoped `#[allow(...)]` (FFI, generated code, false positives) is allowed. Fix the underlying issue; do not weaken lints or invent a new escape hatch.
+Fix the underlying issue instead. Narrow, item-scoped `#[allow(...)]` for FFI, generated code, or documented false positives is permitted. Enforcement runs via `.claude/hooks/check-rust-policy.sh` and CI.
 
-The checker is `.claude/hooks/check-rust-policy.sh`. CI runs it with `--all`.
+## Testing Guidelines
 
-## Documentation synchronization
+- **Frameworks**: Rust `cargo test` with `#[tokio::test]` for async; frontend uses `bun test` with `happy-dom` and `@testing-library/react`.
+- **Test categories**: Unit, protocol conformance, streaming boundary, property-based, integration, fault injection, load/concurrency, and security authorization.
+- **Run all tests**: `cargo test --all-features --workspace` (Rust) and `bun test` (frontend).
+- **CI runs on every PR**: Rust policy check, format, clippy, tests; frontend typecheck, lint (changed files only), tests, build.
+- **Conformance**: Every protocol adapter must have conformance tests. Translation correctness matters more than feature count.
+- **Test helpers**: `crates/test-harness` provides `spawn_gateway()`, `spawn_json_stack()`, `spawn_sse_stack()`, and HTTP client utilities. `crates/mock-upstream` supports SSE, JSON, TTFB delays, chunk delays, and error injection.
 
-Keep the documentation in realtime sync with the actual repository state. After every meaningful change:
+## Commit & Pull Request Guidelines
 
-1. **Files created or removed** — update `docs/state.md` (implementation phases) and, if the repository layout changed, `docs/development.md`.
-2. **Roadmap feature completed** — check the corresponding box in `docs/roadmap.md`.
-3. **Architectural decision changed or added** — update the "Current decisions" table in `docs/state.md` and create or append an ADR in `docs/adr-*.md`.
-4. **Build / test / lint setup changed** — update `docs/development.md`.
-5. **Claude Code config changed** (hooks, skills, agents, MCP servers) — update the "Claude Code Automation" table in `docs/state.md`.
-6. **Stack or framework choice changed** — update `docs/adr-0001-stack.md` and the relevant spec docs.
+- **Commit messages**: Use imperative mood. Prefix with a scope tag in parentheses when applicable: `fix(gateway):`, `feat(protocol-core):`, `fix(control-plane):`, `test:`, `docs:`.
+- **CI must pass**: All Rust and frontend checks (policy, fmt, clippy, tests, typecheck, build) must be green before merging.
+- **Keep PRs focused**: Each PR should address a single concern. Cross-boundary changes (data plane + control plane + frontend) should clearly describe the integration points.
+- **Documentation sync**: When implementation differs from docs, update the documentation in the same change. Key files: `docs/state.md`, `docs/development.md`, `docs/roadmap.md`.
+- **Definition of done**: A change is not complete when it merely compiles. For gateway-path changes, verify functional correctness, streaming correctness, protocol fidelity, hot-path performance, failure behavior, security implications, and tests for happy and adversarial cases.
 
-Never leave documentation describing a state that no longer matches the codebase. When implementation differs from documentation, update the documentation in the same change.
+## Architecture Essentials
 
-## Do not do
-
-- Do not make every node type a remote service.
-- Do not introduce a queue into synchronous LLM streaming without a concrete need.
-- Do not persist every event synchronously before returning it to the client.
-- Do not force all providers into one lowest-common-denominator protocol.
-- Do not allow arbitrary MCP/tool execution without policy boundaries.
-- Do not install arbitrary runtime plugins from the internet on behalf of an agent without explicit sandbox/security design.
-- Do not silence `dead_code` or use `todo!` / `unimplemented!` / `.unwrap()` / `.expect()` to make a Rust build pass.
+- **Control plane vs data plane**: Control plane is slow path (configuration, storage). Data plane is hot path (serving traffic). Never add a database round trip to the hot path.
+- **Streaming is first-class**: Do not buffer complete LLM responses unless the workflow explicitly requires it.
+- **Workflow graph is source, not runtime**: React Flow state compiles to a canonical IR. The data plane executes the compiled plan, not UI-specific node state.
+- **Preserve provider semantics**: Do not flatten provider protocols into a lowest-common-denominator schema. Preserve provider-native extensions.
+- **Security boundaries are explicit**: Secrets, network lanes, MCP permissions, tool permissions, and workflow execution must be policy-controlled.
+- **Full architecture docs**: Read `docs/architecture.md`, `docs/state.md`, and `docs/adr-*.md` before making architectural changes.

@@ -171,6 +171,7 @@ workflow_id = "wf6"
         workflows: vec![WireWorkflow {
             id: "wf6".into(),
             workflow: llm_workflow("lane-a", true),
+            version: 1,
             lanes: std::collections::HashMap::from([(
                 "lane-a".into(),
                 WireLane {
@@ -334,6 +335,7 @@ workflow_id = "wf6"
         workflows: vec![WireWorkflow {
             id: "wf6".into(),
             workflow: llm_workflow("lane-a", false),
+            version: 1,
             lanes: std::collections::HashMap::from([(
                 "lane-a".into(),
                 WireLane {
@@ -355,6 +357,7 @@ workflow_id = "wf6"
         workflows: vec![WireWorkflow {
             id: "wf6".into(),
             workflow: llm_workflow("bad-lane", true),
+            version: 1,
             lanes: std::collections::HashMap::from([(
                 "bad-lane".into(),
                 WireLane {

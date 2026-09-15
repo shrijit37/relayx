@@ -82,6 +82,7 @@ fn wire_snapshot(version: u64) -> WireSnapshot {
         workflows: vec![WireWorkflow {
             id: "echo-wf".into(),
             workflow: passthrough_workflow(),
+            version: 1,
             lanes: std::collections::HashMap::new(),
         }],
     }
@@ -264,6 +265,7 @@ async fn published_lanes_carry_resolved_authorization() {
         workflows: vec![WireWorkflow {
             id: "echo-wf".into(),
             workflow: passthrough_workflow(),
+            version: 1,
             lanes: std::collections::HashMap::from([(
                 "lane-a".into(),
                 relay_gateway::observability::WireLane {
@@ -300,6 +302,7 @@ async fn published_lanes_carry_resolved_authorization() {
         workflows: vec![WireWorkflow {
             id: "echo-wf".into(),
             workflow: passthrough_workflow(),
+            version: 1,
             lanes: std::collections::HashMap::from([(
                 "lane-a".into(),
                 relay_gateway::observability::WireLane {

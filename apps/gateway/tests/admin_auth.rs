@@ -70,6 +70,7 @@ fn wire_snapshot() -> relay_gateway::observability::WireSnapshot {
             id: "echo-wf".into(),
             workflow: passthrough_workflow(),
             lanes: std::collections::HashMap::new(),
+            version: 1,
         }],
     }
 }

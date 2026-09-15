@@ -507,6 +507,8 @@ async fn workflow_route_request(
         state.client.clone(),
         Some(state.clone()),
         deadline,
+        None,
+        tokio_util::sync::CancellationToken::new(),
     )
     .await
 }

@@ -33,7 +33,13 @@ export default tseslint.config(
         },
       ],
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
-      "@typescript-eslint/no-unused-vars": "off",
+      // `_`-prefixed names are the repo convention for intentionally-unused
+      // params/vars (e.g. `_lanes` kept for API-compat, `_svg`, `_config`).
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" },
+      ],
+      "@typescript-eslint/no-explicit-any": "error",
     },
   },
   eslintPluginPrettier,
