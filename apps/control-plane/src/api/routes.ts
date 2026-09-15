@@ -26,6 +26,7 @@ import { registerHealthRoutes } from "./routes/health";
 import { registerWorkflowRoutes } from "./routes/workflows";
 import { registerProviderRoutes } from "./routes/providers";
 import { registerLaneRoutes } from "./routes/lanes";
+import { registerCatalogRoutes } from "../models-dev/routes";
 
 export async function buildApp(opts: {
   pool: Pool;
@@ -56,6 +57,7 @@ export async function buildApp(opts: {
   registerWorkflowRoutes(app, { pool, gateway, publish });
   registerProviderRoutes(app, pool, defaultProjectId);
   registerLaneRoutes(app, pool, defaultProjectId);
+  registerCatalogRoutes(app, pool);
 
   return app;
 }

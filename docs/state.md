@@ -2,9 +2,21 @@
 
 ## Status
 
-**Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 3 (lanes/routing) PARTIAL (lanes exist, no health/WireGuard). Phase 4 (workflow compiler) COMPLETE. Phase 5 (runtime publication & frontend wiring) COMPLETE. Phase 6 (control plane & durable configuration) COMPLETE. Phase 6.5 (reality audit) COMPLETE — see [phase-6.5-reality-audit.md](../docs/phase-6.5-reality-audit.md) for the evidence-based reality baseline. Phase 6.5 implementation COMPLETE — see [PHASE6.5_IMPLEMENTATION_REPORT.md](../PHASE6.5_IMPLEMENTATION_REPORT.md).**
+**Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 3 (lanes/routing) PARTIAL (lanes exist, no health/WireGuard). Phase 4 (workflow compiler) COMPLETE. Phase 5 (runtime publication & frontend wiring) COMPLETE. Phase 6 (control plane & durable configuration) COMPLETE. Phase 6.5 (reality audit) COMPLETE — see [phase-6.5-reality-audit.md](../docs/phase-6.5-reality-audit.md) for the evidence-based reality baseline. Phase 6.5 implementation COMPLETE — see [PHASE6.5_IMPLEMENTATION_REPORT.md](../PHASE6.5_IMPLEMENTATION_REPORT.md). Phase 7 (models.dev catalog integration) COMPLETE.**
 
 > **Reality-check summary (Phase 6.5 complete):** The frontend is no longer a mock. The workflow editor loads persisted workflows from the backend, Save/Validate/Publish are real control-plane operations, and the Run path executes the published ACTIVE version through the real gateway (control-plane `/run` → gateway admin `/run` → workflow runtime → provider, with the real envelope shown in the UI). All fabricated data (`relay-data.ts`, inline fixtures, `Math.sin` time series) is gone: every page either fetches real backend rows or displays an honest "not available yet" state. Run history, telemetry, MCP/Skills/policies/secrets remain UNAVAILABLE (no backend) and are presented as such — never fabricated.
+
+### Phase 7 — models.dev catalog integration (COMPLETE)
+
+Read-only model intelligence from [models.dev](https://models.dev), owned by the control plane, consumed as an in-memory snapshot by the data plane and web.
+
+- **Vendored catalog** — `crates/protocol-core/data/catalog.json` (400 models, 37 providers) embedded at compile time via `include_str!`. Rust types in `crates/protocol-core/src/catalog.rs` (`ModelDef`, `Modalities`, `Limit`, `Cost`, `ProviderDef`, `CatalogData`) with `OnceLock` singleton (`get_catalog()`).
+- **Control-plane sync** — `apps/control-plane/src/models-dev/sync.ts` fetches `https://models.dev/api.json` with ETag/If-None-Match, exponential backoff retry (3 attempts), 24h TTL, fail-open to existing DB rows. Sync state is closure-owned (no module-level singletons); ETag + last-sync timestamp live in a dedicated `catalog_meta` key-value table (no sentinel rows in domain tables). Postgres migration `003_catalog.sql` adds `catalog_providers`, `catalog_models`, and `catalog_meta` tables.
+- **Catalog API** — `GET /catalog/status`, `GET /catalog/models?provider=&capability=&search=`, `GET /catalog/providers`, `GET /catalog/logos/:id.svg` (in-memory cached SVG proxy). Wired into the Fastify app via `registerCatalogRoutes`.
+- **Web model picker** — `useCatalogModels` React Query hook fetches from `/catalog/models`. The Inspector's model field now shows live catalog models (name, provider, context window) instead of only the provider's stored default.
+- **Gateway** — reads the vendored catalog at startup via `get_catalog()`. No per-request network fetch, no DB round-trip. ArcSwap hot-reload infrastructure deferred to when the control-plane push path is implemented.
+
+**Test count (Phase 7): 5 Rust catalog tests, 31 control-plane integration tests (16 pre-existing + 15 new catalog), 31 web tests. Full workspace: Rust clippy clean, fmt clean, tsc clean (web + control plane), production build clean.**
 
 ### Phase 6 — Control plane & durable configuration (COMPLETE)
 
@@ -17,7 +29,7 @@ See [`PHASE6_REPORT.md`](../PHASE6_REPORT.md) for the full completion report. Hi
 - **Frontend wired to real backend** — versions page + workflows index fetch from the control plane; publish returns backend-authoritative version/plan-hash. **Phase 6.5 closes the mock gap:** the editor loads persisted versions into the canvas, Save/Validate are wired end-to-end, and a real Run contract (control-plane → gateway → provider) executes the published ACTIVE version with the real envelope shown in the UI. Management pages show real persisted rows or honest unavailable states; `relay-data.ts` is deleted.
 - **Gateway restart preservation** — the control plane rehydrates the last ACTIVE version of every workflow on boot.
 
-**Test count (Phase 6): Rust 286 passing, zero failures.** Baseline 267 → +19 (control-plane e2e, gateway `/run`, SQL injection defense-in-depth). **Control plane: 16 integration tests** (12 existing + 4 SQL injection) against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 31 tests (workflow-serializer + run-state + WorkflowBuilder interaction tests), production build clean.**
+**Test count (Phase 6): Rust 294 passing, zero failures.** Baseline 267 → +27 (control-plane e2e, gateway `/run`, SQL injection defense-in-depth). **Control plane: 16 integration tests** (12 existing + 4 SQL injection) against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 31 tests (workflow-serializer + run-state + WorkflowBuilder interaction tests), production build clean.**
 
 ### Phase 5 — Runtime publication & frontend wiring (COMPLETE)
 
@@ -89,7 +101,7 @@ This document is the source of truth for current implementation state. Update it
 
 ### Workflow schema (`crates/workflow-schema/`)
 
-Typed workflow definition crate (12 tests passing). Provides:
+Typed workflow definition crate (16 tests passing). Provides:
 
 - `Workflow`, `Node`, `Edge` with typed `NodeKind` (11 variants: Input, Output, LLM, Router, Transform, Condition, MCP, Skill, Fallback, Retry, Custom) and `NodeConfig`
 - Port-based data flow model (`PortType`: Message, Stream, ToolCall, ToolResult, Json, Bool)
@@ -97,7 +109,7 @@ Typed workflow definition crate (12 tests passing). Provides:
 
 ### Workflow runtime (`crates/workflow-runtime/`)
 
-Execution engine (52 tests: unit + integration + extension-proof + context capabilities). Provides:
+Execution engine (64 tests: unit + integration + extension-proof + protocol + context capabilities). Provides:
 
 - `ExecutionPlan::compile(Workflow)` — topological sort via Kahn's algorithm, versioned (`PLAN_VERSION`), deterministic content hash, execution-path classification (fast path / workflow)
 - `compile_workflow(workflow, ctx)` — schema + lane validation (including compile-time rejection of lane-less LLM nodes when 0 or multiple lanes exist)
@@ -145,7 +157,7 @@ Audited findings, current status:
 
 ## Test counts
 
-- **Rust: 286 tests** (workspace, zero failures).
+- **Rust: 294 tests** (workspace, zero failures).
 - **Control plane: 16 tests** (12 existing + 4 SQL injection) against a real Postgres 16 + in-process mock gateway.
 - **Frontend: 31 tests** (workflow-serializer + run-state reducer + 3 WorkflowBuilder interaction tests) run via `bun test` with happy-dom + @testing-library/react. Interaction tests guard against dead-UI regressions (stubbed `RunPanel`, unwired toolbar buttons).
 - **Gateway admin auth: 5 tests** in `apps/gateway/tests/admin_auth.rs` proving anonymous rejection, wrong-key rejection, valid-key acceptance, `/healthz` stays open, and no-key backward compat.

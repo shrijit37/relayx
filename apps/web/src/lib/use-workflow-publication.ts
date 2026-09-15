@@ -10,6 +10,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createProvider,
+  fetchCatalogModels,
   fetchLanes,
   fetchProviders,
   fetchSystemHealth,
@@ -19,6 +20,7 @@ import {
   publishWorkflow,
   saveWorkflowVersion,
   validateWorkflow,
+  type CatalogModel,
   type ProviderRow,
   type VersionInfo,
   type VersionRow,
@@ -142,5 +144,17 @@ export function useWorkflowRow(workflowId: string) {
       return rows.length > 0 ? rows[0] : null;
     },
     enabled: workflowId !== "new",
+  });
+}
+
+/** Catalog models from the models.dev sync (background-populated by control-plane). */
+export function useCatalogModels(params?: {
+  provider?: string;
+  capability?: string;
+}) {
+  return useQuery<CatalogModel[]>({
+    queryKey: ["catalog-models", params],
+    queryFn: () => fetchCatalogModels(params),
+    staleTime: 60_000, // catalog refreshes every 24h; no need to re-fetch rapidly
   });
 }

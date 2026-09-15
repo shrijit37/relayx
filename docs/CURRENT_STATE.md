@@ -1,13 +1,9 @@
 # relay-x Current State
 
-> **⚠️ Superseded by Phase 5 (2026-09-12).** This audit predates Phase 4/5. For the
-> current implementation state, see [`docs/state.md`](docs/state.md) (source of truth)
-> and [`PHASE5_REPORT.md`](PHASE5_REPORT.md). Key deltas since this audit: the workflow
-> runtime is no longer a stub (real LLM execution + compiler + snapshots), the gateway
-> executes compiled workflows from atomically hot-swapped snapshots, per-lane connection
-> pools exist, the frontend serializes React Flow → Workflow JSON and publishes through a
-> real API (React Query), and **265 tests pass** (not 197). What remains true: no control
-> plane/PostgreSQL/Redis, non-workflow pages still use mock data, no MCP/Skills runtime.
+> **⚠️ DO NOT REFERENCE — superseded by Phase 5 (2026-09-12).** This file is a historical
+> snapshot and contains numerous outdated claims (test counts, feature status, missing
+> components that now exist). For the current implementation state, see
+> [`docs/state.md`](docs/state.md) (source of truth).
 
 **Audit date:** 2026-09-11
 **Test run:** 197 tests passing, 0 failing (at time of audit; **265 today**)

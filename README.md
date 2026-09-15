@@ -43,8 +43,8 @@ Client → Gateway (Rust) → Providers (Anthropic, OpenAI, …)
 |--------|--------|--------|
 | Simple proxy p50 overhead | < 1 ms | ~0.105 ms |
 | SSE streaming overhead | low-ms | ~0.022 ms |
-| Rust tests | — | 270 passing |
-| Control-plane integration tests | — | 12 passing |
+| Rust tests | — | 294 passing |
+| Control-plane integration tests | — | 16 passing |
 | Gateway `/run` integration test | — | included (publication_hot_swap) |
 
 ## Quick start
@@ -69,13 +69,14 @@ cargo bench --bench proxy_latency -p relay-gateway
 ```text
 apps/
   gateway/              Rust data plane
+  control-plane/        TypeScript/Fastify control plane + PostgreSQL
   web/                  React/React Flow visual editor (TanStack Start)
 crates/
   mock-upstream/        Configurable mock LLM for tests
   test-harness/         In-process test spawn helpers
   protocol-core/        Canonical protocol model + 3 adapters
   workflow-schema/      Workflow definition types + validation
-  workflow-runtime/     Node-based execution engine
+  workflow-runtime/     Node-based execution engine + compiler + snapshots
 docs/                   Architecture, ADRs, specs
 ```
 

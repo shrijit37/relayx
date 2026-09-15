@@ -16,6 +16,7 @@ import { createPool, dbConfigFromEnv, migrate } from "./db/db";
 import { GatewayClient } from "./gateway/client";
 import * as repo from "./db/repositories";
 import { buildCoherentWireNoVersion, allocateSnapshotVersion, listActiveWorkflows, nextSnapshotVersion } from "./domain/publish";
+import { startCatalogSync } from "./models-dev/sync";
 
 const PORT = Number(Bun.env["RELAYX_CONTROL_PORT"] ?? 9091);
 const GATEWAY_ADMIN = Bun.env["RELAYX_GATEWAY_ADMIN_URL"] ?? "http://127.0.0.1:9090";
@@ -40,6 +41,9 @@ const pool = createPool(dbConfigFromEnv());
 // DB gains new versions non-destructively.
 const applied = await migrate(pool);
 if (applied.length > 0) console.log(`[migrate] applied: ${applied.join(", ")}`);
+
+// Start the models.dev catalog sync in the background.
+startCatalogSync(pool);
 
 // Seed one default project so API calls work out of the box.
 await pool.query(

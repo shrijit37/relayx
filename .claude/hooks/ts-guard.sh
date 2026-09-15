@@ -41,22 +41,26 @@ cd "$PROJECT_ROOT"
 # Resolve absolute path for eslint (it ignores files outside the base path)
 ABS_FILE_PATH=$(cd "$(dirname "$FILE_PATH")" && echo "$(pwd)/$(basename "$FILE_PATH")")
 
-# Determine package runner (--no-install: never prompt to fetch a missing
-# package interactively — a hook must not hang CI or an editor)
-RUNNER="npx --no-install"
-command -v bunx &>/dev/null && RUNNER="bunx"
+# Use the project's own installed binaries. Never fall back to a package
+# runner: `bunx`/`npx` without --no-install fetch a missing package over the
+# network, and a hook must never block on a download. No local eslint also
+# means no eslint config — nothing to enforce, so skip.
+BIN="$PROJECT_ROOT/node_modules/.bin"
+[ -x "$BIN/eslint" ] || exit 0
 
 # prettier (advisory — log but don't block)
-PRETTIER_OUTPUT=$($RUNNER prettier --check "$ABS_FILE_PATH" 2>&1 || true)
-if [ -n "$PRETTIER_OUTPUT" ]; then
-    echo "[ts-guard] prettier findings:"
-    echo "$PRETTIER_OUTPUT" | head -10
+if [ -x "$BIN/prettier" ]; then
+    PRETTIER_OUTPUT=$("$BIN/prettier" --check "$ABS_FILE_PATH" 2>&1 || true)
+    if [ -n "$PRETTIER_OUTPUT" ]; then
+        echo "[ts-guard] prettier findings:"
+        printf '%s\n' "$PRETTIER_OUTPUT" | awk 'NR<=10'
+    fi
 fi
 
 # eslint — enforced for @typescript-eslint/no-explicit-any (and parse errors)
 # Capture exit code properly: set -e + || true makes $? always 0.
 set +e
-ESLINT_OUTPUT=$($RUNNER eslint "$ABS_FILE_PATH" 2>&1)
+ESLINT_OUTPUT=$("$BIN/eslint" "$ABS_FILE_PATH" 2>&1)
 ESLINT_EXIT=$?
 set -euo pipefail
 
@@ -65,27 +69,42 @@ set -euo pipefail
 # error would never produce the "no-explicit-any" string — the guard would
 # silently pass. Blocking on parse errors too closes that hole (a file whose
 # syntax is broken must be fixed first; the `any` then surfaces).
-if [ $ESLINT_EXIT -ne 0 ] && { echo "$ESLINT_OUTPUT" | grep -q "no-explicit-any" || echo "$ESLINT_OUTPUT" | grep -qE "Parsing error|Parse error"; }; then
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║  ❌ BLOCKED: Explicit 'any' type (or parse error).        ║"
-    if echo "$ESLINT_OUTPUT" | grep -q "no-explicit-any"; then
-        echo "║  Fix the violation before continuing.                     ║"
-        echo "║  Use 'unknown' + narrowing/validation instead.            ║"
-    else
-        echo "║  Fix the syntax error before continuing.                   ║"
-    fi
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    echo "$ESLINT_OUTPUT" | grep -E "no-explicit-any|Parsing error|Parse error"
-    echo ""
-    exit 1
+#
+# Matched in-shell rather than with `echo … | grep -q`: grep -q exits at the
+# first match, which SIGPIPEs the writer once the output exceeds the 64 KiB
+# pipe buffer, and `pipefail` then scores the pipeline 141 — so a real
+# violation reads as "no match" and the guard silently lets it through.
+BLOCK=""
+if [ "$ESLINT_EXIT" -ne 0 ]; then
+    case "$ESLINT_OUTPUT" in
+        *no-explicit-any*)                  BLOCK="explicit 'any' type" ;;
+        *"Parsing error"*|*"Parse error"*)  BLOCK="parse error" ;;
+    esac
 fi
 
-# Other eslint warnings: advisory (log only)
+if [ -n "$BLOCK" ]; then
+    {
+        echo ""
+        echo "❌ BLOCKED: $BLOCK in $(basename "$ABS_FILE_PATH")"
+        echo ""
+        if [ "$BLOCK" = "parse error" ]; then
+            echo "eslint could not parse this file, so no rules ran. Fix the"
+            echo "syntax error before continuing — an 'any' behind it is invisible."
+        else
+            echo "Use 'unknown' + narrowing/validation instead of 'any'."
+            echo "Fix the violation before continuing."
+        fi
+        echo ""
+        printf '%s\n' "$ESLINT_OUTPUT" | grep -E "no-explicit-any|Parsing error|Parse error"
+        echo ""
+    } >&2
+    exit 2
+fi
+
+# Other eslint findings (incl. prettier/prettier formatting): advisory, log only
 if [ -n "$ESLINT_OUTPUT" ]; then
     echo "[ts-guard] eslint advisory:"
-    echo "$ESLINT_OUTPUT" | head -30
+    printf '%s\n' "$ESLINT_OUTPUT" | awk 'NR<=30'
 fi
 
 exit 0
