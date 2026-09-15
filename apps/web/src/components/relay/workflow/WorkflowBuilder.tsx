@@ -57,6 +57,7 @@ import {
     useWorkflowLatestVersion,
     useLanes,
     useProviders,
+    useCatalogModels,
 } from "@/lib/use-workflow-publication";
 import { createWorkflow, saveWorkflowVersion } from "@/lib/api";
 import {
@@ -452,17 +453,37 @@ function Canvas({ workflowId }: { workflowId: string }) {
         () => inspectorCanonical(inspectorNode),
         [inspectorNode],
     );
+    // Model picker backed by the models.dev catalog (live, searchable).
+    // Falls back to the provider's stored default model if the catalog is
+    // unreachable/empty (sync hasn't run yet).
+    const catalogProvider = canonicalNode?.config.kind === "llm"
+        ? canonicalNode.config.config.provider
+        : undefined;
+    const { data: catalogModels = [] } = useCatalogModels(
+        catalogProvider
+            ? { provider: catalogProvider, capability: "tool_call" }
+            : { capability: "tool_call" },
+    );
     const modelOptions = useMemo(() => {
         if (!canonicalNode) return [];
         const cfg = canonicalNode.config;
         if (cfg.kind !== "llm" || !cfg.config.provider) return [];
         const match = providers.find((p) => p.name === cfg.config.provider);
-        if (!match) return [];
         const opts: { value: string; label: string }[] = [];
-        if (cfg.config.model && cfg.config.model !== match.model) opts.push({ value: cfg.config.model, label: cfg.config.model });
-        opts.push({ value: match.model, label: match.model });
+        if (cfg.config.model && !catalogModels.some((m) => m.id === cfg.config.model)) {
+            opts.push({ value: cfg.config.model, label: cfg.config.model });
+        }
+        // Prefer catalog models for the selected provider, then the provider
+        // row's stored default model as a last resort.
+        for (const m of catalogModels) {
+            opts.push({
+                value: m.id,
+                label: `${m.name} · ${m.provider_name}${m.limits ? ` · ${m.limits.context.toLocaleString()} ctx` : ""}`,
+            });
+        }
+        if (opts.length === 0 && match?.model) opts.push({ value: match.model, label: match.model });
         return opts;
-    }, [providers, canonicalNode]);
+    }, [catalogModels, providers, canonicalNode]);
 
     const navigate = useNavigate();
 

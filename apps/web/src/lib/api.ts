@@ -323,6 +323,61 @@ export async function createProvider(input: {
   return req(`/providers`, { method: "POST", body: JSON.stringify(input) });
 }
 
+// ── Catalog (models.dev) ──────────────────────────────────────────────
+
+export type CatalogModel = {
+  id: string;
+  name: string;
+  description: string;
+  provider_id: string;
+  provider_name: string;
+  family: string | null;
+  modalities: { input: string[]; output: string[] };
+  capabilities: Record<string, boolean>;
+  cost: { input: number; output: number; cache_read?: number } | null;
+  limits: { context: number; output: number } | null;
+  knowledge_cutoff: string | null;
+  release_date: string | null;
+  open_weights: boolean;
+};
+
+export type CatalogProvider = {
+  id: string;
+  display_name: string;
+  logo_path: string | null;
+  updated_at: string;
+};
+
+/** Fetch catalog models (filterable by provider, capability, or search). */
+export async function fetchCatalogModels(params?: {
+  provider?: string;
+  capability?: string;
+  search?: string;
+}): Promise<CatalogModel[]> {
+  const qs = new URLSearchParams();
+  if (params?.provider) qs.set("provider", params.provider);
+  if (params?.capability) qs.set("capability", params.capability);
+  if (params?.search) qs.set("search", params.search);
+  const q = qs.toString();
+  return req<CatalogModel[]>(`/catalog/models${q ? `?${q}` : ""}`);
+}
+
+/** Fetch catalog providers list. */
+export async function fetchCatalogProviders(): Promise<CatalogProvider[]> {
+  return req<CatalogProvider[]>("/catalog/providers");
+}
+
+/** Fetch catalog sync status. */
+export async function fetchCatalogStatus(): Promise<{
+  version: string;
+  last_sync: string;
+  source: string;
+  model_count: number;
+  provider_count: number;
+}> {
+  return req("/catalog/status");
+}
+
 // ── Shared helpers ──────────────────────────────────────────────────────
 
 /**
