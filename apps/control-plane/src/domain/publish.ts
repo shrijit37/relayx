@@ -72,12 +72,16 @@ async function toWireLane(lane: LaneRowWithCred): Promise<WireLane> {
  * path (review #1, #2, #9, #10) — no caller re-implements lane/bundle
  * resolution.
  */
-export async function buildCoherentWire(
+/**
+ * Build the wire bundle WITHOUT allocating a snapshot version.
+ * The snapshot version is a placeholder (0) that must be patched via
+ * `allocateSnapshotVersion` before sending to the gateway. This avoids
+ * burning a version number when validation or lane resolution fails.
+ */
+export async function buildCoherentWireNoVersion(
   flows: BundleWorkflow[],
   getLane: (id: string) => Promise<LaneRowWithCred | null>,
-  nextSnapshotVersion: () => Promise<number>,
 ): Promise<WireSnapshot | { error: string }> {
-  const snapshot_version = await nextSnapshotVersion();
   const workflows: WireWorkflow[] = [];
 
   for (const flow of flows) {
@@ -91,7 +95,38 @@ export async function buildCoherentWire(
     workflows.push({ id: flow.id, workflow: flow.workflowJson, lanes: flowLanes, version: flow.version });
   }
 
-  return { snapshot_version, workflows };
+  // Placeholder — patched by allocateSnapshotVersion before gateway publish.
+  return { snapshot_version: 0, workflows };
+}
+
+/**
+ * Allocate a real snapshot version and patch it into a wire bundle.
+ * Call this ONLY when the wire has been validated and is about to be
+ * published — this is the only point where a Postgres row is burned.
+ */
+export async function allocateSnapshotVersion(
+  wire: WireSnapshot,
+  nextSnapshotVersion: () => Promise<number>,
+): Promise<WireSnapshot> {
+  const snapshot_version = await nextSnapshotVersion();
+  return { ...wire, snapshot_version };
+}
+
+/**
+ * Build the coherent wire bundle: lanes resolved, snapshot version allocated.
+ * For paths that validate BEFORE publishing, prefer `buildCoherentWireNoVersion`
+ * + `allocateSnapshotVersion` to avoid burning versions on failed validates.
+ * This function is the legacy entrypoint used by rehydrate (no validation step)
+ * and by callers that validate-and-publish in one step.
+ */
+export async function buildCoherentWire(
+  flows: BundleWorkflow[],
+  getLane: (id: string) => Promise<LaneRowWithCred | null>,
+  nextSnapshotVersion: () => Promise<number>,
+): Promise<WireSnapshot | { error: string }> {
+  const wire = await buildCoherentWireNoVersion(flows, getLane);
+  if ("error" in wire) return wire;
+  return allocateSnapshotVersion(wire, nextSnapshotVersion);
 }
 
 export type PublishResult = {
@@ -129,13 +164,16 @@ export function createPublishService(deps: {
     getLane: (id: string) => Promise<LaneRowWithCred | null>,
     nextSnapshotVersion: () => Promise<number>,
   ): Promise<WireSnapshot | { error: string }> {
-    return buildCoherentWire(flows, getLane, nextSnapshotVersion);
+    const wire = await buildCoherentWireNoVersion(flows, getLane);
+    if ("error" in wire) return wire;
+    return allocateSnapshotVersion(wire, nextSnapshotVersion);
   }
   /**
-   * Build the coherent wire bundle: the target workflow ∪ every other ACTIVE
-   * workflow, all lanes resolved out-of-band. This is the SINGLE lane- and
-   * bundle-resolution path shared by /validate, /compile, /publish and
-   * rehydrate — no caller duplicates it.
+   * Build the coherent wire bundle WITHOUT allocating a snapshot version.
+   * The version is a placeholder (0) that must be patched via
+   * `allocateSnapshotVersion` before sending to the gateway for publish.
+   * Validation does not need a real version — the plan hash is deterministic
+   * from the workflow definition.
    */
   async function buildWire(opts: {
     workflowId: string;
@@ -143,13 +181,12 @@ export function createPublishService(deps: {
     version: number;
   }): Promise<WireSnapshot | { error: string }> {
     const others = await deps.listActiveWorkflows([opts.workflowId]);
-    return buildCoherentWire(
+    return buildCoherentWireNoVersion(
       [
         { id: opts.workflowId, version: opts.version, workflowJson: opts.workflowJson, revision: "target" as const },
         ...others,
       ],
       async (id) => deps.getLane(id),
-      async () => deps.nextSnapshotVersion(),
     );
   }
 
@@ -180,6 +217,8 @@ export function createPublishService(deps: {
       }
 
       // Compile-only dry-run on the gateway: deterministic plan hash + validation.
+      // Version is still a placeholder (0) here — allocated only after validation
+      // succeeds so failed validates don't burn snapshot version numbers.
       const validated = await deps.gateway.validate(wire);
       if (!validated.ok) {
         await recordFailure(deps.pool, workflowId, version, validated.error, "draft", "", wire.snapshot_version);
@@ -189,10 +228,13 @@ export function createPublishService(deps: {
         validated.workflows.find((w) => w.workflow_id === workflowId)?.plan_hash ?? "";
       await recordCompiled(deps.pool, workflowId, version, planHash);
 
+      // Allocate a real snapshot version NOW — only after validation passed.
+      const publishedWire = await allocateSnapshotVersion(wire, async () => deps.nextSnapshotVersion());
+
       // Atomic publish — the gateway swaps snapshot + lane pools in one store.
-      const published = await deps.gateway.publish(wire);
+      const published = await deps.gateway.publish(publishedWire);
       if (!published.ok) {
-        await recordFailure(deps.pool, workflowId, version, published.error, "compiled", planHash, wire.snapshot_version);
+        await recordFailure(deps.pool, workflowId, version, published.error, "compiled", planHash, publishedWire.snapshot_version);
         return { status: "error", error: published.error };
       }
 

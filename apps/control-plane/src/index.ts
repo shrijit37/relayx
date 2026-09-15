@@ -15,7 +15,7 @@ import { buildApp } from "./api/routes";
 import { createPool, dbConfigFromEnv, migrate } from "./db/db";
 import { GatewayClient } from "./gateway/client";
 import * as repo from "./db/repositories";
-import { buildCoherentWire, listActiveWorkflows, nextSnapshotVersion } from "./domain/publish";
+import { buildCoherentWireNoVersion, allocateSnapshotVersion, listActiveWorkflows, nextSnapshotVersion } from "./domain/publish";
 
 const PORT = Number(Bun.env["RELAYX_CONTROL_PORT"] ?? 9091);
 const GATEWAY_ADMIN = Bun.env["RELAYX_GATEWAY_ADMIN_URL"] ?? "http://127.0.0.1:9090";
@@ -64,19 +64,23 @@ async function rehydrateGateway(label: string): Promise<{ ok: boolean }> {
       console.warn(`[${label}] no active workflows to re-publish`);
       return { ok: true };
     }
-    const wire = await buildCoherentWire(
+    // Build the wire without allocating a snapshot version — the version is
+    // allocated only after the gateway publish succeeds, so a failed publish
+    // does not burn a version number (review M2).
+    const wire = await buildCoherentWireNoVersion(
       activeFlows,
       (id) => repo.lanes.get(pool, id),
-      () => nextSnapshotVersion(pool),
     );
     if ("error" in wire) {
       console.warn(`[${label}] skipped: ${wire.error}`);
       return { ok: false };
     }
-    const res = await gateway.publish(wire);
+    // Allocate the real snapshot version only when we're about to publish.
+    const publishedWire = await allocateSnapshotVersion(wire, () => nextSnapshotVersion(pool));
+    const res = await gateway.publish(publishedWire);
     if (res.ok) {
       console.info(
-        `[${label}] republished ${activeFlows.length} workflow(s) as snapshot v${res.snapshot_version}`,
+        `[${label}] republished ${activeFlows.length} workflow(s) as snapshot v${publishedWire.snapshot_version}`,
       );
       return { ok: true };
     }
