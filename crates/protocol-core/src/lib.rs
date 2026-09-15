@@ -16,5 +16,6 @@
 
 pub mod adapters;
 pub mod canonical;
+pub mod catalog;
 pub mod error;
 pub mod sse;
