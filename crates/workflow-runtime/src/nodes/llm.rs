@@ -99,28 +99,9 @@ pub async fn execute(
 
         Ok(NodeOutput::message(RuntimeValue::Json(json)))
     } else {
-        // A streaming LLM node ending on an upstream error must still emit a
-        // terminal `error` SSE event, or the browser's stream terminates
-        // silently mid-run.
-        if config.stream && ctx.token_sender.is_some() {
-            let err_json = serde_json::json!({
-                "error": format!("provider returned {}", response.status()),
-            });
-            emit_terminal_wire(&err_json, ctx.token_sender.as_ref()).await;
-        }
+        // The admin /run handler reliably sends a terminal `error` SSE event
+        // for any Err, so the node layer must NOT emit its own duplicate.
         Err(handle_error_response(response).await)
-    }
-}
-
-/// Best-effort terminal SSE event on error paths; a dropped receiver means
-/// the run is already gone, so the send failure is ignored.
-async fn emit_terminal_wire(
-    payload: &serde_json::Value,
-    tx: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>,
-) {
-    if let Some(tx) = tx {
-        let wire = protocol_core::sse::format_sse_event(&payload.to_string(), Some("error"));
-        let _ = tx.send(bytes::Bytes::from(wire)).await;
     }
 }
 
@@ -278,12 +259,12 @@ async fn decode_response_body(
 
     // Fail closed on non-JSON output (mirrors the buffered /run path): a
     // silent null would mask corrupted upstream data.
-    let payload: Vec<u8> = if body.starts_with(b"\x1f\x8b") {
+    let raw_bytes: Vec<u8> = if body.starts_with(b"\x1f\x8b") {
         inflate(&body)?
     } else {
         body.to_vec()
     };
-    let json: serde_json::Value = serde_json::from_slice(&payload).map_err(|e| {
+    let json: serde_json::Value = serde_json::from_slice(&raw_bytes).map_err(|e| {
         NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
             message: format!("invalid provider JSON response: {e}"),
         })
@@ -297,10 +278,10 @@ async fn decode_response_body(
         ));
     }
 
-    match json {
+    match &json {
         // A 2xx with an `error` object is a streamable protocol-level error
         // (OpenAI-style); surface it instead of treating it as success.
-        serde_json::Value::Object(ref o) if o.contains_key("error") && o.get("error").is_some() => {
+        serde_json::Value::Object(o) if o.contains_key("error") && o.get("error").is_some() => {
             return Err(NodeError::Provider(
                 protocol_core::error::ProtocolEngineError::ProviderError {
                     message: format!("provider returned error at 2xx: {json}"),
@@ -310,7 +291,7 @@ async fn decode_response_body(
         _ => {}
     }
 
-    decode_response(target_protocol, &json)
+    decode_response(target_protocol, json)
 }
 
 /// Build a canonical request from configuration and input.
@@ -595,10 +576,32 @@ impl StreamFold {
 
     /// Emit a token SSE event through the wire channel, blocking on
     /// backpressure instead of silently dropping tokens.
+    ///
+    /// Inlines the SSE wire format directly: pre-formatting avoids a
+    /// `serde_json::json!` + `to_string()` + `Bytes` allocation per token.
     async fn emit_token(&self, delta: &str) {
         if let Some(ref tx) = self.wire_tx {
-            let payload = serde_json::json!({"delta": delta});
-            let wire = protocol_core::sse::format_sse_event(&payload.to_string(), Some("token"));
+            // Worst case: every byte is escaped (\u00XX) → 6 bytes, plus
+            // the fixed SSE framing overhead of ~30 bytes.
+            let mut wire = Vec::with_capacity(delta.len() * 6 + 32);
+            wire.extend_from_slice(b"event: token\ndata: {\"delta\":\"");
+            for byte in delta.bytes() {
+                match byte {
+                    b'"' => wire.extend_from_slice(b"\\\""),
+                    b'\\' => wire.extend_from_slice(b"\\\\"),
+                    b'\n' => wire.extend_from_slice(b"\\n"),
+                    b'\r' => wire.extend_from_slice(b"\\r"),
+                    b'\t' => wire.extend_from_slice(b"\\t"),
+                    b if b < 0x20 => {
+                        // Control characters: \u00XX (4 hex digits, no ambiguity).
+                        wire.extend_from_slice(
+                            format!("\\u{:04x}", b).as_bytes(),
+                        );
+                    }
+                    b => wire.push(b),
+                }
+            }
+            wire.extend_from_slice(b"\"}\n\n");
             let _ = tx.send(bytes::Bytes::from(wire)).await;
         }
     }
@@ -820,14 +823,12 @@ fn inflate(compressed: &[u8]) -> Result<Vec<u8>, NodeError> {
 /// Decode a canonical response from the target protocol response JSON.
 fn decode_response(
     target: Protocol,
-    payload: &serde_json::Value,
+    payload: serde_json::Value,
 ) -> Result<protocol_core::canonical::CanonicalResponse, NodeError> {
-    let body = serde_json::to_vec(payload)
-        .map_err(|e| NodeError::Internal(format!("failed to re-encode response: {e}")))?;
     match target {
         Protocol::OpenAiChatCompletions => {
             let resp: openai_chat::ChatCompletionResponse =
-                serde_json::from_slice(&body).map_err(|e| {
+                serde_json::from_value(payload).map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid OpenAI Chat response: {e}"),
                     })
@@ -836,7 +837,7 @@ fn decode_response(
         }
         Protocol::AnthropicMessages => {
             let resp: protocol_core::adapters::anthropic_messages::MessagesResponse =
-                serde_json::from_slice(&body).map_err(|e| {
+                serde_json::from_value(payload).map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid Anthropic Messages response: {e}"),
                     })
@@ -845,7 +846,7 @@ fn decode_response(
         }
         Protocol::OpenAiResponses => {
             let resp: protocol_core::adapters::openai_responses::ResponsesResponse =
-                serde_json::from_slice(&body).map_err(|e| {
+                serde_json::from_value(payload).map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::InvalidPayload {
                         message: format!("invalid OpenAI Responses response: {e}"),
                     })

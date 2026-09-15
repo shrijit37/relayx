@@ -21,16 +21,16 @@ const PORT = Number(Bun.env["RELAYX_CONTROL_PORT"] ?? 9091);
 const GATEWAY_ADMIN = Bun.env["RELAYX_GATEWAY_ADMIN_URL"] ?? "http://127.0.0.1:9090";
 const GATEWAY_API_KEY = Bun.env["RELAYX_GATEWAY_API_KEY"];
 
-// Validate the poll interval: an empty/garbage RELAXY_HEALTH_POLL_MS turns
+// Validate the poll interval: an empty/garbage RELAYX_HEALTH_POLL_MS turns
 // into a ~1ms watchdog tight loop (Number('')===0 → setInterval(fn, 0)).
 const healthPollRaw = Bun.env["RELAYX_HEALTH_POLL_MS"] ?? "2000";
 const HEALTH_POLL_MS = Number(healthPollRaw);
 if (!Number.isFinite(HEALTH_POLL_MS) || HEALTH_POLL_MS < 200) {
   console.warn(
-    `[watchdog] RELAXY_HEALTH_POLL_MS='${healthPollRaw}' is invalid — falling back to 2000ms`,
+    `[watchdog] RELAYX_HEALTH_POLL_MS='${healthPollRaw}' is invalid — falling back to 2000ms`,
   );
 }
-// GWateway health poll: clamps to a sane minimum; a poll interval faster than
+// Gateway health poll: clamp to a sane minimum; a poll interval faster than
 // 200ms serves no purpose and only hammers the gateway.
 const GW_HEALTH_POLL_MS = Number.isFinite(HEALTH_POLL_MS) && HEALTH_POLL_MS >= 200 ? HEALTH_POLL_MS : 2000;
 

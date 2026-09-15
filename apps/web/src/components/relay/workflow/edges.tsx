@@ -28,7 +28,7 @@ function DeletableEdge({
   });
 
   const onDelete = useCallback(
-    (e: React.MouseEvent) => {
+    (e: React.MouseEvent | React.KeyboardEvent) => {
       e.stopPropagation();
       deleteElements({ edges: [{ id }] });
     },
@@ -59,7 +59,7 @@ function DeletableEdge({
       >
         <button
           onClick={onDelete}
-          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onDelete(e as unknown as React.MouseEvent); }}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") onDelete(e); }}
           tabIndex={0}
           style={{
             width: 20,
