@@ -67,7 +67,8 @@ impl From<CompileError> for WorkflowError {
 ///
 /// 1. Schema validation (duplicate IDs, cycles, reachability, ports).
 /// 2. Lane reference validation (Llm nodes with explicit lane_id must resolve).
-/// 3. Execution plan compilation (topological sort, classification, hashing).
+/// 3. Extension kind resolution (non-blocking, warnings only).
+/// 4. Execution plan compilation (topological sort, classification, hashing).
 pub fn compile_workflow(
     workflow: &Workflow,
     ctx: &CompileContext,
@@ -81,7 +82,7 @@ pub fn compile_workflow(
     validate_lane_refs(workflow, ctx)?;
 
     // 3. Extension kind resolution (non-blocking, warnings only).
-    validate_extension_refs(workflow, ctx);
+    resolve_extension_kinds(workflow, ctx);
 
     // 4. Full compilation via ExecutionPlan::compile.
     let plan = ExecutionPlan::compile(workflow)?;
@@ -95,7 +96,7 @@ pub fn compile_workflow(
 /// draft workflow at compile time. Registered extensions with validators
 /// are flagged as an available-but-not-yet-invoked capability. Full async
 /// validation is deferred to the executor at runtime.
-fn validate_extension_refs(workflow: &Workflow, ctx: &CompileContext) {
+fn resolve_extension_kinds(workflow: &Workflow, ctx: &CompileContext) {
     use workflow_schema::NodeConfig;
 
     let Some(registry) = ctx.extensions.as_ref() else {

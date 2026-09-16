@@ -23,12 +23,14 @@ use workflow_schema::CustomConfig;
 
 // ─── Extension traits ──────────────────────────────────────────────────────
 
-/// Validates a `CustomConfig` at compile time (optional, non-blocking).
+/// Validates a `CustomConfig` (optional, non-blocking).
 ///
-/// Validators are called during workflow compilation when an extension
-/// registry is present. A validation failure produces a warning log but
-/// does **not** reject the workflow — the compiler is lenient to allow
-/// draft workflows with unregistered extensions.
+/// Validators can be used to check extension configs. A validation failure
+/// produces a warning but does **not** reject the workflow — the compiler
+/// is lenient to allow draft workflows with unregistered extensions.
+///
+/// At present, validators are not invoked during synchronous workflow
+/// compilation. Full async validation is deferred to the executor at runtime.
 #[async_trait::async_trait]
 pub trait ExtensionValidator: Send + Sync {
     /// Validate the custom node configuration.
@@ -47,13 +49,18 @@ pub trait ExtensionValidator: Send + Sync {
 pub trait ExtensionExecutor: Send + Sync {
     /// Execute the custom node with the given configuration and input.
     ///
+    /// `version` is the registered [`ExtensionSpec::version`] of this
+    /// extension kind, carried so the worker can verify protocol
+    /// compatibility before running.
+    ///
     /// Returns `Ok(NodeOutput)` on success, or `Err(NodeError)` on failure.
     /// The executor should map transport errors (worker crash, timeout,
-    /// protocol error) into `NodeError::Internal` with a descriptive
+    /// protocol error) into `NodeError::Extension` with a descriptive
     /// message.
     async fn execute(
         &self,
         config: &CustomConfig,
+        version: u64,
         input: NodeInput,
     ) -> Result<NodeOutput, NodeError>;
 }
@@ -83,6 +90,10 @@ impl std::fmt::Debug for ExtensionSpec {
             .field("kind", &self.kind)
             .field("version", &self.version)
             .field("has_validator", &self.validator.is_some())
+            .field(
+                "executor_type",
+                &std::any::type_name_of_val(&*self.executor),
+            )
             .finish()
     }
 }
@@ -181,6 +192,7 @@ mod tests {
         async fn execute(
             &self,
             _config: &CustomConfig,
+            _version: u64,
             input: NodeInput,
         ) -> Result<NodeOutput, NodeError> {
             Ok(NodeOutput::message(input.value))
@@ -299,7 +311,7 @@ mod tests {
         };
         let input = NodeInput::message(crate::nodes::RuntimeValue::String("hello".into()));
         let output = executor
-            .execute(&config, input)
+            .execute(&config, 1, input)
             .await
             .unwrap_or_else(|e| panic!("executor should succeed: {e}"));
         assert_eq!(

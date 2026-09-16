@@ -29,14 +29,12 @@
 
 use std::io::ErrorKind;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
 
-use crate::error::NodeError;
+use crate::error::{ExtensionError, NodeError};
 use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
 use workflow_schema::CustomConfig;
 
@@ -88,8 +86,6 @@ pub struct UnixSocketExecutor {
     socket_path: PathBuf,
     /// Per-call timeout.
     timeout: Duration,
-    /// Serializes calls per executor instance (socket framing safety).
-    lock: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for UnixSocketExecutor {
@@ -107,7 +103,6 @@ impl UnixSocketExecutor {
         Self {
             socket_path: socket_path.into(),
             timeout: DEFAULT_RPC_TIMEOUT,
-            lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -128,50 +123,44 @@ impl ExtensionExecutor for UnixSocketExecutor {
     async fn execute(
         &self,
         config: &CustomConfig,
+        version: u64,
         input: NodeInput,
     ) -> Result<NodeOutput, NodeError> {
-        // Serialize calls per executor: the socket framing is a single
-        // request/response exchange, and concurrent writers could
-        // interleave frames.
-        let _guard = self.lock.lock().await;
-
         let request = ExtensionRequest {
             kind: config.kind.clone(),
-            version: 0,
+            version,
             payload: config.payload.clone(),
             input: input.value.to_json(),
         };
 
-        let body = serde_json::to_vec(&request)
-            .map_err(|e| NodeError::Internal(format!("failed to encode extension request: {e}")))?;
+        let body = serde_json::to_vec(&request).map_err(|e| {
+            NodeError::Extension(ExtensionError::Execution(format!(
+                "failed to encode extension request: {e}"
+            )))
+        })?;
 
         let response = tokio::time::timeout(self.timeout, self.round_trip(&body))
             .await
             .map_err(|_| {
-                NodeError::Internal(format!(
+                NodeError::Extension(ExtensionError::WorkerUnavailable(format!(
                     "extension worker at '{}' timed out after {:?}",
                     self.socket_path.display(),
                     self.timeout
-                ))
+                )))
             })??;
 
         if response.ok {
-            let value = response.value.ok_or_else(|| {
-                NodeError::Internal(format!(
-                    "extension worker at '{}' returned ok without a value",
-                    self.socket_path.display()
-                ))
-            })?;
+            let value = response.value.unwrap_or(serde_json::Value::Null);
             Ok(NodeOutput {
                 port: response.port,
                 value: RuntimeValue::from_json(value),
             })
         } else {
             let msg = response.error.unwrap_or_else(|| "unknown error".into());
-            Err(NodeError::Internal(format!(
+            Err(NodeError::Extension(ExtensionError::Execution(format!(
                 "extension worker at '{}' failed: {msg}",
                 self.socket_path.display()
-            )))
+            ))))
         }
     }
 }
@@ -180,65 +169,70 @@ impl UnixSocketExecutor {
     /// One connect -> write -> read -> close round trip.
     async fn round_trip(&self, body: &[u8]) -> Result<ExtensionResponse, NodeError> {
         let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
-            NodeError::Internal(format!(
+            NodeError::Extension(ExtensionError::WorkerUnavailable(format!(
                 "cannot connect to extension worker at '{}': {e}",
                 self.socket_path.display()
-            ))
+            )))
         })?;
 
         // Frame: 4-byte big-endian length + JSON body.
         let len = u32::try_from(body.len()).map_err(|_| {
-            NodeError::Internal("extension request body exceeds u32 frame limit".into())
+            NodeError::Extension(ExtensionError::Execution(
+                "extension request body exceeds u32 frame limit".into(),
+            ))
         })?;
         let mut frame = Vec::with_capacity(4 + body.len());
         frame.extend_from_slice(&len.to_be_bytes());
         frame.extend_from_slice(body);
 
         stream.write_all(&frame).await.map_err(|e| {
-            NodeError::Internal(format!(
+            NodeError::Extension(ExtensionError::Execution(format!(
                 "failed to write extension request to '{}': {e}",
                 self.socket_path.display()
-            ))
+            )))
         })?;
 
         // Read the response frame header.
         let mut header = [0u8; 4];
         stream.read_exact(&mut header).await.map_err(|e| {
-            NodeError::Internal(format!(
+            NodeError::Extension(ExtensionError::Execution(format!(
                 "failed to read extension response header from '{}': {e}",
                 self.socket_path.display()
-            ))
+            )))
         })?;
         let resp_len = u32::from_be_bytes(header);
-        let resp_len = usize::try_from(resp_len)
-            .map_err(|_| NodeError::Internal("response frame length overflow".into()))?;
+        let resp_len = usize::try_from(resp_len).map_err(|_| {
+            NodeError::Extension(ExtensionError::Execution(
+                "response frame length overflow".into(),
+            ))
+        })?;
         if resp_len > MAX_RESPONSE_FRAME {
-            return Err(NodeError::Internal(format!(
+            return Err(NodeError::Extension(ExtensionError::Execution(format!(
                 "extension worker at '{}' returned an oversized frame ({resp_len} bytes)",
                 self.socket_path.display()
-            )));
+            ))));
         }
 
         let mut resp_body = vec![0u8; resp_len];
         stream.read_exact(&mut resp_body).await.map_err(|e| {
             if e.kind() == ErrorKind::UnexpectedEof {
-                NodeError::Internal(format!(
+                NodeError::Extension(ExtensionError::WorkerUnavailable(format!(
                     "extension worker at '{}' closed the connection mid-response (crashed?)",
                     self.socket_path.display()
-                ))
+                )))
             } else {
-                NodeError::Internal(format!(
+                NodeError::Extension(ExtensionError::Execution(format!(
                     "failed to read extension response body from '{}': {e}",
                     self.socket_path.display()
-                ))
+                )))
             }
         })?;
 
         serde_json::from_slice(&resp_body).map_err(|e| {
-            NodeError::Internal(format!(
+            NodeError::Extension(ExtensionError::Execution(format!(
                 "invalid extension response from '{}': {e}",
                 self.socket_path.display()
-            ))
+            )))
         })
     }
 }
@@ -258,6 +252,9 @@ mod tests {
             .await
             .map_err(|e| e.to_string())?;
         let len = u32::from_be_bytes(header);
+        if len as usize as u32 != len {
+            return Err("frame length overflow".into());
+        }
         let mut body = vec![0u8; len as usize];
         stream
             .read_exact(&mut body)
@@ -310,7 +307,7 @@ mod tests {
             payload: serde_json::json!({"x": 1}),
         };
         let input = NodeInput::message(RuntimeValue::Json(serde_json::json!({"hello": "world"})));
-        let output = match executor.execute(&config, input).await {
+        let output = match executor.execute(&config, 1, input).await {
             Ok(o) => o,
             Err(e) => panic!("execute failed: {e}"),
         };
@@ -343,7 +340,7 @@ mod tests {
             payload: serde_json::Value::Null,
         };
         let input = NodeInput::message(RuntimeValue::Null);
-        let result = executor.execute(&config, input).await;
+        let result = executor.execute(&config, 1, input).await;
         assert!(result.is_err(), "connection to a dead socket must fail");
         let _ = std::fs::remove_file(&path);
     }
@@ -407,14 +404,14 @@ mod tests {
             payload: serde_json::Value::Null,
         };
         let input = NodeInput::message(RuntimeValue::Null);
-        let result = executor.execute(&config, input).await;
+        let result = executor.execute(&config, 1, input).await;
         let _ = task.await;
 
         match result {
-            Err(NodeError::Internal(msg)) => {
+            Err(NodeError::Extension(ExtensionError::Execution(msg))) => {
                 assert!(msg.contains("worker exploded"), "unexpected message: {msg}");
             }
-            other => panic!("expected internal error, got: {other:?}"),
+            other => panic!("expected ExtensionError::Execution, got: {other:?}"),
         }
 
         let _ = std::fs::remove_file(&path);

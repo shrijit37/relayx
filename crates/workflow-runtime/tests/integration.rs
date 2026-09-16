@@ -883,10 +883,29 @@ mod runtime_value_integer {
         async fn execute(
             &self,
             _config: &workflow_schema::CustomConfig,
+            _version: u64,
             input: workflow_runtime::nodes::NodeInput,
         ) -> Result<workflow_runtime::nodes::NodeOutput, workflow_runtime::error::NodeError>
         {
             Ok(workflow_runtime::nodes::NodeOutput::message(input.value))
+        }
+    }
+
+    /// A stub executor that always returns an error.
+    struct FailingStubExtensionExecutor;
+
+    #[async_trait::async_trait]
+    impl workflow_runtime::extension::ExtensionExecutor for FailingStubExtensionExecutor {
+        async fn execute(
+            &self,
+            _config: &workflow_schema::CustomConfig,
+            _version: u64,
+            _input: workflow_runtime::nodes::NodeInput,
+        ) -> Result<workflow_runtime::nodes::NodeOutput, workflow_runtime::error::NodeError>
+        {
+            Err(workflow_runtime::error::NodeError::Extension(
+                workflow_runtime::error::ExtensionError::Execution("test executor failure".into()),
+            ))
         }
     }
 
@@ -1111,5 +1130,51 @@ mod runtime_value_integer {
         assert_eq!(exts[0].version, 1);
         assert_eq!(exts[1].kind, "key-pool-policy");
         assert_eq!(exts[1].version, 2);
+    }
+
+    #[test]
+    fn custom_node_failing_executor_propagates_error() {
+        let wf = Workflow {
+            id: "ext-fail".into(),
+            name: "custom-failing-executor".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                custom_node("ext1", "fail-kind"),
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "ext1"), simple_edge("ext1", "out")],
+        };
+        let plan = build_and_validate_ext(&wf);
+
+        let mut registry = workflow_runtime::extension::ExtensionRegistry::new();
+        registry.register(workflow_runtime::extension::ExtensionSpec {
+            kind: "fail-kind".into(),
+            version: 1,
+            validator: None,
+            executor: Arc::new(FailingStubExtensionExecutor),
+        });
+
+        let lanes = Arc::new(LaneRegistry::new());
+        let mut ctx = ExecutionContext::new("ext-fail-wf".into(), "run-fail".into(), lanes);
+        ctx.extension_registry = Some(Arc::new(registry));
+
+        let rt = NodeRuntime::new(plan);
+        let result = tokio_test::block_on(rt.execute(
+            &ctx,
+            NodeInput::message(RuntimeValue::String("hello".into())),
+        ));
+        assert!(result.is_err(), "Failing executor must propagate error");
+        match result {
+            Err(WorkflowError::Runtime { node_id, source }) => {
+                assert_eq!(node_id, "ext1");
+                let msg = source.to_string();
+                assert!(
+                    msg.contains("extension execution failed"),
+                    "error should mention extension execution: {msg}"
+                );
+            }
+            other => panic!("expected Runtime error, got: {other:?}"),
+        }
     }
 }
