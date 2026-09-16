@@ -153,13 +153,13 @@ Test:
 
 ## Frontend interaction tests (Phase 6.5+)
 
-`apps/web/` has 43 frontend tests across workflow-serializer, run-state reducer, and WorkflowBuilder interaction tests:
+`apps/web/` has 48 frontend tests across workflow-serializer, run-state reducer, and WorkflowBuilder interaction tests:
 
 - **Panel opens** — toolbar "Run test" button triggers a real panel render (not `return null`)
 - **Run submits** — clicking "Run" in the panel fires `POST /workflows/:id/run`, the real backend envelope (request_id, workflow_version, snapshot_version, plan_hash, output) surfaces in the panel
 - **Failed run** — unpublished workflow surfaces the real backend 409 error message
 
-Plus 35 tests covering workflow serialization (round-trip, edge cases, unknown-kind handling), run-state reducer logic, and version comparison. These tests use `@testing-library/react` + `happy-dom` (via `@happy-dom/global-registrator`), stubbing `globalThis.fetch` for API routes. The `ResizeObserver` mock is in `src/test-setup.ts` (bunfig.toml preload).
+Plus 40 tests covering workflow serialization (round-trip, edge cases, unknown-kind handling, retry_on empty-list semantics, provider/protocol consistency), run-state reducer logic, and version comparison. These tests use `@testing-library/react` + `happy-dom` (via `@happy-dom/global-registrator`), stubbing `globalThis.fetch` for API routes. The `ResizeObserver` mock is in `src/test-setup.ts` (bunfig.toml preload).
 
 **Why interaction tests instead of static heuristic?** Detecting "this component returns null and should not" is fragile via static analysis. The interaction test proves the button click actually reaches the real panel and mutation — a `return null` stub, an unwired `onRun`, or a dead `submitRun` all make these tests red (verified via red/green during implementation).
 
