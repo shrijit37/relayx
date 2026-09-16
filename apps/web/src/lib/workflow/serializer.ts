@@ -29,6 +29,9 @@ export type SchemaNodeKind =
 export type LlmSchemaConfig = {
   kind: "llm";
   protocol?: string;
+  /** Editor metadata — the Rust `LlmConfig` has no `provider` field, so the
+   *  backend ignores it (serde drops unknown non-provider keys silently).
+   *  The runtime derives the provider entirely from `lane_id` + `protocol`. */
   provider?: string;
   model?: string;
   temperature?: number;
@@ -232,7 +235,10 @@ function configFor(n: CanonicalNode, issues: Issue[]): SchemaNodeConfig | null {
         rounds: c.fallback.rounds,
       };
       if (c.fallback.strategy !== undefined) out.strategy = c.fallback.strategy;
-      if (c.fallback.retryOn !== undefined && c.fallback.retryOn.length > 0) out.retry_on = c.fallback.retryOn;
+      // Emit retry_on whenever it is defined — INCLUDING an empty list. An
+      // omitted key deserializes to the Rust serde default ([429]), silently
+      // re-enabling rate-limit rotation; an explicit [] disables it.
+      if (c.fallback.retryOn !== undefined) out.retry_on = c.fallback.retryOn;
       return out;
     }
     case "retry": {
@@ -246,7 +252,9 @@ function configFor(n: CanonicalNode, issues: Issue[]): SchemaNodeConfig | null {
         on_provider_error: c.policy.onProviderError,
         target: llmToSchema(c.target),
       };
-      if (c.policy.retryOn !== undefined && c.policy.retryOn.length > 0) out.retry_on = c.policy.retryOn;
+      // Emit retry_on whenever it is defined — INCLUDING an empty list
+      // (same silent-429-default hazard as fallback above).
+      if (c.policy.retryOn !== undefined) out.retry_on = c.policy.retryOn;
       return out;
     }
   }
@@ -325,7 +333,9 @@ function configFromSchema(sn: SchemaNode, issues: Issue[]): CanonicalConfig | nu
         providers: c.providers.map((p) => ({ lane: p.lane_id, ...(p.model ? { model: p.model } : {}) })),
         rounds: c.rounds,
         ...(c.strategy ? { strategy: c.strategy } : {}),
-        ...(c.retry_on && c.retry_on.length > 0 ? { retryOn: c.retry_on } : {}),
+        // Round-trip the empty list too — an absent key means the Rust
+        // default ([429]) applies on the backend, which must stay visible.
+        ...(c.retry_on !== undefined ? { retryOn: c.retry_on } : {}),
       },
     };
     case "retry": return {
@@ -335,7 +345,7 @@ function configFromSchema(sn: SchemaNode, issues: Issue[]): CanonicalConfig | nu
         delayMs: c.delay_ms,
         onTimeout: c.on_timeout,
         onProviderError: c.on_provider_error,
-        ...(c.retry_on && c.retry_on.length > 0 ? { retryOn: c.retry_on } : {}),
+        ...(c.retry_on !== undefined ? { retryOn: c.retry_on } : {}),
       },
       target: llmFromSchema(c.target),
     };

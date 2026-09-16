@@ -24,6 +24,7 @@ import {
   deserializeWorkflow,
   serializeWorkflow,
 } from "@/lib/workflow";
+import { validateConfig, type Issue } from "@/lib/workflow/validation";
 
 function node(id: string, kind: RelayNode["data"]["kind"], title = id): RelayNode {
   return {
@@ -551,7 +552,9 @@ describe("phase 6.6 canonical serializer", () => {
       retry_on: [429, 503],
       rounds: 1,
     });
-    // RetryOn [] (default off) is omitted for compactness — never fabricated.
+    // RetryOn [] is emitted explicitly when configured — never fabricated
+    // for an unset value. Here the value is [429, 503], so the wire carries
+    // it verbatim.
     const deser = deserializeWorkflow(ser.workflow!);
     const back = deser.nodes.find((n) => n.id === "fb")!;
     const cc = back.data as { canonicalConfig?: { kind: string; fallback?: { strategy?: string; retryOn?: number[]; rounds?: number } } };
@@ -655,6 +658,82 @@ describe("phase 6.6 canonical serializer", () => {
     expect((rt.config as { retry_on?: number[] }).retry_on).toBeUndefined();
   });
 
+  test("fallback retry_on: [] round-trips as an explicit empty list (429 rotation disabled)", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      {
+        ...node("fb", "fallback"),
+        data: {
+          kind: "fallback",
+          title: "Fallback",
+          lines: ["2 fallbacks"],
+          canonicalConfig: {
+            kind: "fallback",
+            fallback: {
+              providers: [
+                { lane: "primary", model: "m1" },
+                { lane: "backup", model: "m2" },
+              ],
+              rounds: 1,
+              strategy: "sequential",
+              // An explicitly-cleared list must NOT become the serde default
+              // [429] on the backend — it disables status-driven failover.
+              retryOn: [],
+            },
+          },
+        } as RelayNode["data"],
+      },
+      node("out", "output"),
+    ];
+    const edges: Edge[] = [edge("e1", "in", "fb"), edge("e2", "fb", "out")];
+    const ser = serializeWorkflow(nodes, edges);
+    expect(ser.errors).toEqual([]);
+    const fb = ser.workflow!.nodes.find((n) => n.id === "fb")!;
+    // The empty list is emitted explicitly (not omitted), so the Rust
+    // #[serde(default = "default_fallback_retry_on")] never re-adds [429].
+    expect(fb.config).toMatchObject({ kind: "fallback", retry_on: [] });
+    // Round-trip: the canonical config keeps the explicitly-cleared list.
+    const deser = deserializeWorkflow(ser.workflow!);
+    const back = deser.nodes.find((n) => n.id === "fb")!;
+    const cc = back.data as { canonicalConfig?: { kind: string; fallback?: { retryOn?: number[] } } };
+    expect(cc.canonicalConfig).toMatchObject({
+      kind: "fallback",
+      fallback: { retryOn: [] },
+    });
+  });
+
+  test("retry retry_on: [] round-trips as an explicit empty list (429 retry disabled)", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      {
+        ...node("rt", "retry"),
+        data: {
+          kind: "retry",
+          title: "Retry",
+          lines: [],
+          canonicalConfig: {
+            kind: "retry",
+            policy: { maxAttempts: 2, delayMs: 500, onTimeout: true, onProviderError: false, retryOn: [] },
+            target: { lane: "openai-direct", stream: true },
+          },
+        } as RelayNode["data"],
+      },
+      node("out", "output"),
+    ];
+    const edges: Edge[] = [edge("e1", "in", "rt"), edge("e2", "rt", "out")];
+    const ser = serializeWorkflow(nodes, edges);
+    expect(ser.errors).toEqual([]);
+    const rt = ser.workflow!.nodes.find((n) => n.id === "rt")!;
+    expect(rt.config).toMatchObject({ kind: "retry", retry_on: [] });
+    const deser = deserializeWorkflow(ser.workflow!);
+    const back = deser.nodes.find((n) => n.id === "rt")!;
+    const cc = back.data as { canonicalConfig?: { kind: string; policy?: { retryOn?: number[] } } };
+    expect(cc.canonicalConfig).toMatchObject({
+      kind: "retry",
+      policy: { retryOn: [] },
+    });
+  });
+
   test("parseStatusList normalizes comma-separated input into number[]", () => {
     const { parseStatusList, formatStatusList } = require("@/lib/workflow/node-definitions") as {
       parseStatusList: (s: string) => number[];
@@ -666,5 +745,39 @@ describe("phase 6.6 canonical serializer", () => {
     expect(parseStatusList("")).toEqual([]);
     expect(parseStatusList("99,700")).toEqual([]);
     expect(formatStatusList([429, 503])).toBe("429,503");
+  });
+
+  test("openai_responses is a valid protocol, not a provider (no warn-and-drop)", () => {
+    // The known-provider set is {anthropic, openai}; `openai_responses` was
+    // previously flagged as an unknown provider. It is a PROTOCOL value —
+    // validation must not warn on it as a provider.
+    const issues: Issue[] = [];
+    validateConfig("provider", {
+      kind: "llm",
+      config: { provider: "openai", protocol: "openai_responses", stream: true },
+    } as never, issues);
+    const providerWarn = issues.find((i) => i.field === "provider" && i.severity === "warn");
+    expect(providerWarn).toBeUndefined();
+  });
+
+  test("provider↔protocol mismatch is an error, not a warn", () => {
+    // provider `anthropic` with protocol `openai_chat` is a config error.
+    const issues: Issue[] = [];
+    validateConfig("provider", {
+      kind: "llm",
+      config: { provider: "anthropic", protocol: "openai_chat", stream: true },
+    } as never, issues);
+    const inconsistency = issues.find((i) => i.message.includes("inconsistent"));
+    expect(inconsistency).toBeDefined();
+    expect(inconsistency!.severity).toBe("error");
+  });
+
+  test("consistent provider↔protocol pairing passes", () => {
+    const issues: Issue[] = [];
+    validateConfig("provider", {
+      kind: "llm",
+      config: { provider: "anthropic", protocol: "anthropic", stream: true },
+    } as never, issues);
+    expect(issues.find((i) => i.message.includes("inconsistent"))).toBeUndefined();
   });
 });
