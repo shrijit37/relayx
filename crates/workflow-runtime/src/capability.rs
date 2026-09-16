@@ -29,38 +29,52 @@ pub struct Capabilities {
     pub cache_hints: bool,
 }
 
+/// Number of capability fields — must stay in sync with `FIELD_NAMES` and
+/// [`Capabilities::bools`]. A mismatch is a compile error via the array
+/// size, but this constant documents the contract.
+const CAPABILITY_COUNT: usize = 9;
+
+/// Field name for each capability, in declaration order. Used to report
+/// missing capabilities without hand-rolling near-identical branches.
+const FIELD_NAMES: [&str; CAPABILITY_COUNT] = [
+    "streaming",
+    "tools",
+    "structured_output",
+    "reasoning",
+    "vision",
+    "audio",
+    "citations",
+    "deferred_tools",
+    "cache_hints",
+];
+
 impl Capabilities {
     /// Return the set of capability fields that are in `self` but not `other`.
     pub fn excess(&self, other: &Capabilities) -> Vec<&'static str> {
-        let mut missing = Vec::new();
-        if self.streaming && !other.streaming {
-            missing.push("streaming");
-        }
-        if self.tools && !other.tools {
-            missing.push("tools");
-        }
-        if self.structured_output && !other.structured_output {
-            missing.push("structured_output");
-        }
-        if self.reasoning && !other.reasoning {
-            missing.push("reasoning");
-        }
-        if self.vision && !other.vision {
-            missing.push("vision");
-        }
-        if self.audio && !other.audio {
-            missing.push("audio");
-        }
-        if self.citations && !other.citations {
-            missing.push("citations");
-        }
-        if self.deferred_tools && !other.deferred_tools {
-            missing.push("deferred_tools");
-        }
-        if self.cache_hints && !other.cache_hints {
-            missing.push("cache_hints");
-        }
-        missing
+        let self_bools = self.bools();
+        let other_bools = other.bools();
+        FIELD_NAMES
+            .iter()
+            .zip(self_bools.iter().zip(other_bools.iter()))
+            .filter(|(_, (s, o))| **s && !**o)
+            .map(|(name, _)| *name)
+            .collect()
+    }
+
+    /// The capability flags as a fixed-order array (indexes align with
+    /// [`FIELD_NAMES`]).
+    fn bools(&self) -> [bool; CAPABILITY_COUNT] {
+        [
+            self.streaming,
+            self.tools,
+            self.structured_output,
+            self.reasoning,
+            self.vision,
+            self.audio,
+            self.citations,
+            self.deferred_tools,
+            self.cache_hints,
+        ]
     }
 
     /// Check if `other` satisfies all capability requirements in `self`.

@@ -44,7 +44,7 @@ const applied = await migrate(pool);
 if (applied.length > 0) console.log(`[migrate] applied: ${applied.join(", ")}`);
 
 // Start the models.dev catalog sync in the background.
-startCatalogSync(pool);
+const catalogSyncHandle = startCatalogSync(pool);
 
 // Reap crash-stuck `running` runs: a control-plane death mid-run leaves the
 // row `running` forever; the soft reaper marks stale rows failed.
@@ -160,6 +160,7 @@ const watchdogHandle = setInterval(async () => {
 // Control plane is durable + independent of the data plane: leaving this
 // running keeps serving CRUD; gateway publish cadence is driven by calls.
 process.on("SIGINT", async () => {
+  clearInterval(catalogSyncHandle);
   clearInterval(watchdogHandle);
   reaperHandle.stop();
   await app.close();

@@ -80,6 +80,7 @@ export type WorkflowActiveRow = {
  *  Unknown fields are silently ignored rather than interpolated into SQL. */
 const ALLOWED_PROVIDER_UPDATE_FIELDS = new Set(["name", "protocol", "base_url", "model"]);
 const ALLOWED_LANE_UPDATE_FIELDS = new Set(["provider_id", "endpoint", "base_url", "egress", "policies", "credential_ref"]);
+const ALLOWED_RUN_UPDATE_FIELDS = new Set(["status", "output", "error", "completed_at"]);
 
 const newId = (): string => crypto.randomUUID();
 
@@ -352,12 +353,11 @@ export const runs = {
   ): Promise<RunRow | null> {
     // Guard: only allow known columns to prevent SQL injection through future
     // callers that might pass untrusted field names.
-    const ALLOWED = new Set(["status", "output", "error", "completed_at"]);
     const fields: string[] = [];
     const values: unknown[] = [id];
     let idx = 2;
     for (const [key, val] of Object.entries(patch)) {
-      if (val !== undefined && ALLOWED.has(key)) {
+      if (val !== undefined && ALLOWED_RUN_UPDATE_FIELDS.has(key)) {
         fields.push(`${key} = $${idx}`);
         values.push(val);
         idx++;

@@ -192,8 +192,8 @@ export async function deleteLane(id: string): Promise<void> {
 /** Fetch the latest version row for a workflow (sorted descending). */
 export async function fetchWorkflowLatestVersion(workflowId: string): Promise<VersionRow | null> {
   const rows = await req<VersionRow[]>(`/workflows/${workflowId}/versions`);
-  if (!rows.length) return null;
-  return rows.reduce((a, b) => (a.version > b.version ? a : b));
+  // DB returns DESC-sorted — first row is the latest.
+  return rows[0] ?? null;
 }
 
 /** Persist the editor state as a new immutable version (public). */
@@ -429,13 +429,6 @@ export type CatalogModel = {
   open_weights: boolean;
 };
 
-export type CatalogProvider = {
-  id: string;
-  display_name: string;
-  logo_path: string | null;
-  updated_at: string;
-};
-
 /** Fetch catalog models (filterable by provider, capability, or search). */
 export async function fetchCatalogModels(params?: {
   provider?: string;
@@ -448,22 +441,6 @@ export async function fetchCatalogModels(params?: {
   if (params?.search) qs.set("search", params.search);
   const q = qs.toString();
   return req<CatalogModel[]>(`/catalog/models${q ? `?${q}` : ""}`);
-}
-
-/** Fetch catalog providers list. */
-export async function fetchCatalogProviders(): Promise<CatalogProvider[]> {
-  return req<CatalogProvider[]>("/catalog/providers");
-}
-
-/** Fetch catalog sync status. */
-export async function fetchCatalogStatus(): Promise<{
-  version: string;
-  last_sync: string;
-  source: string;
-  model_count: number;
-  provider_count: number;
-}> {
-  return req("/catalog/status");
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────

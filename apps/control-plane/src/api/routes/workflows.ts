@@ -294,16 +294,26 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
       let sawDone = false;
       let sawError = false;
       let remainder = "";
+      const decoder = new TextDecoder();
+      const scanLines = (text: string) => {
+        for (const line of text.split("\n")) {
+          if (line === "event: done") sawDone = true;
+          if (line === "event: error") sawError = true;
+        }
+      };
       const pump = async () => {
         try {
           while (true) {
             if (reply.raw.destroyed) break;
             const { done, value } = await reader.read();
-            if (done) break;
-            const chunk = new TextDecoder().decode(value);
+            if (done) {
+              // Scan trailing remainder for a split terminal marker.
+              scanLines(remainder);
+              break;
+            }
+            const chunk = decoder.decode(value);
             const text = remainder + chunk;
-            if (text.includes("event: done")) sawDone = true;
-            if (text.includes("event: error")) sawError = true;
+            scanLines(text);
             remainder = text.includes("\n")
               ? text.slice(text.lastIndexOf("\n") + 1)
               : text;

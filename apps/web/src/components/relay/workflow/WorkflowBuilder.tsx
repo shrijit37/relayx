@@ -325,18 +325,33 @@ function Canvas({ workflowId }: { workflowId: string }) {
     //    and reports every issue (unsupported nodes, missing lanes, fabricated
     //    config guards) — it never silently drops nodes or infers semantics
     //    from titles. The view carries `canonicalConfig` from the Inspector.
-    const serializeResult = useMemo(() => {
-        const serialized = serializeWorkflow(nodes, edges, {
-            id: workflowId === "new" ? "workflow" : workflowId,
-            name: workflowName,
-            version: version ?? 1,
-        });
-        return {
-            json: serialized.workflow,
-            unsupported: nodes.filter((n) => !executableKinds.has(n.data.kind)),
-            errors: serialized.errors,
-            warnings: serialized.warnings,
-        };
+    //
+    //    Debounced: `serializeWorkflow` walks the whole canvas and is
+    //    re-invoked on every keystroke/drag via `nodes`/`edges` identity
+    //    churn. Running it ~150ms after input settles keeps the editor
+    //    responsive without staleness (the toolbar status and Save path both
+    //    consume the debounced result).
+    const [serializeResult, setSerializeResult] = useState<{
+        json: WorkflowJson | null;
+        unsupported: { data: { kind: string } }[];
+        errors: string[];
+        warnings: string[];
+    }>({ json: null, unsupported: [], errors: [], warnings: [] });
+    useEffect(() => {
+        const handle = setTimeout(() => {
+            const serialized = serializeWorkflow(nodes, edges, {
+                id: workflowId === "new" ? "workflow" : workflowId,
+                name: workflowName,
+                version: version ?? 1,
+            });
+            setSerializeResult({
+                json: serialized.workflow,
+                unsupported: nodes.filter((n) => !executableKinds.has(n.data.kind)),
+                errors: serialized.errors,
+                warnings: serialized.warnings,
+            });
+        }, 150);
+        return () => clearTimeout(handle);
     }, [nodes, edges, workflowId, workflowName, version]);
 
     // ── Live local validation (Phase 6.6 §15). The editor shows schema +

@@ -292,7 +292,7 @@ async function getCatalogMeta(
  * Sync state is closure-owned — no module-level singletons, safe for tests
  * that call startCatalogSync multiple times with independent pools.
  */
-export function startCatalogSync(pool: Pool): void {
+export function startCatalogSync(pool: Pool): ReturnType<typeof setInterval> {
   const state: SyncState = { lastSyncAt: 0, lastSyncOk: false };
 
   // Trigger first sync immediately (async, not blocking boot).
@@ -300,11 +300,12 @@ export function startCatalogSync(pool: Pool): void {
     console.warn("[models-dev] initial sync failed:", e),
   );
 
-  setInterval(() => {
+  const handle = setInterval(() => {
     syncCatalog(pool, state).catch((e) =>
       console.warn("[models-dev] periodic sync failed:", e),
     );
   }, SYNC_TTL_MS);
 
   console.log("[models-dev] sync loop started (TTL 24h)");
+  return handle;
 }

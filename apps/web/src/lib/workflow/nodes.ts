@@ -94,7 +94,7 @@ export type CanonicalConfig =
   | { kind: "input"; inputType?: string; description?: string; variables?: InputVariable[]; value?: unknown }
   | { kind: "output"; value?: unknown }
   | { kind: "llm"; config: LlmRequestConfig }
-  | { kind: "router"; strategy: "first_match" | "round_robin" | "load_based" }
+  | { kind: "router"; strategy: "first_match" | "round_robin" }
   | { kind: "transform"; operation: "passthrough" | "extract" | "merge" | "filter" }
   | { kind: "condition"; condition: ConditionValue }
   | { kind: "mcp"; tool: McpToolRef }

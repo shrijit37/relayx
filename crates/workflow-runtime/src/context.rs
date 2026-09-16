@@ -12,6 +12,20 @@ pub type GatewayHttpClient = hyper_util::client::legacy::Client<
     axum::body::Body,
 >;
 
+/// Build a gateway HTTP client with keep-alive pooling and a bounded idle
+/// pool. This is the single constructor for the plain upstream client —
+/// the gateway's per-lane layer wraps it with `retry_canceled_requests`
+/// off. Callers wanting the identical default client (admin `/run`,
+/// workflow-runtime tests) use this instead of hand-rolling a builder.
+pub fn gateway_client(idle_timeout: Duration, max_idle: usize) -> Arc<GatewayHttpClient> {
+    Arc::new(
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .pool_idle_timeout(idle_timeout)
+            .pool_max_idle_per_host(max_idle)
+            .build(hyper_util::client::legacy::connect::HttpConnector::new()),
+    )
+}
+
 /// Runtime context passed to every node during execution.
 ///
 /// Contains no database fields — all state is memory-resident or

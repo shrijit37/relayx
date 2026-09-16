@@ -167,7 +167,6 @@ const defs: Record<EditorKind, NodeDefinition> = {
         options: [
           { value: "first_match", label: "first match" },
           { value: "round_robin", label: "round robin" },
-          { value: "load_based", label: "load based" },
         ] },
     ],
     defaults: () => ({ kind: "router", strategy: "round_robin" }),

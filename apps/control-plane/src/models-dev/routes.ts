@@ -11,6 +11,7 @@ import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 
 const LOGO_CACHE = new Map<string, { svg: string; fetchedAt: number }>();
+const LOGO_CACHE_MAX_SIZE = 512;
 const LOGO_TTL_MS = 60 * 60 * 1000; // 1h
 const LOGO_BASE = "https://models.dev/logos";
 
@@ -125,6 +126,11 @@ export function registerCatalogRoutes(
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const svg = await resp.text();
+      // Evict oldest entry when cache is full.
+      if (LOGO_CACHE.size >= LOGO_CACHE_MAX_SIZE) {
+        const oldest = LOGO_CACHE.keys().next().value;
+        if (oldest !== undefined) LOGO_CACHE.delete(oldest);
+      }
       LOGO_CACHE.set(safeId, { svg, fetchedAt: Date.now() });
       return reply
         .header("Content-Type", "image/svg+xml")

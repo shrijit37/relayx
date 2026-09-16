@@ -64,8 +64,8 @@ pub enum NodeKind {
     Fallback,
     /// Retries a downstream node's execution with configurable policy.
     Retry,
-    /// An externally registered node kind (dispatched via the runtime's
-    /// `NodeRegistry` by the kind string inside `CustomConfig`).
+    /// A node kind reserved for externally registered node kinds; the runtime
+    /// refuses to execute it (no extension registry is installed).
     Custom,
 }
 
@@ -154,8 +154,6 @@ pub enum RouterStrategy {
     FirstMatch,
     /// Round-robin across paths.
     RoundRobin,
-    /// Load-based routing.
-    LoadBased,
 }
 
 /// Configuration for a Transform node.
@@ -284,7 +282,7 @@ fn default_retry_delay_ms() -> u64 {
 /// Configuration for an externally registered (custom) node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomConfig {
-    /// The kind string the runtime's `NodeRegistry` uses to find this node.
+    /// Opaque kind string identifying this custom node executor.
     pub kind: String,
     /// Opaque configuration passed through to the registered executor.
     #[serde(default)]
