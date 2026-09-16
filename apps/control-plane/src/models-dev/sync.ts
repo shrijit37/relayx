@@ -154,7 +154,7 @@ async function upsertCatalog(
     const providerRows = new Map<string, string>();
     for (const p of providers) providerRows.set(p.id, p.display_name);
     for (const mid of Object.keys(models)) {
-      const pid = mid.includes("/") ? mid.split("/")[0] : "unknown";
+      const pid = mid.includes("/") ? mid.split("/")[0]! : "unknown";
       if (!providerRows.has(pid)) providerRows.set(pid, pid);
     }
     await client.query(
@@ -171,7 +171,7 @@ async function upsertCatalog(
     // round-trip per row inside an already-open transaction).
     const modelRows: unknown[] = [];
     for (const [mid, model] of Object.entries(models)) {
-      const providerId = mid.includes("/") ? mid.split("/")[0] : "unknown";
+      const providerId = mid.includes("/") ? mid.split("/")[0]! : "unknown";
       modelRows.push({
         id: mid,
         provider_id: providerId,
