@@ -126,10 +126,7 @@ impl ExtensionRegistry {
     /// If a spec with the same `kind` already exists, it is replaced.
     /// Panics in debug builds if `kind` is empty.
     pub fn register(&mut self, spec: ExtensionSpec) {
-        debug_assert!(
-            !spec.kind.is_empty(),
-            "extension kind must not be empty"
-        );
+        debug_assert!(!spec.kind.is_empty(), "extension kind must not be empty");
         self.specs.insert(spec.kind.clone(), spec);
     }
 
