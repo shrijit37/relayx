@@ -46,7 +46,7 @@ See [`PHASE6_REPORT.md`](archive/PHASE6_REPORT.md) for the full completion repor
 - **Frontend wired to real backend** — versions page + workflows index fetch from the control plane; publish returns backend-authoritative version/plan-hash. **Phase 6.5 closes the mock gap:** the editor loads persisted versions into the canvas, Save/Validate are wired end-to-end, and a real Run contract (control-plane → gateway → provider) executes the published ACTIVE version with the real envelope shown in the UI. Management pages show real persisted rows or honest unavailable states; `relay-data.ts` is deleted.
 - **Gateway restart preservation** — the control plane rehydrates the last ACTIVE version of every workflow on boot.
 
-**Test count (Phase 6): Rust 306 passing, zero failures.** Baseline 267 → +27 (control-plane e2e, gateway `/run`, SQL injection defense-in-depth), then −5 from the 2026-09-16 ponytail cleanup (removed dead node-extension and provider machinery), then +17 from extension core (ExtensionRegistry, worker RPC transport, extension integration tests). **Control plane: 48 integration tests** (api 18, publish 4, sql-injection 4, catalog 17, reaper 5) against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 38 tests (workflow-serializer + run-state + WorkflowBuilder interaction tests), production build clean.**
+**Test count (Phase 6): Rust 307 passing, zero failures.** Baseline 267 → +27 (control-plane e2e, gateway `/run`, SQL injection defense-in-depth), then −5 from the 2026-09-16 ponytail cleanup (removed dead node-extension and provider machinery), then +17 from extension core (ExtensionRegistry, worker RPC transport, extension integration tests). **Control plane: 48 integration tests** (api 18, publish 4, sql-injection 4, catalog 17, reaper 5) against a real Postgres 16 + in-process mock gateway. **Frontend: tsc clean, 38 tests (workflow-serializer + run-state + WorkflowBuilder interaction tests), production build clean.**
 
 ### Phase 5 — Runtime publication & frontend wiring (COMPLETE)
 
@@ -175,7 +175,7 @@ Audited findings, current status:
 
 ## Test counts
 
-- **Rust: 306 tests** (workspace, zero failures).
+- **Rust: 307 tests** (workspace, zero failures).
 - **Control plane: 48 tests** (api 18, publish 4, sql-injection 4, catalog 17, reaper 5) against a real Postgres 16 + in-process mock gateway.
 - **Frontend: 38 tests** (workflow-serializer + run-state reducer + 3 WorkflowBuilder interaction tests) run via `bun test` with happy-dom + @testing-library/react. Interaction tests guard against dead-UI regressions (stubbed `RunPanel`, unwired toolbar buttons).
 - **Gateway admin auth: 5 tests** in `apps/gateway/tests/admin_auth.rs` proving anonymous rejection, wrong-key rejection, valid-key acceptance, `/healthz` stays open, and no-key backward compat.

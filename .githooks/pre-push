@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#
+# Pre-push hook: prevent pushing PR branches that are behind origin/main.
+#
+# Root cause: PR branches that diverge before main advances create
+# recurring merge conflicts on shared files (CI workflows, etc.).
+# This hook blocks the push and tells the user to rebase first.
+#
+# Applies to: pr/* and feat/* branches (PR head branches).
+# Does not apply to: main, dependabot/*, docs/*, or direct pushes.
+#
+
+remote="$1"
+url="$2"
+
+# Read each line from stdin (one per ref being pushed).
+while read local_ref local_sha remote_ref remote_sha; do
+    # Skip deletions (SHA is all zeros).
+    if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+        continue
+    fi
+
+    # Extract short branch name from the ref.
+    branch="${local_ref#refs/heads/}"
+
+    # Only apply to PR head branches (pr/* and feat/*).
+    if [[ ! "$branch" =~ ^(pr/|feat/) ]]; then
+        continue
+    fi
+
+    # Skip dependabot and docs branches.
+    if [[ "$branch" =~ ^(dependabot/|docs/) ]]; then
+        continue
+    fi
+
+    # Fetch latest origin refs (fast, no checkout needed).
+    git fetch --quiet "$remote" 2>/dev/null || true
+
+    # Check if the branch is behind origin/main.
+    default_branch="origin/main"
+    if ! git rev-parse --verify "$default_branch" >/dev/null 2>&1; then
+        continue
+    fi
+
+    behind=$(git rev-list --count "$local_sha".."$default_branch" 2>/dev/null || echo "0")
+
+    if [ "$behind" -gt 0 ]; then
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════════╗"
+        echo "║  BLOCKED: Branch '$branch' is $behind commits behind main  ║"
+        echo "╠══════════════════════════════════════════════════════════════╣"
+        echo "║                                                            ║"
+        echo "║  Pushing a branch that is behind main will cause merge     ║"
+        echo "║  conflicts on shared files (CI workflows, docs, etc.).     ║"
+        echo "║                                                            ║"
+        echo "║  Fix: rebase onto main before pushing:                     ║"
+        echo "║                                                            ║"
+        echo "║    git fetch origin                                       ║"
+        echo "║    git rebase origin/main                                  ║"
+        echo "║    git push --force-with-lease                             ║"
+        echo "║                                                            ║"
+        echo "╚══════════════════════════════════════════════════════════════╝"
+        echo ""
+        exit 1
+    fi
+done
