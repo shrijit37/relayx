@@ -525,11 +525,21 @@ function Canvas({ workflowId }: { workflowId: string }) {
     const saveMutation = useSaveWorkflowMutation(workflowId);
     const validateMutation = useValidateMutation();
 
+    // Serialize from current canvas state on action — NOT from the debounced
+    // `serializeResult` which can be 150ms stale. A click within 150ms of an
+    // edit would otherwise submit the previous canvas state (review finding #12).
     const serializeTo = useCallback(() => {
-        const { errors, warnings, json } = serializeResult;
-        if (json) return { workflow: json as WorkflowJson, errors: [], warnings };
-        return { workflow: null, errors, warnings };
-    }, [serializeResult]);
+        const serialized = serializeWorkflow(nodes, edges, {
+            id: workflowId === "new" ? "workflow" : workflowId,
+            name: workflowName,
+            version: version ?? 1,
+        });
+        const unsupported = nodes.filter((n) => !executableKinds.has(n.data.kind));
+        if (serialized.workflow) {
+            return { workflow: serialized.workflow as WorkflowJson, errors: [], warnings: serialized.warnings };
+        }
+        return { workflow: null, errors: serialized.errors, warnings: serialized.warnings };
+    }, [nodes, edges, workflowId, workflowName, version]);
 
     // Save in "new" mode creates the real workflow row first (same control-plane
     // POST as the workflow list's Create button), persists the canvas as its

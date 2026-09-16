@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createLane,
   createProvider,
+  deactivateWorkflow,
   deleteLane,
   deleteProvider,
   deleteWorkflow,
@@ -211,6 +212,22 @@ export function useRollbackWorkflowMutation() {
     // Invalidate on settled, not just success: a failed rollback must still
     // refresh the cached versions/workflows so the UI shows backend truth
     // (a stuck or partial republish shouldn't leave stale state visible).
+    onSettled: (_result, _error, workflowId) => {
+      queryClient.invalidateQueries({ queryKey: publicationKeys.versions(workflowId) });
+      queryClient.invalidateQueries({ queryKey: publicationKeys.workflows });
+    },
+  });
+}
+
+/** Deactivate a workflow (removes the active pointer, gateway stops serving it). */
+export function useDeactivateWorkflowMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    Awaited<ReturnType<typeof deactivateWorkflow>>,
+    Error,
+    string
+  >({
+    mutationFn: deactivateWorkflow,
     onSettled: (_result, _error, workflowId) => {
       queryClient.invalidateQueries({ queryKey: publicationKeys.versions(workflowId) });
       queryClient.invalidateQueries({ queryKey: publicationKeys.workflows });

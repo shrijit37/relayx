@@ -53,6 +53,18 @@ export async function syncCatalog(
 
       if (resp.status === 304) {
         console.log("[models-dev] catalog unchanged (304)");
+        // Persist the sync timestamp even on 304 so /catalog/status
+        // reflects the latest successful check, not the last full sync.
+        await pool
+          .query(
+            `INSERT INTO catalog_meta (key, value, updated_at)
+             VALUES ('last_sync_at', $1, now())
+             ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = now()`,
+            [String(now)],
+          )
+          .catch((e) =>
+            console.warn("[models-dev] failed to persist 304 sync timestamp:", e),
+          );
         state.lastSyncAt = now;
         state.lastSyncOk = true;
         return await getCatalogMeta(pool, state);
@@ -122,7 +134,9 @@ function transformProviders(
   for (const [pid, entry] of Object.entries(raw)) {
     providers.push({ id: pid, display_name: entry.name });
     for (const [mid, model] of Object.entries(entry.models)) {
-      models[mid] = model;
+      // Qualify the key with the provider slug so different providers
+      // with the same bare model id (e.g. "gpt-4o") don't collide.
+      models[`${pid}/${mid}`] = model;
     }
   }
 
@@ -171,12 +185,13 @@ async function upsertCatalog(
     // round-trip per row inside an already-open transaction).
     const modelRows: unknown[] = [];
     for (const [mid, model] of Object.entries(models)) {
+      // Keys are now qualified as "provider/model-id" (e.g. "openai/gpt-4o").
       const providerId = mid.includes("/") ? mid.split("/")[0]! : "unknown";
       modelRows.push({
         id: mid,
         provider_id: providerId,
         name: model.name,
-        description: model.description,
+        description: model.description ?? "",
         family: model.family ?? null,
         modalities: model.modalities,
         capabilities: {
@@ -229,6 +244,13 @@ async function upsertCatalog(
         [modelIds],
       );
     }
+
+    // Remove providers whose models have all been deleted (stale provider
+    // cleanup). Must run AFTER model deletion so orphaned providers are
+    // identified correctly.
+    await client.query(
+      `DELETE FROM catalog_providers WHERE id NOT IN (SELECT DISTINCT provider_id FROM catalog_models)`,
+    );
 
     // Store ETag in catalog_meta (proper key-value, not a sentinel row).
     await client.query(

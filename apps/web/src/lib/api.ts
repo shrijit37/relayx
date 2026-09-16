@@ -38,6 +38,7 @@ export type WorkflowRow = {
   name: string;
   status: string;
   project_id: string;
+  is_active: boolean;
   created_at: string;
 };
 
@@ -114,7 +115,7 @@ export async function fetchWorkflowVersions(workflowId: string): Promise<Version
 
 /** Load all workflows (backend-derived list for the index page). */
 export async function fetchWorkflows(): Promise<
-  Array<{ id: string; name: string; status: string; created_at: string }>
+  Array<{ id: string; name: string; status: string; is_active: boolean; created_at: string }>
 > {
   return req(`/workflows`);
 }
@@ -135,6 +136,14 @@ export async function rollbackWorkflow(workflowId: string): Promise<{
 /** Delete a workflow row (cascades versions, publications, active pointer, runs). */
 export async function deleteWorkflow(workflowId: string): Promise<void> {
   await req(`/workflows/${encodeURIComponent(workflowId)}`, { method: "DELETE" });
+}
+
+/** Deactivate a workflow: republish the bundle without it, remove the active pointer. */
+export async function deactivateWorkflow(workflowId: string): Promise<{ status: string }> {
+  return req(`/workflows/${encodeURIComponent(workflowId)}/deactivate`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 /** Load lane records so the editor can show real lane URLs/config. */

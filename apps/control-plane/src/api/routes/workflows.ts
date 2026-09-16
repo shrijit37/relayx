@@ -21,7 +21,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
 
   // ── Workflows CRUD ──────────────────────────────────────────────────
   app.get("/workflows", async () =>
-    (await pool.query("SELECT * FROM workflows ORDER BY created_at DESC")).rows,
+    (
+      await pool.query(
+        `SELECT w.*, (wa.workflow_id IS NOT NULL) AS is_active
+         FROM workflows w
+         LEFT JOIN workflow_active wa ON wa.workflow_id = w.id
+         ORDER BY w.created_at DESC`,
+      )
+    ).rows,
   );
 
   app.post("/workflows", async (req, reply) => {
@@ -197,6 +204,19 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
     };
   });
 
+  app.post("/workflows/:id/deactivate", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const wf = await repo.workflows.get(pool, id);
+    if (!wf) return reply.code(404).send({ error: "workflow not found" });
+    const active = await repo.workflows.getActiveVersion(pool, id);
+    if (!active) {
+      return reply.code(409).send({ error: "workflow is not active" });
+    }
+    const result = await publish.deactivate({ workflowId: id });
+    if (result.status === "error") return reply.code(500).send({ error: result.error });
+    return { status: "deactivated", workflow_id: id };
+  });
+
   app.post("/workflows/:id/run", async (req, reply) => {
     const { id } = req.params as { id: string };
     const wf = await repo.workflows.get(pool, id);
@@ -251,9 +271,30 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
       }
       const upstream = gatewayResp.body;
       if (!upstream) {
-        return reply
-          .code(502)
-          .send({ error: "gateway returned an empty stream" });
+        // The gateway accepted the stream but returned no body — a
+        // protocol-level failure. Create + finalize a run record so this
+        // execution doesn't silently vanish from history.
+        const emptyRow = await repo.runs
+          .create(pool, {
+            workflow_id: id,
+            workflow_version: active.workflow_version,
+            snapshot_version: active.snapshot_version,
+            plan_hash: active.plan_hash,
+            input_body: body,
+          })
+          .catch(() => null);
+        if (emptyRow) {
+          await repo.runs
+            .update(pool, emptyRow.id, {
+              status: "failed",
+              error: "gateway returned an empty stream",
+              completed_at: new Date().toISOString(),
+            })
+            .catch((err) =>
+              console.error("[runs] failed to finalize empty-body record:", err),
+            );
+        }
+        return reply.code(502).send({ error: "gateway returned an empty stream" });
       }
 
       reply.hijack();
@@ -344,9 +385,13 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
           // completed run as failed. A user abort (browser closed the socket /
           // reader cancelled) is NOT an error: don't emit a spurious error
           // event, and let the finally block classify via `reply.raw.destroyed`.
+          //
+          // Only match the standard AbortError name — the previous regex
+          // `^abort(ed)?\b` was broad enough to match provider/gateway
+          // messages like "aborted due to rate limit", suppressing real
+          // failures and recording them as cancelled (review finding #8).
           const isAbort =
-            err instanceof Error &&
-            (err.name === "AbortError" || /^abort(ed)?\b/i.test(err.message ?? ""));
+            err instanceof Error && err.name === "AbortError";
           if (!isAbort) sawError = true;
           if (!reply.raw.destroyed && !isAbort) {
             try {

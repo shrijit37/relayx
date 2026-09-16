@@ -22,7 +22,7 @@ Machine-checked counts — the single source of truth for numbers quoted anywher
 
 **Phase 1 COMPLETE. Phase 2 COMPLETE. Phase 3 (lanes/routing) PARTIAL (lanes exist, no health/WireGuard). Phase 4 (workflow compiler) COMPLETE. Phase 5 (runtime publication & frontend wiring) COMPLETE. Phase 6 (control plane & durable configuration) COMPLETE. Phase 6.5 (reality audit) COMPLETE — see [phase-6.5-reality-audit.md](archive/phase-6.5-reality-audit.md) for the evidence-based reality baseline. Phase 6.5 implementation COMPLETE — see [PHASE6.5_IMPLEMENTATION_REPORT.md](archive/PHASE6.5_IMPLEMENTATION_REPORT.md). Phase 7 (models.dev catalog integration) COMPLETE.**
 
-> **Reality-check summary (Phase 6.5 complete):** The frontend is no longer a mock. The workflow editor loads persisted workflows from the backend, Save/Validate/Publish are real control-plane operations, and the Run path executes the published ACTIVE version through the real gateway (control-plane `/run` → gateway admin `/run` → workflow runtime → provider, with the real envelope shown in the UI). All fabricated data (`relay-data.ts`, inline fixtures, `Math.sin` time series) is gone: every page either fetches real backend rows or displays an honest "not available yet" state. Run history, telemetry, MCP/Skills/policies/secrets remain UNAVAILABLE (no backend) and are presented as such — never fabricated.
+> **Reality-check summary (Phase 6.5 complete):** The frontend is no longer a mock. The workflow editor loads persisted workflows from the backend, Save/Validate/Publish are real control-plane operations, and the Run path executes the published ACTIVE version through the real gateway (control-plane `/run` → gateway admin `/run` → workflow runtime → provider, with the real envelope shown in the UI). All fabricated data (`relay-data.ts`, inline fixtures, `Math.sin` time series) is gone: every page either fetches real backend rows or displays an honest "not available yet" state. Run history is IMPLEMENTED (control-plane `runs` table, API, reaper, frontend pages); telemetry, MCP/Skills/policies/secrets remain UNAVAILABLE (no backend) and are presented as such — never fabricated.
 
 ### Phase 7 — models.dev catalog integration (COMPLETE)
 
@@ -33,7 +33,7 @@ Read-only model intelligence from [models.dev](https://models.dev), owned by the
 - **Web model picker** — `useCatalogModels` React Query hook fetches from `/catalog/models`. The Inspector's model field shows live catalog models (name, provider, context window) and stores the bare provider-native model id (the `provider/` prefix is stripped) so the wire request is valid.
 - **Run-history reaper** — `apps/control-plane/src/domain/reaper.ts` marks crash-stuck `running` rows older than 5 minutes as `failed`, so the frontend never polls a zombie row forever.
 
-**Test count (Phase 7): 5 Rust catalog tests, 48 control-plane integration tests, 38 web tests. Full workspace: Rust clippy clean, fmt clean, tsc clean (web + control plane), production build clean.**
+**Test count (Phase 7): 48 control-plane integration tests (includes 17 catalog tests), 38 web tests. Full workspace: Rust clippy clean, fmt clean, tsc clean (web + control plane), production build clean.**
 
 ### Phase 6 — Control plane & durable configuration (COMPLETE)
 
@@ -146,9 +146,9 @@ React 19 + TanStack Start + TanStack Router + React Flow + Vite (scaffolded via 
 - **Fully real:** `/workflows` (list from control plane) ✅
 - **Real:** `/workflows/$workflowId` (load latest version → canvas; Save/Validate/Compile/Publish/Run all hit real control-plane endpoints) ✅
 - **Real:** `/workflows/$workflowId/versions` (version list + plan hash from control plane) ✅
-- **Real (persisted rows):** `/providers`, `/lanes`, `/health` (via control-plane `/system/health` probe) ✅
+- **Real (persisted rows):** `/providers`, `/lanes`, `/health`, `/runs`, `/runs/$runId` (via control-plane queries) ✅
 - **Backend-driven overview:** `/` (workflows/lanes/providers counts + real health; KPIs honestly unavailable) ✅
-- **Honest unavailable (no backend yet):** `/runs`, `/runs/$runId`, `/observability`, `/mcp`, `/skills`, `/policies`, `/secrets` ✅ (no fabricated data)
+- **Honest unavailable (no backend yet):** `/observability`, `/mcp`, `/skills`, `/policies`, `/secrets` ✅ (no fabricated data)
 
 **Workflow editor:**
 
@@ -189,7 +189,7 @@ Honest, non-goal inventory — nothing below is claimed complete:
 - **`StreamFold` Anthropic/Responses support** — the runtime now folds Anthropic `MessagesStreamEvent` and Responses `ResponseOutputTextDelta` stream events into canonical responses; tool-call delta accumulation for these protocols is best-effort.
 - **`is_timeout_error` is string-based** — retry timeout detection matches on `"timeout"`/`"timed out"` in error text (works, but a hyper version bump could reword upstream messages). A dedicated `ProtocolEngineError::Timeout` variant would eliminate the string dependence.
 - **Lane pool `connect_timeout`** — per-lane `frame_timeout` is now wired into the passthrough proxy; `connect_timeout` is still the global HTTP client's connect timeout.
-- **Run history / execution tracing** — no execution-history backend yet.
+- **Execution tracing** — run history exists (control-plane `runs` table), but no distributed execution trace backend.
 - **Observability time-series** — metrics exist (Prometheus counters), no time-series backend / Grafana.
 - **Policy engine (ALLOW/DENY)** — schema exists, no evaluator.
 - **WireGuard / network lane routing** — lanes exist as config, no VPN integration.

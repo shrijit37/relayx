@@ -10,7 +10,7 @@ jobs:
   review:
     if: |
       (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/review'))
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/review') && github.event.comment.author_association == 'MEMBER')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 1
 
       - name: Run PR-Agent /review
-        uses: The-PR-Agent/pr-agent@main
+        uses: The-PR-Agent/pr-agent@v0.28
         with:
           command: /review
         env:

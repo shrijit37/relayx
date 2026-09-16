@@ -11,11 +11,18 @@
  * looking live. Runs under the threshold are never touched. This is a soft
  * reaper: it never deletes rows, never re-runs them, and never touches any
  * non-`running` row.
+ *
+ * NOTE: There is no per-run heartbeat or lease mechanism yet. The stale
+ * threshold is a trade-off — too short risks killing legitimate long-running
+ * streams; too long leaves zombie rows. 10 minutes covers the vast majority
+ * of LLM request durations while limiting zombie visibility. A heartbeat
+ * column + periodic PATCH from the streaming pump is the proper fix and
+ * should be added when run-history reliability becomes a priority.
  */
 
 import type { Pool } from "pg";
 
-export const REAP_STALE_AFTER_MS = 5 * 60 * 1000; // 5 minutes
+export const REAP_STALE_AFTER_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Mark `running` rows older than `staleAfterMs` as failed. Returns the

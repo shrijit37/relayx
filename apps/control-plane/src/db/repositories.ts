@@ -376,18 +376,25 @@ export const runs = {
     return rows[0] ?? null;
   },
 
-  async list(pool: Pool, workflowId?: string): Promise<RunRow[]> {
+  async list(pool: Pool, workflowId?: string, projectId?: string): Promise<RunRow[]> {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
     if (workflowId) {
-      const { rows } = await pool.query<RunRow>(
-        `SELECT * FROM runs WHERE workflow_id = $1
-         ORDER BY (status = 'running') DESC, started_at DESC LIMIT 200`,
-        [workflowId],
-      );
-      return rows;
+      conditions.push(`r.workflow_id = $${idx++}`);
+      params.push(workflowId);
     }
+    if (projectId) {
+      conditions.push(`w.project_id = $${idx++}`);
+      params.push(projectId);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     const { rows } = await pool.query<RunRow>(
-      `SELECT * FROM runs
-       ORDER BY (status = 'running') DESC, started_at DESC LIMIT 200`,
+      `SELECT r.* FROM runs r
+       LEFT JOIN workflows w ON w.id = r.workflow_id
+       ${where}
+       ORDER BY (r.status = 'running') DESC, r.started_at DESC LIMIT 200`,
+      params,
     );
     return rows;
   },

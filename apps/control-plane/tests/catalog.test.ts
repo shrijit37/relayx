@@ -250,8 +250,8 @@ const FIXTURE_API_JSON = {
     id: "openai",
     name: "OpenAI",
     models: {
-      "openai/gpt-4o": {
-        id: "openai/gpt-4o",
+      "gpt-4o": {
+        id: "gpt-4o",
         name: "GPT-4o",
         description: "Flagship",
         attachment: false,
@@ -297,10 +297,12 @@ test("syncCatalog upserts models from a stubbed fetch", async () => {
     );
     expect(Number(fakeProvider.rows[0]?.count)).toBe(0);
 
-    // Model was inserted with parsed modalities/cost.
+    // Model was inserted with the qualified key "openai/gpt-4o"
+    // (transformProviders qualifies bare IDs with the provider slug).
     const model = await db!.pool.query(
-      `SELECT modalities, cost FROM catalog_models WHERE id = 'openai/gpt-4o'`,
+      `SELECT id, modalities, cost FROM catalog_models WHERE id = 'openai/gpt-4o'`,
     );
+    expect(model.rows[0]?.id).toBe("openai/gpt-4o");
     expect(model.rows[0]?.modalities).toEqual({
       input: ["text", "image"],
       output: ["text"],

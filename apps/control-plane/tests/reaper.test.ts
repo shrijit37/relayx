@@ -140,6 +140,6 @@ test("respects a custom stale threshold", async () => {
   expect(rows[0]!.status).toBe("running");
 });
 
-test("REAP_STALE_AFTER_MS is the 5-minute default", () => {
-  expect(REAP_STALE_AFTER_MS).toBe(5 * 60 * 1000);
+test("REAP_STALE_AFTER_MS is the 10-minute default", () => {
+  expect(REAP_STALE_AFTER_MS).toBe(10 * 60 * 1000);
 });
