@@ -43,6 +43,6 @@ export const createWorkflowSchema = z.object({
 });
 
 export const publishSchema = z.object({
-  workflow_json: z.record(z.unknown()),
+  workflow_json: z.record(z.string(), z.unknown()),
   version: z.number().int().positive().optional(),
 });
