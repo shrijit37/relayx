@@ -1,8 +1,10 @@
+import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { AppShell } from "@/components/relay/AppShell";
 import { EmptyState, PageHeader, Panel, StatusText, TableShell, Td } from "@/components/relay/primitives";
-import { useWorkflows } from "@/lib/use-workflow-publication";
+import { useDeleteWorkflowMutation, useDeactivateWorkflowMutation, useWorkflows } from "@/lib/use-workflow-publication";
 
 export const Route = createFileRoute("/workflows/")({
   head: () => ({
@@ -20,8 +22,21 @@ export const Route = createFileRoute("/workflows/")({
 
 function WorkflowsPage() {
   const { data: live, isPending, isError, error } = useWorkflows();
+  const deleteWorkflow = useDeleteWorkflowMutation();
+  const deactivateWorkflow = useDeactivateWorkflowMutation();
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const rows = live ?? [];
+
+  const handleDelete = (id: string) => {
+    deleteWorkflow.mutate(id, {
+      onSuccess: () => {
+        toast.success(`Workflow ${id} deleted`);
+        setConfirmDelete(null);
+      },
+      onError: (err) => toast.error(`Delete failed — ${err.message}`),
+    });
+  };
 
   return (
     <AppShell>
@@ -49,19 +64,64 @@ function WorkflowsPage() {
               no workflows persisted yet — create one to get started.
             </div>
           ) : (
-            <TableShell head={["Workflow", "Version", "State", "Created"]}>
+            <TableShell head={["Workflow", "State", "Created", ""]}>
               {rows.map((w) => (
                 <tr key={w.id} className="hover:bg-panel-raised/50">
                   <Td>
                     <Link to="/workflows/$workflowId" params={{ workflowId: w.id }} className="font-medium hover:text-primary">
                       {w.name}
                     </Link>
+                    <span className="num ml-2 text-[10px] text-muted-foreground">{w.id}</span>
                   </Td>
-                  <Td className="num">{w.status}</Td>
                   <Td>
-                    <StatusText status={w.status === "active" ? "Production" : w.status === "compiled" ? "Staging" : "Draft"} />
+                    <StatusText status={w.is_active ? "Production" : w.status === "compiled" ? "Staging" : "Draft"} />
                   </Td>
                   <Td className="num text-muted-foreground">{new Date(w.created_at).toLocaleDateString()}</Td>
+                  <Td className="text-right">
+                    {
+                      // Active (Production) workflows cannot be deleted — the
+                      // gateway serves their published snapshot. Deactivate first.
+                      w.is_active ? (
+                        <button
+                          onClick={() => {
+                            deactivateWorkflow.mutate(w.id, {
+                              onSuccess: () => toast.success(`Workflow ${w.id} deactivated`),
+                              onError: (err) => toast.error(`Deactivate failed — ${err.message}`),
+                            });
+                          }}
+                          disabled={deactivateWorkflow.isPending}
+                          className="focus-ring rounded-sm border border-warn/40 bg-warn/10 px-1.5 py-0.5 text-[10px] text-warn hover:bg-warn/20"
+                          title="Deactivate this workflow before deleting"
+                        >
+                          Deactivate
+                        </button>
+                      ) : confirmDelete === w.id ? (
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            onClick={() => handleDelete(w.id)}
+                            disabled={deleteWorkflow.isPending}
+                            className="focus-ring rounded-sm border border-fail/40 bg-fail/10 px-1.5 py-0.5 text-[10px] text-fail hover:bg-fail/20"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => setConfirmDelete(null)}
+                            className="focus-ring rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:border-border-strong"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDelete(w.id)}
+                          disabled={deleteWorkflow.isPending}
+                          className="focus-ring rounded-sm border border-border p-1 hover:border-fail hover:text-fail disabled:opacity-40"
+                        >
+                          <Trash2 className="size-3" />
+                        </button>
+                      )
+                    }
+                  </Td>
                 </tr>
               ))}
             </TableShell>

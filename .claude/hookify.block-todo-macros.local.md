@@ -2,11 +2,12 @@
 name: block-todo-macros
 enabled: true
 event: file
+action: block
 conditions:
   - field: file_path
     operator: regex_match
     pattern: \.rs$
-  - field: new_text
+  - field: content
     operator: regex_match
     pattern: todo!\(|unimplemented!\(
 ---
@@ -21,3 +22,5 @@ This violates the project's Rust Engineering Policy (CLAUDE.md). These macros pa
 - Never ship placeholder panics in data-plane code
 
 No exceptions without explicit user authorization.
+
+Enforced at `PreToolUse` with `action: block`, so a violating edit is denied before it lands. Matching runs against the `content` field, which resolves to `new_string` for `Edit`/`MultiEdit` and to `content` for `Write`; `new_text` maps to `new_string` only and would silently miss whole-file writes.

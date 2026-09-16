@@ -1,0 +1,52 @@
+# Automated dependency updates.
+#
+# relay-x has no CI gate for stale dependencies; these are advisory PRs only —
+# every PR still has to pass the rust / msrv / web / control-plane / docs jobs
+# before it can merge.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One PR for routine bumps instead of ~280 individual ones. The `msrv` CI
+      # job is the guardrail: resolver "3" + workspace rust-version refuse any
+      # bump that would raise the MSRV past 1.88.
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: "/apps/web"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      web-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: "/apps/control-plane"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      control-plane-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"

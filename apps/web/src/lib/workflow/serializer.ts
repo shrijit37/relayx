@@ -41,7 +41,7 @@ export type SchemaNodeConfig =
   | { kind: "input"; value?: unknown; input_type?: string; description?: string; variables?: InputVariable[] }
   | { kind: "output"; value?: unknown }
   | LlmSchemaConfig
-  | { kind: "router"; strategy?: "first_match" | "round_robin" | "load_based" }
+  | { kind: "router"; strategy?: "first_match" | "round_robin" }
   | { kind: "transform"; operation?: "passthrough" | "extract" | "merge" | "filter" }
   | { kind: "condition"; condition: string; field: string; operator: string; value: unknown }
   | { kind: "mcp"; server_ref: string; tool_name: string; deferred: boolean }

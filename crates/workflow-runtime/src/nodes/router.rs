@@ -19,8 +19,6 @@ pub async fn execute(
     let selected = match config.strategy {
         workflow_schema::RouterStrategy::FirstMatch => 0,
         workflow_schema::RouterStrategy::RoundRobin => counter.fetch_add(1, Ordering::Relaxed) % n,
-        // ponytail: LoadBased = round-robin until load metrics exist
-        workflow_schema::RouterStrategy::LoadBased => counter.fetch_add(1, Ordering::Relaxed) % n,
     };
 
     Ok(NodeOutput::on_port(

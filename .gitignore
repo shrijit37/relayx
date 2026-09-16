@@ -2,10 +2,14 @@
 /target
 **/*.rs.bk
 
+# Dependencies
+node_modules/
+
 # Environment / secrets
 .env
 .env.*
 !.env.example
+.claude/settings.local.json
 
 # Editor / IDE
 .idea/
@@ -18,43 +22,46 @@
 .DS_Store
 Thumbs.db
 
-# Benchmark artifacts
-benchmarks/last_run.json
+# Logs
+*.log
 
-# Claude Code worktrees
+# Lockfiles owned by another package manager (this repo uses bun)
+pnpm-lock.yaml
+
+# Claude Code — worktrees and machine-local runtime state
 .claude/worktrees/
+.claude/checkpoints/
+.claude/mailbox/
+.claude/agent-registry.json
+.claude/agent-memory-local/
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+.claude/routines/.state/
+.claude/first-run
 
 # Web app build output
 apps/web/.output/
 apps/web/.wrangler/
 
-# AI agent tooling — imported/third-party skills (not project-specific)
+
+
+# AI agent tooling — imported skills and tool state (not project code)
 .codex/
 .agents/
-skills-lock.json
-.claude/skills/code-review
-.claude/skills/codebase-design
-.claude/skills/diagnosing-bugs
-.claude/skills/domain-modeling
-.claude/skills/grill-me
-.claude/skills/grill-with-docs
-.claude/skills/grilling
-.claude/skills/handoff
-.claude/skills/implement
-.claude/skills/improve-codebase-architecture
-.claude/skills/research
-.claude/skills/resolving-merge-conflicts
-.claude/skills/setup-matt-pocock-skills
-.claude/skills/tdd
-.claude/skills/teach
-.claude/skills/to-questionnaire
-.claude/skills/to-spec
-.claude/skills/to-tickets
-.claude/skills/triage
-.claude/skills/wait-what
-.claude/skills/wayfinder
-
-# Tool-specific hook configs (not project code)
+.forge/
 .factory/
+.crush/
+.remember/
 .opencode/hook/
+.opencode/plan/
+skills-lock.json
+
+# Claude Code skills: only project-authored skills are tracked. Imported skills
+# are symlinks into .agents/ (itself ignored), so committing them would leave
+# dangling links on a fresh clone. The whitelist below ignores every imported
+# skill automatically — add a negation when a new in-repo skill is authored.
+.claude/skills/*
+!.claude/skills/architecture-guard
+!.claude/skills/scaffold-phase
+
 .tmp-hook-probe.txt

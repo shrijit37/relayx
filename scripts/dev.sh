@@ -19,12 +19,31 @@ run() {
   echo "  started $name (pid $!) → /tmp/relayx-$name.log"
 }
 
-# DB
-if ! docker ps --format '{{.Names}}' | grep -qx relayx-pg; then
-  echo "relayx-pg not running — start it first:"
-  echo "  docker run -d --name relayx-pg -p 127.0.0.1:5433:5432 -e POSTGRES_PASSWORD=relayx-dev -e POSTGRES_USER=relayx -e POSTGRES_DB=relayx postgres:16-alpine"
-  exit 1
+# DB — auto-create or auto-start the Postgres container.
+if docker ps --format '{{.Names}}' | grep -qx relayx-pg; then
+  : # already running
+elif docker ps -a --format '{{.Names}}' | grep -qx relayx-pg; then
+  echo "relayx-pg exists but is stopped — starting it…"
+  docker start relayx-pg >/dev/null
+else
+  echo "relayx-pg not found — creating…"
+  docker run -d --name relayx-pg \
+    -p 127.0.0.1:5433:5432 \
+    -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-relayx-dev}" \
+    -e POSTGRES_USER=relayx \
+    -e POSTGRES_DB=relayx \
+    postgres:16-alpine >/dev/null
 fi
+
+# Wait for Postgres to accept connections (max 10s).
+echo -n "  waiting for postgres…"
+for _ in $(seq 1 20); do
+  if docker exec relayx-pg pg_isready -U relayx -d relayx -q 2>/dev/null; then
+    echo " ready"
+    break
+  fi
+  sleep 0.5
+done
 
 echo "relay-x dev stack"
 

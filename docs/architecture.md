@@ -1,6 +1,7 @@
 # ARCHITECTURE.md
+> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** Target system architecture; labels what is implemented vs. planned.
 
-> **Note (Phase 6.5):** This document describes the **target architecture**. Not all connections shown here exist in the current implementation. What is real today: the backend data plane, the control plane (workflows/versions/providers/lanes + publish + run passthrough), and a backend-authoritative frontend — the editor loads/saves/validates/publishes/runs against the control plane and shows no fabricated data. Not yet wired (honest "not available" in the UI): MCP/skill registries, policy enforcement, observability backend, run-history. See [state.md](state.md) and [PHASE6.5_IMPLEMENTATION_REPORT.md](../PHASE6.5_IMPLEMENTATION_REPORT.md) for what is actually wired today.
+> **Note (Phase 6.5):** This document describes the **target architecture**. Not all connections shown here exist in the current implementation. What is real today: the backend data plane, the control plane (workflows/versions/providers/lanes + publish + run passthrough), and a backend-authoritative frontend — the editor loads/saves/validates/publishes/runs against the control plane and shows no fabricated data. Not yet wired (honest "not available" in the UI): MCP/skill registries, policy enforcement, observability backend, run-history. See [state.md](state.md) and [PHASE6.5_IMPLEMENTATION_REPORT.md](archive/PHASE6.5_IMPLEMENTATION_REPORT.md) for what is actually wired today.
 
 ## 1. Product definition
 

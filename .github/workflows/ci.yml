@@ -31,14 +31,16 @@ jobs:
       - name: Rust policy
         run: ./.claude/hooks/check-rust-policy.sh --all
 
+      # `--locked` everywhere: CI must fail on a stale Cargo.lock rather than
+      # silently re-resolving it (the committed lock is the build input).
       - name: Format
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features --workspace -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features --workspace -- -D warnings
 
       - name: Test
-        run: cargo test --all-features --workspace
+        run: cargo test --locked --all-features --workspace
 
   web:
     runs-on: ubuntu-latest
@@ -74,3 +76,79 @@ jobs:
 
       - name: Build
         run: bun run build
+
+  # The declared MSRV is `workspace.package.rust-version` (1.88) and every member
+  # inherits it. Nothing else verifies that claim: the `rust` job runs the current
+  # stable toolchain, so an accidental dependency or language-feature bump past
+  # 1.88 would only surface for downstream users. `+1.88.0` is explicit because
+  # rust-toolchain.toml pins `channel = "stable"`, which overrides `rustup default`.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.88.0
+
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: msrv-1.88
+
+      - name: Check on MSRV
+        run: cargo +1.88.0 check --locked --all-features --workspace
+
+  # The control plane is the other half of the publish pipeline (and owns the
+  # Postgres schema); without this job its typecheck, lockfile and 40 integration
+  # tests — counts published in docs/state.md — were never executed in CI.
+  control-plane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/control-plane
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: relayx
+          POSTGRES_PASSWORD: relayx-dev
+          POSTGRES_DB: relayx
+        # Port 5433 matches the RELAYX_PG_PORT default the app and tests read
+        # (apps/control-plane/src/db/db.ts).
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U relayx -d relayx"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Computes test/route counts from the source and fails when the docs
+      # disagree, when a relative doc link breaks, when a snapshot is left at
+      # docs/ top level, or when a living doc loses its convention header.
+      # Static counting only — no Rust or Bun toolchain required.
+      - name: Documentation truth
+        run: scripts/verify-docs.sh

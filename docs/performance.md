@@ -1,4 +1,5 @@
 # PERFORMANCE.md — Performance Contract
+> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** Performance budget, benchmark methodology, and hot-path rules.
 
 ## Objective
 
@@ -149,6 +150,22 @@ streaming_proxy/direct_sse       mean ≈ 45.1 µs
 streaming_proxy/via_gateway_sse  mean ≈ 66.6 µs
 SSE streaming overhead:          ≈ 21.5 µs (0.0215 ms)
 ```
+
+### Build profile under test
+
+Benchmark numbers are only comparable when the build profile is identical, so
+record it here whenever the table above is regenerated:
+
+| Profile | Settings |
+| ------- | -------- |
+| `bench` | `lto = "thin"`, `codegen-units = 1`, `debug = true`, `strip = false` — `[profile.release]` with symbols retained for perf/flamegraph |
+| `release` | `lto = "thin"`, `codegen-units = 1`, `debug = 1`, `strip = "debuginfo"`, `panic = "unwind"` |
+| `dev` | workspace `opt-level = 1`, dependencies `opt-level = 3` — the profile `scripts/dev.sh` runs |
+
+Changing any of these (especially `lto` or `codegen-units`) invalidates the
+numbers above and requires a re-measurement in the same change. `panic = "abort"`
+is deliberately not used: the data plane relies on unwinding for per-request
+panic isolation.
 
 ### Performance gates
 

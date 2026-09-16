@@ -72,7 +72,14 @@ pub async fn execute(
     let req = build_http_request(wire, lane, target_protocol)?;
 
     // Send the request with timeout and cancellation support.
-    let response = send_request_with_timeout(&client, req, &ctx.cancel_token).await?;
+    let response = send_request_with_timeout(
+        &client,
+        req,
+        ctx.deadline,
+        ctx.default_timeout,
+        &ctx.cancel_token,
+    )
+    .await?;
 
     if response.status().is_success() {
         let canonical_response = decode_response_body(
@@ -198,23 +205,37 @@ fn build_http_request(
         .map_err(|e| NodeError::Internal(format!("failed to build request: {e}")))
 }
 
-/// Send an HTTP request with timeout and cancellation support.
+/// Send an HTTP request with deadline (explicit or default) and cancellation.
+///
+/// Uses `tokio::time::timeout` so the request is actually bounded: an
+/// explicit `deadline` wins when present, otherwise `default_timeout`
+/// applies. Cancellation (the browser aborts the run, or a node times out)
+/// preempts both.
 async fn send_request_with_timeout(
     client: &GatewayHttpClient,
     req: hyper::Request<axum::body::Body>,
+    deadline: Option<tokio::time::Instant>,
+    default_timeout: std::time::Duration,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<hyper::Response<hyper::body::Incoming>, NodeError> {
+    let deadline = deadline.unwrap_or_else(|| tokio::time::Instant::now() + default_timeout);
     tokio::select! {
-        result = client.request(req) => result,
+        result = tokio::time::timeout_at(deadline, client.request(req)) => {
+            match result {
+                Ok(r) => r.map_err(|e| {
+                    NodeError::Provider(protocol_core::error::ProtocolEngineError::ProviderError {
+                        message: format!("upstream request failed: {e}"),
+                    })
+                }),
+                Err(_) => Err(NodeError::Provider(protocol_core::error::ProtocolEngineError::ProviderError {
+                    message: "upstream request timed out".into(),
+                })),
+            }
+        }
         _ = cancel.cancelled() => {
-            return Err(NodeError::Internal("cancelled".into()));
+            Err(NodeError::Internal("cancelled".into()))
         }
     }
-    .map_err(|e| {
-        NodeError::Provider(protocol_core::error::ProtocolEngineError::ProviderError {
-            message: format!("upstream request failed: {e}"),
-        })
-    })
 }
 
 /// Buffer the error body of a failed response and surface it as a ProviderError.
@@ -301,6 +322,10 @@ fn build_canonical_request(
     model: String,
     input: &RuntimeValue,
 ) -> Result<CanonicalRequest, NodeError> {
+    // `model` is the bare provider-native id ("gpt-4o"), stored by the web
+    // picker by stripping the "provider/" catalog prefix. Adapters pass it
+    // through verbatim to the provider wire; a prefixed catalog key here
+    // would be sent upstream and 400/404.
     // Extract messages from the input.
     let messages = extract_messages(input);
 

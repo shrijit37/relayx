@@ -1,5 +1,8 @@
 [workspace]
-resolver = "2"
+# Edition 2024 requires rustc >= 1.85 and defaults to resolver "3" (MSRV-aware
+# version selection). Keep "3" explicit: it makes `cargo update` refuse dependency
+# versions that would raise the MSRV past `workspace.package.rust-version`.
+resolver = "3"
 members = [
     "apps/gateway",
     "crates/mock-upstream",
@@ -21,15 +24,20 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "ti
 tokio-stream = { version = "0.1", features = ["time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 hyper = { version = "1.11", features = ["http1", "server", "client", "http2"] }
-hyper-util = { version = "0.1", features = ["full"] }
+# `client-legacy` + `tokio` + `http1` cover every use in this workspace
+# (`client::legacy::Client`, `client::legacy::connect::HttpConnector`,
+# `rt::TokioExecutor`). `full` additionally enabled client-pool, client-proxy,
+# client-proxy-system, server-graceful and service, none of which are referenced;
+# axum declares the server-side features it needs on its own edge.
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1"] }
 http = "1"
-http-body = "1"
 http-body-util = "0.1"
 axum = { version = "0.8", features = ["tokio", "http1", "json"] }
-tower = { version = "0.5", features = ["util", "timeout", "limit", "load-shed", "buffer"] }
-tower-http = { version = "0.7", features = ["trace", "request-id"] }
+# Only `util` (`tower::ServiceExt`) is used anywhere in the workspace. The
+# timeout/limit/load-shed/buffer features were declared but never referenced;
+# axum enables the features it needs on its own `tower` edge.
+tower = { version = "0.5", features = ["util"] }
 bytes = "1"
-libc = "=0.2.165"
 
 # Serialization / config
 serde = { version = "1", features = ["derive"] }
@@ -41,7 +49,13 @@ sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.24"
-metrics-exporter-prometheus = "0.18"
+# `default-features = false` deliberately drops `http-listener` and `push-gateway`.
+# The gateway only uses `PrometheusBuilder::install_recorder()` and
+# `PrometheusHandle::render()` (both ungated in 0.18) and serves `/metrics` from its
+# own axum admin router. The crate defaults would enable `push-gateway` ->
+# `hyper-rustls/aws-lc-rs` -> `aws-lc-sys`, i.e. a C/cmake TLS stack compiled into
+# the hot-path binary for a remote-write client this workspace never calls.
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 
 # Errors / CLI / misc
 thiserror = "2"
@@ -57,3 +71,36 @@ proptest = "1"
 
 [workspace.lints.rust]
 dead_code = "deny"
+
+# ─── Build profiles ──────────────────────────────────────────────────────────
+# relay-x is a latency product: the profile `scripts/dev.sh` runs and the
+# profile that is benchmarked and shipped both matter.
+
+[profile.dev]
+# The `cargo watch` dev loop: optimise just enough that the proxy hot path is
+# representative, while keeping debuginfo line-accurate (and much smaller than
+# the default `debug = 2`, which is what grew target/debug past 20 GB).
+opt-level = 1
+debug = 1
+
+[profile.dev.package."*"]
+# Dependencies are compiled once and rarely invalidated, so pay for full
+# optimisation there. Without this, dev builds run tokio/hyper/axum at
+# opt-level 0 and the sub-millisecond budget in docs/performance.md is not
+# observable in the local dev stack.
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1            # line tables so perf/flamegraph profiling works
+strip = "debuginfo"  # …but do not ship the debuginfo payload
+# `panic = "abort"` is deliberately NOT set: it would remove unwinding and the
+# `catch_unwind`-style isolation of per-request panics from the data plane.
+
+[profile.bench]
+# Benchmarks inherit `release` (including its strip), so re-enable symbols for
+# profiling. Criterion numbers change when this profile changes — see
+# docs/performance.md for the profile benchmarks are recorded under.
+debug = true
+strip = false

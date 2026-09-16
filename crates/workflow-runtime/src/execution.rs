@@ -5,7 +5,6 @@
 //! data routing and conditional edge evaluation.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::context::ExecutionContext;
 use crate::error::{NodeError, WorkflowError};
-use crate::nodes::{NodeInput, NodeOutput, NodeRegistry, RuntimeValue};
+use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
 use workflow_schema::{NodeConfig, NodeId, NodeKind};
 
 // ─── Edge conditions ────────────────────────────────────────────────────────
@@ -137,22 +136,11 @@ pub struct ExecutionPlan {
     classification: PlanClassification,
     /// Fast-path pre-resolved metadata (present only when classified fast path).
     fast_path: Option<FastPathMetadata>,
-    /// Registered custom node executors consulted before the built-in match.
-    registry: Arc<NodeRegistry>,
 }
 
 impl ExecutionPlan {
     /// Build an execution plan from a validated workflow definition.
     pub fn compile(workflow: &workflow_schema::Workflow) -> Result<Self, WorkflowError> {
-        Self::compile_with_registry(workflow, Arc::new(NodeRegistry::new()))
-    }
-
-    /// Build an execution plan that dispatches `Custom` nodes through a
-    /// caller-provided registry.
-    pub fn compile_with_registry(
-        workflow: &workflow_schema::Workflow,
-        registry: Arc<NodeRegistry>,
-    ) -> Result<Self, WorkflowError> {
         let mut node_map: HashMap<NodeId, ExecNode> = HashMap::new();
 
         for node in &workflow.nodes {
@@ -252,7 +240,6 @@ impl ExecutionPlan {
             plan_hash,
             classification,
             fast_path,
-            registry,
         })
     }
 
@@ -284,11 +271,6 @@ impl ExecutionPlan {
     /// Pre-resolved fast-path metadata, if this plan is classified fast path.
     pub fn fast_path(&self) -> Option<&FastPathMetadata> {
         self.fast_path.as_ref()
-    }
-
-    /// Registered custom node executors consulted before the built-in match.
-    pub fn registry(&self) -> &NodeRegistry {
-        &self.registry
     }
 
     /// Get the topological index for a node.
@@ -535,14 +517,8 @@ impl NodeRuntime {
             );
 
             let start = std::time::Instant::now();
-            let result = execute_node(
-                exec_node,
-                &node_ctx,
-                node_input,
-                &self.router_counters,
-                &self.plan.registry,
-            )
-            .await;
+            let result =
+                execute_node(exec_node, &node_ctx, node_input, &self.router_counters).await;
             let duration = start.elapsed();
 
             match result {
@@ -673,7 +649,6 @@ async fn execute_node(
     ctx: &ExecutionContext,
     input: NodeInput,
     router_counters: &HashMap<NodeId, AtomicUsize>,
-    registry: &Arc<NodeRegistry>,
 ) -> Result<NodeOutput, NodeError> {
     match &node.config {
         NodeConfig::Input(_) => Ok(NodeOutput::message(input.value)),
@@ -691,11 +666,9 @@ async fn execute_node(
         NodeConfig::Skill(config) => crate::nodes::skill::execute(config, ctx, input).await,
         NodeConfig::Fallback(config) => crate::nodes::fallback::execute(config, ctx, input).await,
         NodeConfig::Retry(config) => crate::nodes::retry::execute(config, ctx, input).await,
-        NodeConfig::Custom(cfg) => {
-            let executor = registry.get(&cfg.kind).ok_or_else(|| {
-                NodeError::Internal(format!("no registered executor for kind '{}'", cfg.kind))
-            })?;
-            executor.execute(ctx, input).await
-        }
+        NodeConfig::Custom(cfg) => Err(NodeError::Internal(format!(
+            "custom node kind '{}' is not supported: no extension registry is installed",
+            cfg.kind
+        ))),
     }
 }

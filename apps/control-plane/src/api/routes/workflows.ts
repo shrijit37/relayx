@@ -21,7 +21,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
 
   // ── Workflows CRUD ──────────────────────────────────────────────────
   app.get("/workflows", async () =>
-    (await pool.query("SELECT * FROM workflows ORDER BY created_at DESC")).rows,
+    (
+      await pool.query(
+        `SELECT w.*, (wa.workflow_id IS NOT NULL) AS is_active
+         FROM workflows w
+         LEFT JOIN workflow_active wa ON wa.workflow_id = w.id
+         ORDER BY w.created_at DESC`,
+      )
+    ).rows,
   );
 
   app.post("/workflows", async (req, reply) => {
@@ -48,6 +55,29 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
     const wf = await repo.workflows.update(pool, id, body.name);
     if (!wf) return reply.code(404).send({ error: "workflow not found" });
     return wf;
+  });
+
+  app.delete("/workflows/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const wf = await repo.workflows.get(pool, id);
+    if (!wf) return reply.code(404).send({ error: "workflow not found" });
+    // Never delete an ACTIVE (Production) workflow — the gateway is serving
+    // its published snapshot. Deleting would leave a live-but-orphaned plan
+    // (review: delete guard). The authoritative active-pointer row is
+    // workflow_active (workflows.status is a denormalized auxiliary flag that
+    // publish doesn't reliably set). Deactivate/roll back first.
+    if (await repo.workflows.getActiveVersion(pool, id)) {
+      return reply.code(409).send({
+        error: "Cannot delete an active workflow. Roll back to deactivate it first.",
+      });
+    }
+    // Cascade deletes (ON DELETE CASCADE) remove versions, publications,
+    // the active pointer, and any run records. The gateway's in-memory
+    // snapshot may keep serving the plan until the next publish/rehydrate —
+    // the deleted workflow is no longer in workflow_active, so the next
+    // coherent bundle drops it (documented simple-delete behavior).
+    await repo.workflows.remove(pool, id);
+    return reply.code(204).send();
   });
 
   app.get("/workflows/:id/versions", async (req, reply) => {
@@ -174,6 +204,19 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
     };
   });
 
+  app.post("/workflows/:id/deactivate", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const wf = await repo.workflows.get(pool, id);
+    if (!wf) return reply.code(404).send({ error: "workflow not found" });
+    const active = await repo.workflows.getActiveVersion(pool, id);
+    if (!active) {
+      return reply.code(409).send({ error: "workflow is not active" });
+    }
+    const result = await publish.deactivate({ workflowId: id });
+    if (result.status === "error") return reply.code(500).send({ error: result.error });
+    return { status: "deactivated", workflow_id: id };
+  });
+
   app.post("/workflows/:id/run", async (req, reply) => {
     const { id } = req.params as { id: string };
     const wf = await repo.workflows.get(pool, id);
@@ -199,15 +242,61 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
       try {
         gatewayResp = await gateway.runStream({ workflow_id: id, body });
       } catch (e) {
+        // A stream that fails BEFORE hijack never reaches the pump, so the
+        // durable run record must be created + finalized here — otherwise
+        // this failure leaves NO trace, contradicting the non-stream path's
+        // "a failed run still appears in run history" contract.
         const message = e instanceof Error ? e.message : String(e);
+        const failedRow = await repo.runs
+          .create(pool, {
+            workflow_id: id,
+            workflow_version: active.workflow_version,
+            snapshot_version: active.snapshot_version,
+            plan_hash: active.plan_hash,
+            input_body: body,
+          })
+          .catch(() => null);
+        if (failedRow) {
+          await repo.runs
+            .update(pool, failedRow.id, {
+              status: "failed",
+              error: message,
+              completed_at: new Date().toISOString(),
+            })
+            .catch((err) =>
+              console.error("[runs] failed to finalize stream-failure record:", err),
+            );
+        }
         return reply.code(502).send({ error: message });
       }
       const upstream = gatewayResp.body;
       if (!upstream) {
-        return reply
-          .code(502)
-          .send({ error: "gateway returned an empty stream" });
+        // The gateway accepted the stream but returned no body — a
+        // protocol-level failure. Create + finalize a run record so this
+        // execution doesn't silently vanish from history.
+        const emptyRow = await repo.runs
+          .create(pool, {
+            workflow_id: id,
+            workflow_version: active.workflow_version,
+            snapshot_version: active.snapshot_version,
+            plan_hash: active.plan_hash,
+            input_body: body,
+          })
+          .catch(() => null);
+        if (emptyRow) {
+          await repo.runs
+            .update(pool, emptyRow.id, {
+              status: "failed",
+              error: "gateway returned an empty stream",
+              completed_at: new Date().toISOString(),
+            })
+            .catch((err) =>
+              console.error("[runs] failed to finalize empty-body record:", err),
+            );
+        }
+        return reply.code(502).send({ error: "gateway returned an empty stream" });
       }
+
       reply.hijack();
       // @fastify/cors writes headers on `reply`, which hijacking bypasses;
       // carry the same reflect-origin policy onto the raw response.
@@ -215,31 +304,96 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
         reply.raw.setHeader("Access-Control-Allow-Origin", req.headers.origin);
         reply.raw.setHeader("Vary", "Origin");
       }
+
+      // Durable run record (Phase 6.8): created once the gateway accepted the
+      // stream; finalized by the pump with the terminal status. Best-effort —
+      // run history must never break the response path. Created AFTER hijack
+      // so a DB failure can't orphan the gateway stream with no HTTP response
+      // to point at (review: orphaned stream). `runRow` may be null on DB
+      // failure; the pump then skips the finalizing UPDATE.
+      const runRow = await repo.runs
+        .create(pool, {
+          workflow_id: id,
+          workflow_version: active.workflow_version,
+          snapshot_version: active.snapshot_version,
+          plan_hash: active.plan_hash,
+          input_body: body,
+        })
+        .catch(() => null);
       reply.raw.writeHead(200, {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
       });
       const reader = upstream.getReader();
+      // Terminal-status detection on the raw SSE passthrough: the gateway
+      // emits `event: done` / `event: error` as the terminal frames, so a
+      // byte scan of the forwarded chunks is enough to record the honest run
+      // status without parsing the stream (which would add hot-path cost).
+      // `remainder` carries a trailing partial line across chunk boundaries
+      // so a terminal marker split by the transport is still detected.
+      let sawDone = false;
+      let sawError = false;
+      let remainder = "";
+      const decoder = new TextDecoder();
+      const scanLines = (text: string) => {
+        for (const line of text.split("\n")) {
+          if (line === "event: done") sawDone = true;
+          if (line === "event: error") sawError = true;
+        }
+      };
       const pump = async () => {
         try {
           while (true) {
             if (reply.raw.destroyed) break;
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+              // Scan trailing remainder for a split terminal marker.
+              scanLines(remainder);
+              break;
+            }
+            const chunk = decoder.decode(value);
+            const text = remainder + chunk;
+            scanLines(text);
+            remainder = text.includes("\n")
+              ? text.slice(text.lastIndexOf("\n") + 1)
+              : text;
             // Respect backpressure: Node's `write()` returns `false` when the
             // socket's high-water mark is hit (await `drain` before reading
             // more), `true` when it flushed directly. A slow/stalled client
-            // must not let the run's full output accumulate in memory.
+            // must not let the run's full output accumulate in memory. A
+            // destroyed socket must not leave the pump awaiting a drain that
+            // never fires (otherwise the run row stays 'running' forever).
             if (!reply.raw.write(value)) {
-              await new Promise((resolve) => reply.raw.once("drain", resolve));
+              await new Promise<void>((resolve) => {
+                let settled = false;
+                const finish = () => {
+                  if (settled) return;
+                  settled = true;
+                  reply.raw.off("drain", finish);
+                  reply.raw.off("close", finish);
+                  resolve();
+                };
+                reply.raw.once("drain", finish);
+                reply.raw.once("close", finish);
+              });
             }
           }
         } catch (err) {
           // Mid-stream failure must still reach the browser as a terminal
           // SSE `error` event — a silent stream end makes the frontend mark a
-          // completed run as failed.
-          if (!reply.raw.destroyed) {
+          // completed run as failed. A user abort (browser closed the socket /
+          // reader cancelled) is NOT an error: don't emit a spurious error
+          // event, and let the finally block classify via `reply.raw.destroyed`.
+          //
+          // Only match the standard AbortError name — the previous regex
+          // `^abort(ed)?\b` was broad enough to match provider/gateway
+          // messages like "aborted due to rate limit", suppressing real
+          // failures and recording them as cancelled (review finding #8).
+          const isAbort =
+            err instanceof Error && err.name === "AbortError";
+          if (!isAbort) sawError = true;
+          if (!reply.raw.destroyed && !isAbort) {
             try {
               const wire = `event: error\ndata: ${JSON.stringify({
                 error: err instanceof Error ? err.message : String(err),
@@ -250,6 +404,29 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
             }
           }
         } finally {
+          // Finalize the durable run record with the honest terminal status:
+          // a terminal `done` frame is a completed run; a terminal `error`
+          // frame (or mid-stream failure) is failed; a socket destroyed
+          // before either terminal event is a user cancel; a clean close
+          // with NO terminal event is a truncated stream = failure, never a
+          // silent success (the gateway must always emit a terminal frame).
+          const completedAt = new Date().toISOString();
+          try {
+            if (!runRow) {
+              /* no row to finalize (creation failed) */
+            } else if (sawError) {
+              await repo.runs.update(pool, runRow.id, { status: "failed", error: "stream error", completed_at: completedAt });
+            } else if (sawDone) {
+              await repo.runs.update(pool, runRow.id, { status: "completed", completed_at: completedAt });
+            } else if (reply.raw.destroyed) {
+              await repo.runs.update(pool, runRow.id, { status: "cancelled", completed_at: completedAt });
+            } else {
+              // Stream ended cleanly without a terminal event (gateway close).
+              await repo.runs.update(pool, runRow.id, { status: "failed", error: "stream ended without terminal event", completed_at: completedAt });
+            }
+          } catch {
+            /* run history is best-effort; the stream already succeeded */
+          }
           if (!reply.raw.destroyed) reply.raw.end();
         }
       };
@@ -264,8 +441,77 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowDeps)
       return reply;
     }
 
-    const result = await gateway.run({ workflow_id: id, body });
-    if (!result.ok) return reply.code(400).send({ error: result.error });
+    // Durable run record for the non-streaming path (best-effort).
+    // Created BEFORE the gateway call so a failed run still appears in run
+    // history (review: failed runs must leave a record). `create` is awaited
+    // (one round-trip, yields the row ID). The finalizing `update` is awaited
+    // too — the expensive gateway call is already past, one more round-trip
+    // before the response makes run history deterministic (a fire-and-forget
+    // update could race the client's follow-up GET /runs and show a stale
+    // 'running' row). A failure in either path is non-fatal.
+    const runRow = await repo.runs
+      .create(pool, {
+        workflow_id: id,
+        workflow_version: active.workflow_version,
+        snapshot_version: active.snapshot_version,
+        plan_hash: active.plan_hash,
+        input_body: body,
+      })
+      .catch(() => null);
+
+    let result: Awaited<ReturnType<GatewayClient["run"]>>;
+    try {
+      result = await gateway.run({ workflow_id: id, body });
+    } catch (e) {
+      // An unexpected throw (transport, timeout, malformed response) must
+      // not leave a forever-'running' row. Finalize as failed — mirrors the
+      // typed `!result.ok` path below.
+      const message = e instanceof Error ? e.message : String(e);
+      if (runRow) {
+        await repo.runs
+          .update(pool, runRow.id, {
+            status: "failed",
+            error: message,
+            completed_at: new Date().toISOString(),
+          })
+          .catch((err) =>
+            console.error("[runs] failed to finalize run record after throw:", err),
+          );
+      }
+      return reply.code(502).send({ error: message });
+    }
+
+    // Finalize the run record with the honest outcome — failed for gateway
+    // errors, completed for success. Failures are logged, never swallowed, so
+    // a stuck 'running' row is at least visible in the logs.
+    const completedAt = new Date().toISOString();
+    if (!result.ok) {
+      if (runRow) {
+        await repo.runs
+          .update(pool, runRow.id, {
+            status: "failed",
+            error: result.error,
+            completed_at: completedAt,
+          })
+          .catch((e) =>
+            console.error("[runs] failed to finalize run record as failed:", e),
+          );
+      }
+      return reply.code(400).send({ error: result.error });
+    }
+
+    if (runRow) {
+      await repo.runs
+        .update(pool, runRow.id, {
+          status: "completed",
+          output: result.output,
+          completed_at: completedAt,
+        })
+        .catch((e) =>
+          console.error("[runs] failed to finalize run record as completed:", e),
+        );
+    }
+
     return {
       status: "ok",
       request_id: result.request_id,

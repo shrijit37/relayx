@@ -93,7 +93,7 @@ If an exception is genuinely required, stop and ask for explicit user authorizat
 
 This policy applies to all Rust source files, including `src/`, `tests/`, `benches/`, examples, binaries, workspace crates, and build scripts — except `.unwrap()` and `.expect(...)` which are allowed in test files.
 
-Enforcement is layered: these instructions, `.claude/hooks/check-rust-policy.sh` (PostToolUse + pre-commit), and CI (`--all` plus `cargo clippy -- -D warnings`).
+Enforcement is layered: these instructions, `.claude/hooks/check-rust-policy.sh` (PostToolUse), the git pre-commit hook (`.githooks/pre-commit`), and CI (`--all` plus `cargo clippy -- -D warnings`).
 
 ## Build, Test, and Development Commands
 
@@ -135,39 +135,16 @@ scripts/dev.sh       # Starts Postgres, mock upstream, gateway, control plane, w
 scripts/logs.sh      # Merged color-coded log viewer for all services
 ```
 
-## Testing Guidelines
+## Testing & commit conventions
 
-- **Frameworks**: Rust `cargo test` with `#[tokio::test]` for async; frontend uses `bun test` with `happy-dom` and `@testing-library/react`.
-- **Test categories**: Unit, protocol conformance, streaming boundary, property-based, integration, fault injection, load/concurrency, and security authorization.
-- **Run all tests**: `cargo test --all-features --workspace` (Rust) and `bun test` (frontend).
-- **Conformance**: Every protocol adapter must have conformance tests. Translation correctness matters more than feature count.
-- **Test helpers**: `crates/test-harness` provides `spawn_gateway()`, `spawn_json_stack()`, `spawn_sse_stack()`, and HTTP client utilities. `crates/mock-upstream` supports SSE, JSON, TTFB delays, chunk delays, and error injection.
+Testing guidelines, commit/PR conventions, and all build/test commands are
+single-sourced in [`AGENTS.md`](AGENTS.md) — this file does not duplicate them,
+so the two cannot drift apart.
 
-## Commit & Pull Request Guidelines
+## Repository layout
 
-- **Commit messages**: Use imperative mood. Prefix with a scope tag in parentheses when applicable: `fix(gateway):`, `feat(protocol-core):`, `fix(control-plane):`, `test:`, `docs:`.
-- **CI must pass**: All Rust and frontend checks (policy, fmt, clippy, tests, typecheck, build) must be green before merging.
-- **Keep PRs focused**: Each PR should address a single concern. Cross-boundary changes (data plane + control plane + frontend) should clearly describe the integration points.
-- **Documentation sync**: When implementation differs from docs, update the documentation in the same change. Key files: `docs/state.md`, `docs/development.md`, `docs/roadmap.md`.
-
-## Repository boundaries
-
-Expected high-level structure (full detail in [`docs/development.md`](docs/development.md)):
-
-```text
-apps/
-  gateway/              # Rust data plane — the performance-critical proxy runtime
-  control-plane/        # TypeScript/Fastify API — workflows, providers, credentials, runs
-  web/                  # React/React Flow visual editor (TanStack Start)
-crates/
-  protocol-core/        # Canonical protocol model + adapters (OpenAI, Anthropic, Responses)
-  workflow-schema/      # Workflow definition types + graph validation
-  workflow-runtime/     # Node execution engine + compiler + snapshots
-  mock-upstream/        # Configurable mock LLM for tests and benchmarks
-  test-harness/         # In-process gateway + mock spawn helpers
-docs/                   # Architecture, ADRs, specs, phase reports
-scripts/                # Dev stack launcher, log viewer, demo scripts
-```
+The expected structure is single-sourced in [`AGENTS.md`](AGENTS.md#project-structure)
+and detailed in [`docs/development.md`](docs/development.md).
 
 ## Definition of done
 
@@ -181,14 +158,19 @@ A change is not complete when it merely compiles. For gateway-path changes, veri
 - security implications
 - metrics/tracing
 - tests for both happy and adversarial cases
+- documentation updated in the same change (`scripts/verify-docs.sh` green)
 
-## Agent behavior
+## Documentation discipline (enforced)
 
-Before changing architecture, read:
+Documentation is part of the definition of done; drift is a failing check,
+not a review comment.
 
-1. [`docs/architecture.md`](docs/architecture.md)
-2. [`docs/state.md`](docs/state.md)
-3. the relevant [ADRs](docs/adr-0001-stack.md)
-4. the relevant protocol/performance/security spec in [`docs/`](docs/)
-
-When implementation differs from documentation, update the documentation in the same change.
+- Counts and test totals live **once**, in the canonical-facts block of
+  [`docs/state.md`](docs/state.md). Never hand-copy them — `scripts/verify-docs.sh`
+  recomputes them from the code and fails on drift (`--write` regenerates them).
+- Snapshots (phase reports, audits) live in [`docs/archive/`](docs/archive/) and
+  are never edited to "fix" staleness.
+- Before changing architecture, read [`docs/architecture.md`](docs/architecture.md),
+  [`docs/state.md`](docs/state.md), the relevant [ADRs](docs/adr-0001-stack.md),
+  and the relevant spec in [`docs/`](docs/).
+- Start from the doc map: [`docs/README.md`](docs/README.md).

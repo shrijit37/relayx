@@ -18,7 +18,28 @@ export async function freshDb(name: string) {
 
   const pool = createPool({ ...dbConfigFromEnv(), database: dbName });
   await migrate(pool, "./src/db");
-  return { pool, dbName, async close() { await pool.end(); } };
+  return {
+    pool,
+    dbName,
+    /** End the app pool AND drop the database so repeated runs don't pile up
+     *  throwaway `test_*` databases (each CREATE DATABASE is O(catalog), so
+     *  the leak also slowed the suite over time). `WITH (FORCE)` terminates
+     *  straggler connections and drops immediately, so concurrent suites
+     *  don't serialize on lingering locks. */
+    async close() {
+      await pool.end();
+      const admin = createPool({ ...dbConfigFromEnv(), database: "postgres" });
+      try {
+        await admin.query(
+          `DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`,
+        );
+      } catch {
+        // Last-resort best-effort cleanup must not fail the test run.
+      } finally {
+        await admin.end();
+      }
+    },
+  };
 }
 
 /** Standard publish-service deps wired to the pool (routes use these too). */
@@ -38,6 +59,16 @@ export async function mockGateway(opts: {
   failPublishWith?: string;
   failValidateWith?: string;
   failRunWith?: string;
+  /** SSE chunks for `/run?stream=true` (written in order, with
+   *  `streamChunkDelayMs` between). Terminal scenarios are expressed by the
+   *  chunks themselves: include `event: done`/`event: error` for a terminal
+   *  frame, or omit both to simulate a truncated stream. */
+  streamChunks?: string[];
+  streamChunkDelayMs?: number;
+  /** When set, the mock `/run?stream=true` endpoint throws a 502-style
+   *  response (gateway rejected the stream before any bytes), so the
+   *  control-plane stream path sees `gateway.runStream` throw. */
+  failStreamWith?: string;
 }) {
   const app = Fastify();
 
@@ -72,6 +103,39 @@ export async function mockGateway(opts: {
   app.post("/run", async (req, reply) => {
     if (opts.failRunWith) return reply.code(400).send({ status: "error", error: opts.failRunWith });
     const body = req.body as { workflow_id?: string; body?: unknown };
+    // SSE streaming mode: pipe the configured chunks with an optional delay,
+    // then end. The control-plane pump detects the terminal `event: done` /
+    // `event: error` frames from the forwarded bytes.
+    const query = (req.query ?? {}) as { stream?: string };
+    if (query.stream === "true") {
+      if (opts.failStreamWith) {
+        return reply
+          .code(502)
+          .send({ error: opts.failStreamWith });
+      }
+      const chunks = opts.streamChunks ?? [
+        "data: {\"delta\":\"hi\"}\n\n",
+        "event: done\ndata: {}\n\n",
+      ];
+      const delay = opts.streamChunkDelayMs ?? 0;
+      reply.raw.writeHead(200, { "content-type": "text/event-stream" });
+      for (const chunk of chunks) {
+        if (delay > 0) {
+          // Sleep in 50 ms increments so the loop exits quickly when the
+          // socket is destroyed (client abort, test teardown).
+          let remaining = delay;
+          while (remaining > 0 && !reply.raw.destroyed) {
+            const step = Math.min(remaining, 50);
+            await Bun.sleep(step);
+            remaining -= step;
+          }
+        }
+        if (reply.raw.destroyed) return;
+        reply.raw.write(chunk);
+      }
+      reply.raw.end();
+      return;
+    }
     return {
       status: "ok",
       request_id: "req_run_1",

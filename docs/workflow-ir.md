@@ -1,4 +1,5 @@
 # WORKFLOW_IR.md — Workflow Model and Execution IR
+> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** Workflow model and execution IR design.
 
 ## Purpose
 

@@ -218,6 +218,45 @@ export function createPublishService(deps: {
         published_at: publishedAt,
       };
     },
+
+    /**
+     * Deactivate a workflow: republish the coherent bundle WITHOUT this
+     * workflow, then remove the `workflow_active` pointer. The gateway
+     // stops serving this workflow; the control-plane status reverts to
+     * `draft`; the DELETE guard no longer blocks deletion.
+     */
+    async deactivate(opts: {
+      workflowId: string;
+    }): Promise<{ status: "deactivated" | "error"; error?: string }> {
+      const { workflowId } = opts;
+
+      // Build the coherent wire bundle EXCLUDING the target workflow.
+      const others = await deps.listActiveWorkflows([workflowId]);
+      if (others.length === 0) {
+        // No other active workflows — just remove the pointer and skip
+        // a gateway publish (nothing left to serve).
+        await removeActivePointer(deps.pool, workflowId);
+        return { status: "deactivated" };
+      }
+
+      const wire = await buildCoherentWireNoVersion(
+        others.map((w) => ({ ...w, revision: "active" as const })),
+        async (id) => deps.getLane(id),
+      );
+      if ("error" in wire) {
+        return { status: "error", error: wire.error };
+      }
+
+      const publishedWire = await allocateSnapshotVersion(wire, async () => deps.nextSnapshotVersion());
+      const published = await deps.gateway.publish(publishedWire);
+      if (!published.ok) {
+        return { status: "error", error: published.error };
+      }
+
+      // Remove the active pointer and revert status to draft.
+      await removeActivePointer(deps.pool, workflowId);
+      return { status: "deactivated" };
+    },
   };
 }
 
@@ -311,6 +350,25 @@ async function recordFailure(
     [crypto.randomUUID(), workflowId, version, planHash, snapshotVersion, error],
   );
   await pool.query("UPDATE workflow_versions SET status = $3 WHERE workflow_id = $1 AND version = $2", [workflowId, version, revertTo]);
+}
+
+/** Remove the active pointer and revert workflow status to draft. */
+async function removeActivePointer(pool: Pool, workflowId: string): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM workflow_active WHERE workflow_id = $1", [workflowId]);
+    await client.query(
+      "UPDATE workflows SET status = 'draft', updated_at = now() WHERE id = $1",
+      [workflowId],
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 /** Allocate the next global snapshot version (monotonic across restarts).

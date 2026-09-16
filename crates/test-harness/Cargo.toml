@@ -2,6 +2,7 @@
 name = "test-harness"
 edition.workspace = true
 version.workspace = true
+rust-version.workspace = true
 description = "In-process mock + gateway harness for integration tests and benchmarks"
 
 [lints]

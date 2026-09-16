@@ -57,6 +57,7 @@ import {
     useWorkflowLatestVersion,
     useLanes,
     useProviders,
+    useCatalogModels,
 } from "@/lib/use-workflow-publication";
 import { createWorkflow, saveWorkflowVersion } from "@/lib/api";
 import {
@@ -324,18 +325,33 @@ function Canvas({ workflowId }: { workflowId: string }) {
     //    and reports every issue (unsupported nodes, missing lanes, fabricated
     //    config guards) — it never silently drops nodes or infers semantics
     //    from titles. The view carries `canonicalConfig` from the Inspector.
-    const serializeResult = useMemo(() => {
-        const serialized = serializeWorkflow(nodes, edges, {
-            id: workflowId === "new" ? "workflow" : workflowId,
-            name: workflowName,
-            version: version ?? 1,
-        });
-        return {
-            json: serialized.workflow,
-            unsupported: nodes.filter((n) => !executableKinds.has(n.data.kind)),
-            errors: serialized.errors,
-            warnings: serialized.warnings,
-        };
+    //
+    //    Debounced: `serializeWorkflow` walks the whole canvas and is
+    //    re-invoked on every keystroke/drag via `nodes`/`edges` identity
+    //    churn. Running it ~150ms after input settles keeps the editor
+    //    responsive without staleness (the toolbar status and Save path both
+    //    consume the debounced result).
+    const [serializeResult, setSerializeResult] = useState<{
+        json: WorkflowJson | null;
+        unsupported: { data: { kind: string } }[];
+        errors: string[];
+        warnings: string[];
+    }>({ json: null, unsupported: [], errors: [], warnings: [] });
+    useEffect(() => {
+        const handle = setTimeout(() => {
+            const serialized = serializeWorkflow(nodes, edges, {
+                id: workflowId === "new" ? "workflow" : workflowId,
+                name: workflowName,
+                version: version ?? 1,
+            });
+            setSerializeResult({
+                json: serialized.workflow,
+                unsupported: nodes.filter((n) => !executableKinds.has(n.data.kind)),
+                errors: serialized.errors,
+                warnings: serialized.warnings,
+            });
+        }, 150);
+        return () => clearTimeout(handle);
     }, [nodes, edges, workflowId, workflowName, version]);
 
     // ── Live local validation (Phase 6.6 §15). The editor shows schema +
@@ -452,17 +468,52 @@ function Canvas({ workflowId }: { workflowId: string }) {
         () => inspectorCanonical(inspectorNode),
         [inspectorNode],
     );
+    // Model picker backed by the models.dev catalog (live, searchable).
+    // Falls back to the provider's stored default model if the catalog is
+    // unreachable/empty (sync hasn't run yet).
+    const catalogProvider = canonicalNode?.config.kind === "llm"
+        ? canonicalNode.config.config.provider
+        : undefined;
+    // Only fetch catalog models when a provider is actually selected — the
+    // model picker is useless without one, and the fallback is the provider
+    // row's stored default model (no catalog needed).
+    const { data: catalogModels = [] } = useCatalogModels(
+        catalogProvider
+            ? { provider: catalogProvider, capability: "tool_call" }
+            : undefined,
+        { enabled: Boolean(catalogProvider) },
+    );
     const modelOptions = useMemo(() => {
         if (!canonicalNode) return [];
         const cfg = canonicalNode.config;
         if (cfg.kind !== "llm" || !cfg.config.provider) return [];
         const match = providers.find((p) => p.name === cfg.config.provider);
-        if (!match) return [];
         const opts: { value: string; label: string }[] = [];
-        if (cfg.config.model && cfg.config.model !== match.model) opts.push({ value: cfg.config.model, label: cfg.config.model });
-        opts.push({ value: match.model, label: match.model });
+        // Catalog ids are "provider/model" keys (models.dev shape). The
+        // picker stores the bare provider-native id ("gpt-4o") — the wire
+        // model — not the prefixed catalog key, which the upstream APIs
+        // reject. The label keeps the rich "Name · Provider · ctx" text.
+        const bareModel = (catalogId: string) =>
+            catalogId.split("/").slice(1).join("/");
+        if (
+            cfg.config.model &&
+            !catalogModels.some((m) => bareModel(m.id) === cfg.config.model)
+        ) {
+            opts.push({ value: cfg.config.model, label: cfg.config.model });
+        }
+        // Prefer catalog models for the selected provider, then the provider
+        // row's stored default model as a genuine fallback (only when the
+        // catalog has no rows for this provider — e.g. sync hasn't run yet).
+        for (const m of catalogModels) {
+            opts.push({
+                value: bareModel(m.id),
+                label: `${m.name} · ${m.provider_name}${m.limits ? ` · ${m.limits.context.toLocaleString()} ctx` : ""}`,
+            });
+        }
+        if (catalogModels.length === 0 && match?.model)
+            opts.push({ value: match.model, label: match.model });
         return opts;
-    }, [providers, canonicalNode]);
+    }, [catalogModels, providers, canonicalNode]);
 
     const navigate = useNavigate();
 
@@ -474,11 +525,21 @@ function Canvas({ workflowId }: { workflowId: string }) {
     const saveMutation = useSaveWorkflowMutation(workflowId);
     const validateMutation = useValidateMutation();
 
+    // Serialize from current canvas state on action — NOT from the debounced
+    // `serializeResult` which can be 150ms stale. A click within 150ms of an
+    // edit would otherwise submit the previous canvas state (review finding #12).
     const serializeTo = useCallback(() => {
-        const { errors, warnings, json } = serializeResult;
-        if (json) return { workflow: json as WorkflowJson, errors: [], warnings };
-        return { workflow: null, errors, warnings };
-    }, [serializeResult]);
+        const serialized = serializeWorkflow(nodes, edges, {
+            id: workflowId === "new" ? "workflow" : workflowId,
+            name: workflowName,
+            version: version ?? 1,
+        });
+        const unsupported = nodes.filter((n) => !executableKinds.has(n.data.kind));
+        if (serialized.workflow) {
+            return { workflow: serialized.workflow as WorkflowJson, errors: [], warnings: serialized.warnings };
+        }
+        return { workflow: null, errors: serialized.errors, warnings: serialized.warnings };
+    }, [nodes, edges, workflowId, workflowName, version]);
 
     // Save in "new" mode creates the real workflow row first (same control-plane
     // POST as the workflow list's Create button), persists the canvas as its

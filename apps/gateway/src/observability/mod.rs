@@ -83,7 +83,11 @@ impl PublicationState {
 ///
 /// Uses `RUST_LOG` env-filter with a sensible default for relay-x.
 pub fn init_tracing() {
-    let default_filter = "relay_x=info,tower_http=info";
+    // `relay_x` is this workspace's tracing target. There is no `tower_http`
+    // directive: the gateway never installs a tower-http layer (request IDs are
+    // generated explicitly in src/proxy/mod.rs), so that directive only ever
+    // silenced nothing and referenced a crate that is no longer a dependency.
+    let default_filter = "relay_x=info";
 
     tracing_subscriber::registry()
         .with(
@@ -176,33 +180,9 @@ pub fn increment_request_count(status: &str, lane: &str) {
     .increment(1);
 }
 
-/// Increment bytes received from client.
-pub fn record_bytes_in(n: u64) {
-    metrics::counter!("relayx_bytes_in").increment(n);
-}
-
-/// Increment bytes sent to client.
-pub fn record_bytes_out(n: u64) {
-    metrics::counter!("relayx_bytes_out").increment(n);
-}
-
 /// Increment the total timeout counter.
 pub fn increment_timeout_count(lane: &str) {
     metrics::counter!("relayx_timeout_total", "lane" => lane.to_owned()).increment(1);
-}
-
-/// Track active connections via an RAII gauge guard.
-pub fn track_active_connection(lane: &str) -> GaugeGuard {
-    GaugeGuard::new("relayx_active_connections", vec![("lane", lane.to_owned())])
-}
-
-/// Record upstream body stream duration (total time reading frames).
-pub fn record_upstream_body_duration(lane: &str, duration: std::time::Duration) {
-    metrics::histogram!(
-        "relayx_upstream_body_duration_ms",
-        "lane" => lane.to_owned()
-    )
-    .record(duration.as_secs_f64() * 1000.0);
 }
 
 /// Increment route selected counter.
@@ -587,12 +567,7 @@ pub fn admin_router_with_publication(
         // proxy client lives on AppState and isn't reachable from the admin
         // router's state type; thread it through if run throughput ever needs
         // connection reuse.
-        let client = std::sync::Arc::new(
-            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-                .pool_idle_timeout(std::time::Duration::from_secs(90))
-                .pool_max_idle_per_host(64)
-                .build(hyper_util::client::legacy::connect::HttpConnector::new()),
-        );
+        let client = workflow_runtime::gateway_client(std::time::Duration::from_secs(90), 64);
 
         // 120s hard deadline for admin-triggered runs — prevents orphaned
         // workflow executions from running indefinitely.

@@ -38,6 +38,7 @@ export type WorkflowRow = {
   name: string;
   status: string;
   project_id: string;
+  is_active: boolean;
   created_at: string;
 };
 
@@ -114,9 +115,35 @@ export async function fetchWorkflowVersions(workflowId: string): Promise<Version
 
 /** Load all workflows (backend-derived list for the index page). */
 export async function fetchWorkflows(): Promise<
-  Array<{ id: string; name: string; status: string; created_at: string }>
+  Array<{ id: string; name: string; status: string; is_active: boolean; created_at: string }>
 > {
   return req(`/workflows`);
+}
+
+/** Roll back to the previous validated version (backend-authoritative republish). */
+export async function rollbackWorkflow(workflowId: string): Promise<{
+  status: string;
+  to_version: number;
+  snapshot_version: number;
+  plan_hash: string;
+}> {
+  return req(`/workflows/${encodeURIComponent(workflowId)}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+/** Delete a workflow row (cascades versions, publications, active pointer, runs). */
+export async function deleteWorkflow(workflowId: string): Promise<void> {
+  await req(`/workflows/${encodeURIComponent(workflowId)}`, { method: "DELETE" });
+}
+
+/** Deactivate a workflow: republish the bundle without it, remove the active pointer. */
+export async function deactivateWorkflow(workflowId: string): Promise<{ status: string }> {
+  return req(`/workflows/${encodeURIComponent(workflowId)}/deactivate`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
 
 /** Load lane records so the editor can show real lane URLs/config. */
@@ -149,11 +176,33 @@ export async function createLane(input: {
   return req(`/lanes`, { method: "POST", body: JSON.stringify(input) });
 }
 
+/** Update a lane via the control plane (partial patch, real persisted row). */
+export async function updateLane(
+  id: string,
+  input: {
+    endpoint?: string;
+    base_url?: string;
+    egress?: string;
+    policies?: string[];
+    provider_id?: string | null;
+  },
+): Promise<LaneRow> {
+  return req(`/lanes/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Delete a lane via the control plane (real persisted row). */
+export async function deleteLane(id: string): Promise<void> {
+  await req(`/lanes/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 /** Fetch the latest version row for a workflow (sorted descending). */
 export async function fetchWorkflowLatestVersion(workflowId: string): Promise<VersionRow | null> {
   const rows = await req<VersionRow[]>(`/workflows/${workflowId}/versions`);
-  if (!rows.length) return null;
-  return rows.reduce((a, b) => (a.version > b.version ? a : b));
+  // DB returns DESC-sorted — first row is the latest.
+  return rows[0] ?? null;
 }
 
 /** Persist the editor state as a new immutable version (public). */
@@ -299,6 +348,33 @@ export async function fetchSystemHealth(): Promise<SystemHealth> {
   return req<SystemHealth>("/system/health");
 }
 
+// ── Run history ────────────────────────────────────────────────────────
+
+export type RunRow = {
+  id: string;
+  workflow_id: string;
+  workflow_version: number;
+  snapshot_version: number;
+  plan_hash: string | null;
+  status: string;
+  input_body: unknown;
+  output: unknown;
+  error: string | null;
+  started_at: string;
+  completed_at: string | null;
+};
+
+/** List run records, optionally filtered by workflow. */
+export async function fetchRuns(workflowId?: string): Promise<RunRow[]> {
+  const q = workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : "";
+  return req(`/runs${q}`);
+}
+
+/** Get a single run record. */
+export async function fetchRun(runId: string): Promise<RunRow> {
+  return req(`/runs/${encodeURIComponent(runId)}`);
+}
+
 /** Real provider rows from the control plane (persisted config only). */
 export type ProviderRow = {
   id: string;
@@ -321,6 +397,59 @@ export async function createProvider(input: {
   model: string;
 }): Promise<ProviderRow> {
   return req(`/providers`, { method: "POST", body: JSON.stringify(input) });
+}
+
+/** Update a provider via the control plane (partial patch, real persisted row). */
+export async function updateProvider(
+  id: string,
+  input: {
+    name?: string;
+    protocol?: string;
+    base_url?: string;
+    model?: string;
+  },
+): Promise<ProviderRow> {
+  return req(`/providers/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Delete a provider via the control plane (real persisted row). */
+export async function deleteProvider(id: string): Promise<void> {
+  await req(`/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// ── Catalog (models.dev) ──────────────────────────────────────────────
+
+export type CatalogModel = {
+  id: string;
+  name: string;
+  description: string;
+  provider_id: string;
+  provider_name: string;
+  family: string | null;
+  modalities: { input: string[]; output: string[] };
+  capabilities: Record<string, boolean>;
+  cost: { input: number; output: number; cache_read?: number } | null;
+  limits: { context: number; output: number } | null;
+  knowledge_cutoff: string | null;
+  release_date: string | null;
+  open_weights: boolean;
+};
+
+/** Fetch catalog models (filterable by provider, capability, or search). */
+export async function fetchCatalogModels(params?: {
+  provider?: string;
+  capability?: string;
+  search?: string;
+}): Promise<CatalogModel[]> {
+  const qs = new URLSearchParams();
+  if (params?.provider) qs.set("provider", params.provider);
+  if (params?.capability) qs.set("capability", params.capability);
+  if (params?.search) qs.set("search", params.search);
+  const q = qs.toString();
+  return req<CatalogModel[]>(`/catalog/models${q ? `?${q}` : ""}`);
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────

@@ -1,0 +1,22 @@
+[config]
+model = "big-pickle"
+large_model = "big-pickle"
+turbo_model = "big-pickle"
+
+[pr_reviewer]
+extra_instructions = """You are reviewing a Rust + TypeScript AI gateway project (relay-x).
+Focus on: correctness, streaming behavior, protocol fidelity, hot-path allocation impact,
+failure modes, security implications, and test coverage.
+The Rust engineering policy prohibits .unwrap(), .expect(), todo!(), unimplemented!(), and
+#[allow(dead_code)] in production code. Flag any violations."""
+
+[pr_code_suggestions]
+extra_instructions = """This project uses Rust (data plane, hot path) and TypeScript
+(control plane + frontend). Suggest improvements that respect the architectural separation
+between data plane (performance-critical) and control plane (configuration)."""
+
+[pr_description]
+enable = false
+
+[pr_questions]
+enable = false

@@ -19,7 +19,7 @@ crates/
   workflow-runtime/     Node execution engine + compiler + snapshots
   mock-upstream/        Configurable mock LLM for tests and benchmarks
   test-harness/         In-process gateway + mock spawn helpers
-docs/                   Architecture, ADRs, specs, phase reports
+docs/                   Architecture, ADRs, specs; docs/archive/ holds snapshots
 scripts/                Dev stack launcher, log viewer, demo scripts
 ```
 
@@ -63,6 +63,13 @@ scripts/dev.sh       # Starts Postgres, mock upstream, gateway, control plane, w
 scripts/logs.sh      # Merged color-coded log viewer for all services
 ```
 
+### Documentation
+
+```bash
+scripts/verify-docs.sh          # Fail if docs disagree with the code
+scripts/verify-docs.sh --write  # Regenerate the canonical-facts block
+```
+
 ## Coding Style
 
 - **Rust**: Stable 1.88+, edition 2024, `rustfmt` with 100-char max width. No `.unwrap()`, `.expect()`, `todo!()`, `unimplemented!()`, or `#[allow(dead_code)]` in production code (`.unwrap()` and `.expect()` are allowed in tests). See `rustfmt.toml` and the full policy below.
@@ -94,8 +101,33 @@ Fix the underlying issue instead. Narrow, item-scoped `#[allow(...)]` for FFI, g
 - **Commit messages**: Use imperative mood. Prefix with a scope tag in parentheses when applicable: `fix(gateway):`, `feat(protocol-core):`, `fix(control-plane):`, `test:`, `docs:`.
 - **CI must pass**: All Rust and frontend checks (policy, fmt, clippy, tests, typecheck, build) must be green before merging.
 - **Keep PRs focused**: Each PR should address a single concern. Cross-boundary changes (data plane + control plane + frontend) should clearly describe the integration points.
-- **Documentation sync**: When implementation differs from docs, update the documentation in the same change. Key files: `docs/state.md`, `docs/development.md`, `docs/roadmap.md`.
+- **Documentation sync (enforced)**: When implementation differs from docs, update the docs in the same change. `scripts/verify-docs.sh` fails the Claude Code hook, the git pre-commit hook, and CI when canonical counts or links drift. See [Documentation conventions](#documentation-conventions).
 - **Definition of done**: A change is not complete when it merely compiles. For gateway-path changes, verify functional correctness, streaming correctness, protocol fidelity, hot-path performance, failure behavior, security implications, and tests for happy and adversarial cases.
+
+## Documentation conventions
+
+Full conventions and the document map: [`docs/README.md`](docs/README.md).
+
+- **Living vs. snapshot**: everything in `docs/` except `archive/` is living and carries a `> **Status:** living · **Verified:** YYYY-MM-DD · **Purpose:** …` header. Dated reports and audits live in [`docs/archive/`](docs/archive/) and are never edited.
+- **One canonical fact**: test/route counts are computed from the code and written once — the canonical-facts block in [`docs/state.md`](docs/state.md). Link to it, or quote the number and let the verifier check it.
+- **ADRs are append-only**: supersede a decision, never rewrite it.
+- **Enforcement**: `scripts/verify-docs.sh` (check) and `scripts/verify-docs.sh --write` (regenerate facts) run in the Claude Code hook, the git pre-commit hook, and the CI `docs` job.
+
+### Which doc to update for a change
+
+| Change | Update |
+| --- | --- |
+| Behavior, phase status, test counts | [`docs/state.md`](docs/state.md), then `scripts/verify-docs.sh --write` |
+| A boundary or component relationship | [`docs/architecture.md`](docs/architecture.md) |
+| Tooling, layout, CI | [`docs/development.md`](docs/development.md) |
+| Test suites or categories | [`docs/testing.md`](docs/testing.md) |
+| Roadmap item starts or finishes | [`docs/roadmap.md`](docs/roadmap.md) |
+| Adapter or translation rule | [`docs/protocols.md`](docs/protocols.md) |
+| Schema, compiler, or IR | [`docs/workflow-ir.md`](docs/workflow-ir.md) |
+| Perf-sensitive path or benchmark | [`docs/performance.md`](docs/performance.md) |
+| Metric, log, or trace change | [`docs/observability.md`](docs/observability.md) |
+| Auth, secrets, or permissions | [`docs/security.md`](docs/security.md) |
+| An architectural decision | new `docs/adr-XXXX-*.md` |
 
 ## Architecture Essentials
 
