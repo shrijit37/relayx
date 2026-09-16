@@ -105,12 +105,18 @@ impl GatewayServer {
         let publication_state = match (self.publication.clone(), self.workflow_snapshot.clone()) {
             (Some(external), _) => Some(external),
             (None, Some(snap)) => {
+                let pools = match LanePools::build(&snap, &pool_builder) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("failed to build lane pools: {e}"));
+                    }
+                };
                 let state = Arc::new(PublicationState::new(
                     Arc::new(InMemoryPublisher::new()),
-                    LanePools::build(&snap, &pool_builder),
+                    pools,
                     Box::new(pool_builder),
                 ));
-                state.publish(snap);
+                state.publish(snap).map_err(|e| anyhow::anyhow!(e))?;
                 Some(state)
             }
             (None, None) => None,

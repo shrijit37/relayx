@@ -1,11 +1,34 @@
 //! Protocol propagation test: LLM node uses the selected protocol, not hardcoded OpenAI.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use workflow_runtime::context::{ExecutionContext, LaneEntry, LaneRegistry};
+use workflow_runtime::context::{ExecutionContext, LaneClient, LaneEntry, LaneRegistry};
 use workflow_runtime::execution::{ExecutionPlan, NodeRuntime};
 use workflow_runtime::nodes::{NodeInput, RuntimeValue};
 use workflow_schema::*;
+
+/// Per-lane pool resolver: the runtime resolves clients ONLY from per-lane
+/// pools (no shared direct fallback — fail-closed egress).
+#[derive(Clone)]
+struct Pools(HashMap<String, Arc<LaneClient>>);
+
+impl workflow_runtime::AsLaneClient for Pools {
+    fn client_for_lane(&self, lane_id: &str) -> Option<Arc<LaneClient>> {
+        self.0.get(lane_id).cloned()
+    }
+}
+
+fn pools_for(lanes: &[(&str, url::Url)]) -> Arc<Pools> {
+    let mut map = HashMap::new();
+    for (id, _base) in lanes {
+        map.insert(
+            id.to_string(),
+            Arc::new(LaneClient::direct(std::time::Duration::from_secs(30), 16)),
+        );
+    }
+    Arc::new(Pools(map))
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -100,7 +123,7 @@ async fn anthropic_protocol_routes_to_messages_endpoint() {
     let mut lanes = LaneRegistry::new();
     lanes.register(LaneEntry {
         id: "anthropic-lane".into(),
-        base_url,
+        base_url: base_url.clone(),
         authorization: None,
         egress: "direct".into(),
         proxy_url: None,
@@ -121,11 +144,8 @@ async fn anthropic_protocol_routes_to_messages_endpoint() {
     let plan = ExecutionPlan::compile(&wf).expect("failed to compile plan");
     let rt = NodeRuntime::new(plan);
 
-    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-        .build_http();
-
     let mut ctx = ExecutionContext::new(wf.id.clone(), "test-run".into(), lanes);
-    ctx.upstream_client = Some(Arc::new(client));
+    ctx.lane_clients = Some(pools_for(&[("anthropic-lane", base_url.clone())]));
 
     let input = NodeInput::message(RuntimeValue::Json(serde_json::json!({
         "messages": [{"role": "user", "content": "Hello!"}]
@@ -217,7 +237,7 @@ async fn multimodal_content_blocks_are_preserved() {
     let mut lanes = LaneRegistry::new();
     lanes.register(LaneEntry {
         id: "anthropic-lane".into(),
-        base_url,
+        base_url: base_url.clone(),
         authorization: None,
         egress: "direct".into(),
         proxy_url: None,
@@ -238,11 +258,8 @@ async fn multimodal_content_blocks_are_preserved() {
     let plan = ExecutionPlan::compile(&wf).expect("failed to compile plan");
     let rt = NodeRuntime::new(plan);
 
-    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-        .build_http();
-
     let mut ctx = ExecutionContext::new(wf.id.clone(), "test-run".into(), lanes);
-    ctx.upstream_client = Some(Arc::new(client));
+    ctx.lane_clients = Some(pools_for(&[("anthropic-lane", base_url.clone())]));
 
     let input = NodeInput::message(RuntimeValue::Json(serde_json::json!({
         "messages": [{

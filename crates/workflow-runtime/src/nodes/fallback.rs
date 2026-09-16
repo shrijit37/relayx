@@ -11,12 +11,33 @@
 //! (e.g. 429) immediately advances to the next provider in the same round —
 //! the rate-limit failover path.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::context::ExecutionContext;
+use crate::context::{ExecutionContext, LaneClient};
 use crate::error::NodeError;
 use crate::nodes::{NodeInput, NodeOutput};
 use workflow_schema::{FallbackConfig, FallbackProvider, FallbackStrategy, LlmConfig};
+
+/// Resolve the HTTP client for a lane, preferring the per-lane connection
+/// pool only. There is no shared fallback: wrapping the plain upstream
+/// client as a "lane" client would leak a masked lane's egress IP (the
+/// fail-closed egress contract). Mirrors `llm::resolve_client`.
+fn resolve_lane_client(
+    ctx: &ExecutionContext,
+    lane_id: &str,
+) -> Result<Arc<LaneClient>, NodeError> {
+    match ctx
+        .lane_clients
+        .as_ref()
+        .and_then(|lc| lc.client_for_lane(lane_id))
+    {
+        Some(c) => Ok(c),
+        None => Err(NodeError::Internal(format!(
+            "no connection pool for lane '{lane_id}' (masked egress requires a lane pool)"
+        ))),
+    }
+}
 
 /// Execute a fallback node.
 pub async fn execute(
@@ -55,12 +76,17 @@ pub async fn execute(
                 continue;
             }
 
-            if ctx.upstream_client.is_none() {
+            // A provider is only "attempted" when its lane actually has a
+            // usable client. The per-lane pool is the only source: proxy-only
+            // deployments have no shared upstream client, and a shared direct
+            // wrapper must never stand in for a masked lane.
+            let client = resolve_lane_client(ctx, lane_id)?;
+            if client.available() {
+                any_ran = true;
+            } else {
                 last_error = Some(NodeError::Internal("no upstream client".into()));
                 continue;
             }
-
-            any_ran = true;
 
             tracing::debug!(
                 node_id = %ctx.node_id,
@@ -76,6 +102,10 @@ pub async fn execute(
                 model: Some(model.clone()),
                 temperature: None,
                 max_tokens: None,
+                // Buffered JSON: the workflow route returns a JSON envelope
+                // (token-level streaming is fast-path-only today). Streaming
+                // through fallback chains is tracked as a follow-up; forcing
+                // SSE here would break JSON-mode upstreams under rotation.
                 stream: false,
                 lane_id: Some(lane_id.clone()),
             };

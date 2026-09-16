@@ -153,20 +153,19 @@ fn resolve_lane_id(config: &LlmConfig, ctx: &ExecutionContext) -> Result<String,
 
 /// Resolve the HTTP client for a given lane.
 fn resolve_client(ctx: &ExecutionContext, lane_id: &str) -> Result<Arc<LaneClient>, NodeError> {
-    // Prefer the lane-bound connection pool (per-lane isolation); fall back to
-    // the shared client wrapped as a direct lane client (Phase-1 single-pool
-    // deployments and admin /run).
+    // Only the lane-bound connection pool is a valid client. The shared
+    // `upstream_client` is NOT a fallback: wrapping it as a direct lane
+    // client would send a masked lane's traffic from the gateway IP
+    // (fail-closed egress). A missing pool is a hard error.
     match ctx
         .lane_clients
         .as_ref()
         .and_then(|lc| lc.client_for_lane(lane_id))
     {
         Some(c) => Ok(c),
-        None => ctx
-            .upstream_client
-            .clone()
-            .map(|shared| Arc::new(LaneClient::from_shared(shared)))
-            .ok_or_else(|| NodeError::Internal("no upstream client configured".into())),
+        None => Err(NodeError::Internal(format!(
+            "no connection pool for lane '{lane_id}' (masked egress requires a lane pool)"
+        ))),
     }
 }
 

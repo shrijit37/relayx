@@ -76,7 +76,19 @@ export function collectCustomExtensionKinds(workflowJson: Record<string, unknown
 }
 
 /** Resolve a lane row to the wire lane config, credentials out-of-band. */
-async function toWireLane(lane: LaneRowWithCred): Promise<WireLane> {
+async function toWireLane(
+  lane: LaneRowWithCred,
+  workflowId: string,
+): Promise<WireLane | { error: string }> {
+  // Fail-closed egress: a masked lane MUST ship with a proxy URL. Surface
+  // this as an actionable bundle error — the gateway's compile-time
+  // rejection is the backstop, but the control plane must never emit a
+  // masked wired lane without a tunnel.
+  if (lane.egress === "masked" && !lane.proxy_url) {
+    return {
+      error: `workflow '${workflowId}' lane '${lane.id}' has egress=masked but no proxy_url`,
+    };
+  }
   return {
     base_url: lane.base_url,
     authorization: resolveCredential(lane.credential_ref),
@@ -118,7 +130,9 @@ export async function buildCoherentWireNoVersion(
     for (const id of referenced) {
       const lane = await getLane(id);
       if (!lane) return { error: `workflow '${flow.id}' references unknown lane '${id}'` };
-      flowLanes[id] = await toWireLane(lane);
+      const wired = await toWireLane(lane, flow.id);
+      if ("error" in wired) return wired;
+      flowLanes[id] = wired;
     }
 
     // Collect custom extension kinds from this workflow's Custom nodes.

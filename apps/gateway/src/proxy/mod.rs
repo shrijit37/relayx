@@ -37,7 +37,7 @@ impl CurrentSnapshot for AppState {
 impl workflow_runtime::AsLaneClient for AppState {
     fn client_for_lane(&self, lane_id: &str) -> Option<Arc<workflow_runtime::LaneClient>> {
         let pools = self.publication.as_ref()?.pools();
-        pools.get(lane_id).map(|snapshot| snapshot.client.clone())
+        pools.client_for_lane(lane_id)
     }
 }
 

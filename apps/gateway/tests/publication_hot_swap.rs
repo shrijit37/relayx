@@ -68,6 +68,75 @@ fn passthrough_workflow() -> Workflow {
     }
 }
 
+/// A workflow whose LLM node calls `lane_id` (used to prove that an admin
+/// `/run` resolves the lane's connection pool — a masked lane must never
+/// fall back to a plain direct client).
+fn llm_workflow(lane_id: &str) -> Workflow {
+    Workflow {
+        id: "llm-wf".into(),
+        name: "llm".into(),
+        version: 1,
+        nodes: vec![
+            Node {
+                id: "in".into(),
+                kind: NodeKind::Input,
+                config: NodeConfig::Input(InputConfig::default()),
+                inputs: vec![],
+                outputs: vec![PortDef {
+                    name: "out".into(),
+                    port_type: PortType::Message,
+                }],
+            },
+            Node {
+                id: "llm".into(),
+                kind: NodeKind::Llm,
+                config: NodeConfig::Llm(LlmConfig {
+                    protocol: Some("openai_chat".into()),
+                    model: Some("test-model".into()),
+                    temperature: None,
+                    max_tokens: None,
+                    stream: false,
+                    lane_id: Some(lane_id.to_string()),
+                }),
+                inputs: vec![PortDef {
+                    name: "in".into(),
+                    port_type: PortType::Message,
+                }],
+                outputs: vec![PortDef {
+                    name: "out".into(),
+                    port_type: PortType::Message,
+                }],
+            },
+            Node {
+                id: "out".into(),
+                kind: NodeKind::Output,
+                config: NodeConfig::Output(OutputConfig::default()),
+                inputs: vec![PortDef {
+                    name: "in".into(),
+                    port_type: PortType::Message,
+                }],
+                outputs: vec![],
+            },
+        ],
+        edges: vec![
+            Edge {
+                source_node: "in".into(),
+                source_port: "out".into(),
+                target_node: "llm".into(),
+                target_port: "in".into(),
+                condition: None,
+            },
+            Edge {
+                source_node: "llm".into(),
+                source_port: "out".into(),
+                target_node: "out".into(),
+                target_port: "in".into(),
+                condition: None,
+            },
+        ],
+    }
+}
+
 fn passthrough_compiled() -> workflow_runtime::ExecutionPlan {
     match workflow_runtime::compile_workflow_with_lanes(&passthrough_workflow(), &[], None) {
         Ok(p) => p,
@@ -114,7 +183,10 @@ async fn publication_load_returns_consistent_snapshot_and_pools() {
         Default::default(),
         Box::new(pool_builder),
     ));
-    publication.publish(snapshot_v1);
+    publication
+        .publish(snapshot_v1)
+        .map_err(|e| panic!("publish failed: {e}"))
+        .expect("direct-lane snapshot publishes");
 
     // A single load() observes the bundle atomically: snapshot v1 AND the
     // pools built from v1's lanes — never a mismatched pair.
@@ -238,7 +310,10 @@ async fn validate_compiles_but_does_not_publish() {
     ));
 
     // Seed a v1 runtime so there is something to verify "unchanged".
-    publication.publish(snapshot_at(1));
+    publication
+        .publish(snapshot_at(1))
+        .map_err(|e| panic!("seed publish failed: {e}"))
+        .expect("seed snapshot publishes");
 
     // Validate a v7 wire snapshot — compiles, does NOT touch the active runtime.
     let validated = publication
@@ -260,6 +335,80 @@ async fn validate_compiles_but_does_not_publish() {
         None => panic!("v1 should still be active"),
     };
     assert_eq!(active.version(), 1, "validate must not publish");
+}
+
+#[tokio::test]
+async fn publish_rejects_unknown_egress_value() {
+    // Fail-closed egress: a typo'd or future egress value must reject the
+    // whole bundle at validate/publish — never silently degrade to direct.
+    let publisher = Arc::new(InMemoryPublisher::new());
+    let publication = Arc::new(PublicationState::new(
+        publisher.clone(),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
+    ));
+
+    let mut wire = wire_snapshot(7);
+    wire.workflows[0].lanes = [(
+        "lane-a".to_string(),
+        relay_gateway::observability::WireLane {
+            base_url: "http://127.0.0.1:9101".into(),
+            authorization: None,
+            egress: "maskeed".into(),
+            proxy_url: None,
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    let err = publication
+        .publish_workflows(wire)
+        .map(|_| println!("publish should have failed"))
+        .expect_err("unknown egress must be rejected");
+    assert!(
+        err.contains("unknown egress"),
+        "error should name the unknown egress, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn publish_rejects_masked_without_proxy_url() {
+    let publisher = Arc::new(InMemoryPublisher::new());
+    let publication = Arc::new(PublicationState::new(
+        publisher.clone(),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
+    ));
+
+    let mut wire = wire_snapshot(8);
+    wire.workflows[0].lanes = [(
+        "lane-masked".to_string(),
+        relay_gateway::observability::WireLane {
+            base_url: "http://127.0.0.1:9102".into(),
+            authorization: None,
+            egress: "masked".into(),
+            proxy_url: None,
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    let err = publication
+        .publish_workflows(wire)
+        .map(|_| panic!("publish should have failed"))
+        .expect_err("masked without proxy_url must be rejected");
+    assert!(
+        err.contains("requires a proxy_url"),
+        "error should demand a proxy_url, got: {err}"
+    );
 }
 
 #[tokio::test]
@@ -387,7 +536,10 @@ workflow_id = "echo-wf"
         )),
     ));
 
-    publication.publish(snapshot_at(1));
+    publication
+        .publish(snapshot_at(1))
+        .map_err(|e| panic!("v1 publish failed: {e}"))
+        .expect("v1 publishes");
 
     let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
         Ok(s) => s,
@@ -425,7 +577,10 @@ workflow_id = "echo-wf"
     };
 
     // Publish v2 into the shared state — no process restart.
-    publication.publish(snapshot_at(2));
+    publication
+        .publish(snapshot_at(2))
+        .map_err(|e| panic!("v2 publish failed: {e}"))
+        .expect("v2 publishes");
 
     // Request B → served from v2.
     let (status, _body) = match post_hyper(&url, r#"{"hello":"v2"}"#, &[]).await {
@@ -480,7 +635,10 @@ workflow_id = "echo-wf"
     ));
 
     // Publish the echo workflow (Input → Output, no provider needed).
-    publication.publish(snapshot_at(3));
+    publication
+        .publish(snapshot_at(3))
+        .map_err(|e| panic!("echo publish failed: {e}"))
+        .expect("echo workflow publishes");
 
     let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
         Ok(s) => s,
@@ -505,9 +663,9 @@ workflow_id = "echo-wf"
     }
 
     // Run a published workflow → real execution envelope.
-    let url = format!("http://127.0.0.1:{admin_port}/run");
+    let run_url = format!("http://127.0.0.1:{admin_port}/run");
     let (status, body) = match post_hyper(
-        &url,
+        &run_url,
         r#"{"workflow_id":"echo-wf","body":{"hello":"world"}}"#,
         &[],
     )
@@ -528,7 +686,7 @@ workflow_id = "echo-wf"
 
     // Run an unknown/unpublished workflow → real 404.
     let (status, _body) =
-        match post_hyper(&url, r#"{"workflow_id":"missing","body":{}}"#, &[]).await {
+        match post_hyper(&run_url, r#"{"workflow_id":"missing","body":{}}"#, &[]).await {
             Ok(t) => t,
             Err(e) => panic!("admin run 404 post failed: {e}"),
         };
@@ -574,7 +732,10 @@ workflow_id = "echo-wf"
             16,
         )),
     ));
-    publication.publish(snapshot_at(3));
+    publication
+        .publish(snapshot_at(3))
+        .map_err(|e| panic!("echo publish failed: {e}"))
+        .expect("echo workflow publishes");
 
     let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
         Ok(s) => s,
@@ -675,4 +836,168 @@ async fn mutating_admin_endpoints_require_api_key() {
     let run: serde_json::Value = serde_json::from_slice(&body).expect("run response JSON");
     assert_eq!(run["status"], "ok");
     assert_eq!(run["output"]["hello"], "auth");
+}
+
+#[tokio::test]
+async fn publish_rejects_masked_lane_without_proxy_at_pool_build() {
+    // A masked lane with a proxy URL compiles+validates, but a masked lane
+    // WITHOUT one must fail at pool build — a lane an operator expects to be
+    // proxied must never resolve to a direct (gateway-IP) client.
+    let publication = Arc::new(PublicationState::new(
+        Arc::new(InMemoryPublisher::new()),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
+    ));
+
+    let mut wire = wire_snapshot(9);
+    wire.workflows[0].id = "llm-wf".into();
+    wire.workflows[0].workflow = llm_workflow("lane-masked");
+    wire.workflows[0].lanes = [(
+        "lane-masked".to_string(),
+        relay_gateway::observability::WireLane {
+            base_url: "http://127.0.0.1:9103".into(),
+            authorization: None,
+            egress: "masked".into(),
+            proxy_url: None,
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    let err = publication
+        .publish_workflows(wire)
+        .map(|_| panic!("publish must fail for masked lane without proxy"))
+        .expect_err("masked lane without proxy fails at pool build");
+    assert!(
+        err.contains("requires a proxy_url"),
+        "error should name the missing proxy_url, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn admin_run_resolves_masked_lane_from_pools() {
+    // Regression for the fix: admin /run used to thread `lane_clients=None`,
+    // so an LLM node on a masked lane fell back to a plain direct client and
+    // leaked the gateway IP. /run must resolve the lane's per-lane pool.
+    let proxy_port = free_port();
+    let admin_port = free_port();
+
+    let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
+        r#"
+snapshot_version = 1
+
+[server]
+listen = "127.0.0.1:{proxy_port}"
+admin_listen = "127.0.0.1:{admin_port}"
+total_timeout_ms = 5000
+graceful_shutdown_ms = 500
+
+[[routes]]
+id = "workflow-route"
+path_prefix = "/v1/workflow"
+methods = ["POST"]
+workflow_id = "llm-wf"
+"#
+    ))
+    .expect("valid workflow config");
+
+    let publication = Arc::new(PublicationState::new(
+        Arc::new(InMemoryPublisher::new()),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
+    ));
+
+    let mut wire = wire_snapshot(10);
+    wire.workflows[0].id = "llm-wf".into();
+    wire.workflows[0].workflow = llm_workflow("lane-masked");
+    wire.workflows[0].lanes = [(
+        "lane-masked".to_string(),
+        relay_gateway::observability::WireLane {
+            base_url: "http://127.0.0.1:9104".into(),
+            authorization: None,
+            egress: "masked".into(),
+            proxy_url: Some("http://127.0.0.1:9105".into()),
+        },
+    )]
+    .into_iter()
+    .collect();
+
+    publication
+        .publish_workflows(wire)
+        .map_err(|e| panic!("publish failed: {e}"))
+        .expect("valid masked publish");
+
+    // The lane pool for the masked lane must be present and masked — the
+    // snapshot the run path resolves is the SAME pools publication holds.
+    let bundle = publication.load();
+    let masked = bundle
+        .pools
+        .get("lane-masked")
+        .unwrap_or_else(|| panic!("masked lane pool missing"))
+        .client
+        .clone();
+    assert_eq!(
+        masked.egress(),
+        "masked",
+        "masked lane resolves a tunnel client"
+    );
+
+    let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
+        Ok(s) => s,
+        Err(e) => panic!("server build failed: {e}"),
+    };
+    tokio::spawn(async move {
+        let _ = server.run().await;
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let up = tokio::net::TcpStream::connect(("127.0.0.1", admin_port))
+            .await
+            .is_ok();
+        if up {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("gateway admin did not become ready");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Buffered /run against the masked-lane workflow. The LLM node must
+    // resolve the masked lane's pool (HTTP CONNECT to 127.0.0.1:9105) —
+    // never a direct client — so the run fails with a connection error
+    // instead of silently succeeding via the gateway IP.
+    let url = format!("http://127.0.0.1:{admin_port}/run");
+    let (status, body) = match post_hyper(
+        &url,
+        r#"{"workflow_id":"llm-wf","body":{"messages":[{"role":"user","content":"hi"}]}}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("admin run post failed: {e}"),
+    };
+    assert_eq!(
+        status,
+        http::StatusCode::INTERNAL_SERVER_ERROR,
+        "masked lane without a live tunnel must fail (fail-closed), not leak direct"
+    );
+    let run: serde_json::Value = serde_json::from_slice(&body).expect("run error response JSON");
+    // The grep-able part of the failure: "workflow execution failed" — same
+    // marker the buffered /run path uses on any node failure.
+    let rendered = run.to_string();
+    assert!(
+        rendered.contains("workflow execution failed"),
+        "run must surface a workflow execution failure, got: {rendered}"
+    );
 }

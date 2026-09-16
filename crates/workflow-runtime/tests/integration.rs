@@ -1,9 +1,10 @@
 //! Integration tests for the workflow-runtime execution engine.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use workflow_runtime::WorkflowError;
-use workflow_runtime::context::{ExecutionContext, LaneEntry, LaneRegistry};
+use workflow_runtime::context::{ExecutionContext, LaneClient, LaneEntry, LaneRegistry};
 use workflow_runtime::execution::{ExecutionPlan, NodeRuntime};
 use workflow_runtime::nodes::{NodeInput, RuntimeValue};
 use workflow_schema::*;
@@ -324,12 +325,21 @@ fn test_llm_node_with_mock_upstream() {
         };
         let rt_runtime = NodeRuntime::new(plan);
 
-        let client =
-            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-                .build_http();
+        // Lane pool for the LLM node: the runtime resolves clients ONLY from
+        // per-lane pools (no shared direct fallback — fail-closed egress).
+        let pool = LaneClient::direct(Duration::from_secs(30), 16);
+        struct Pools(std::collections::HashMap<String, Arc<LaneClient>>);
+        impl workflow_runtime::AsLaneClient for Pools {
+            fn client_for_lane(&self, lane_id: &str) -> Option<Arc<LaneClient>> {
+                self.0.get(lane_id).cloned()
+            }
+        }
+        let pool_client = Arc::new(pool);
+        let mut pool_map = std::collections::HashMap::new();
+        pool_map.insert("test-lane".to_string(), pool_client);
 
         let mut ctx = ExecutionContext::new(wf.id.clone(), "test-run".into(), lanes);
-        ctx.upstream_client = Some(Arc::new(client));
+        ctx.lane_clients = Some(Arc::new(Pools(pool_map)));
 
         let input = NodeInput::message(RuntimeValue::Json(serde_json::json!({
             "messages": [{"role": "user", "content": "Hello!"}]

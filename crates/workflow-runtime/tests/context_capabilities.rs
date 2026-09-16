@@ -97,10 +97,7 @@ impl AsLaneClient for StubLaneClients {
 }
 
 fn stub_client() -> Arc<LaneClient> {
-    Arc::new(LaneClient::from_shared(Arc::new(
-        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-            .build(hyper_util::client::legacy::connect::HttpConnector::new()),
-    )))
+    Arc::new(LaneClient::direct(std::time::Duration::from_secs(30), 16))
 }
 
 #[test]

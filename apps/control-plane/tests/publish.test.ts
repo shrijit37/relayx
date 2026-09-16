@@ -286,4 +286,49 @@ describe("extension collection", () => {
     expect(result.extensions![0]!.kind).toBe("my-ext");
     expect(result.extensions![0]!.version).toBe(0);
   });
+
+  test("toWireLane rejects masked lane without proxy_url (no silent direct wire lane)", async () => {
+    const { buildCoherentWireNoVersion } = await import("../src/domain/publish");
+    const flows = [
+      {
+        id: "wf-masked",
+        version: 1,
+        workflowJson: {
+          nodes: [
+            { id: "in", kind: "input", config: { kind: "input" } },
+            { id: "llm", kind: "llm", config: { lane_id: "lane-masked", model: "gpt-4" } },
+            { id: "out", kind: "output", config: { kind: "output" } },
+          ],
+          edges: [
+            { source_node: "in", source_port: "out", target_node: "llm", target_port: "in" },
+            { source_node: "llm", source_port: "out", target_node: "out", target_port: "in" },
+          ],
+        },
+        revision: "target" as const,
+      },
+    ];
+    // A lane row with egress=masked but no proxy_url must fail bundle
+    // building with a clear error — the gateway's compile-time rejection is
+    // the backstop, but the control plane must never emit a masked wired
+    // lane without a tunnel.
+    const result = await buildCoherentWireNoVersion(
+      flows,
+      async () => ({
+        id: "lane-masked",
+        project_id: "p1",
+        provider_id: null,
+        endpoint: "/chat",
+        base_url: "http://127.0.0.1:9100",
+        egress: "masked",
+        proxy_url: null,
+        policies: [],
+        credential_ref: null,
+      }),
+    );
+    expect("error" in result).toBe(true);
+    if ("error" in result) {
+      expect(result.error).toContain("masked");
+      expect(result.error).toContain("proxy_url");
+    }
+  });
 });

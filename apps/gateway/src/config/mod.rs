@@ -128,6 +128,18 @@ pub struct LaneConfig {
     /// Upstream base URL.
     pub base_url: String,
 
+    /// Egress mode for this lane: `"direct"` (default; requests leave from
+    /// the gateway IP) or `"masked"` (requests egress via `proxy_url`).
+    /// `"masked"` without a `proxy_url` is a validation error — a masked
+    /// lane must never silently fall back to direct egress.
+    #[serde(default = "default_lane_egress")]
+    pub egress: String,
+
+    /// Proxy URL for masked egress: `http://host:port` (HTTP CONNECT) or
+    /// `socks5://host:port` (SOCKS5). Must be set when `egress == "masked"`.
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+
     /// Timeout for establishing a TCP connection to the upstream.
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
@@ -147,6 +159,12 @@ pub struct LaneConfig {
     /// Maximum idle connections held in the pool.
     #[serde(default = "default_max_idle")]
     pub max_idle: usize,
+}
+
+/// Serde default for `LaneConfig::egress`: a TOML lane without an explicit
+/// egress value is direct (gateway IP, no proxy).
+fn default_lane_egress() -> String {
+    "direct".into()
 }
 
 // ─── Defaults ───────────────────────────────────────────────────────────────
@@ -207,6 +225,8 @@ pub struct CompiledRoute {
 pub struct CompiledLane {
     pub id: String,
     pub base_url: url::Url,
+    pub egress: String,
+    pub proxy_url: Option<String>,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
     pub frame_timeout: Duration,
@@ -288,11 +308,34 @@ impl GatewayConfig {
                 ))
             })?;
 
+            // Fail-closed egress: a lane configured `masked` without a proxy
+            // URL (or with an unknown egress value) must reject the config —
+            // never silently become a direct lane and leak the gateway IP.
+            match lane_cfg.egress.as_str() {
+                "direct" => {}
+                "masked" => {
+                    if lane_cfg.proxy_url.is_none() {
+                        return Err(ConfigError::Validation(format!(
+                            "lane '{}': egress=masked requires a proxy_url (http://… or socks5://…)",
+                            lane_cfg.id
+                        )));
+                    }
+                }
+                other => {
+                    return Err(ConfigError::Validation(format!(
+                        "lane '{}': unknown egress '{other}' (expected 'direct' or 'masked')",
+                        lane_cfg.id
+                    )));
+                }
+            }
+
             lanes.insert(
                 lane_cfg.id.clone(),
                 Arc::new(CompiledLane {
                     id: lane_cfg.id.clone(),
                     base_url,
+                    egress: lane_cfg.egress.clone(),
+                    proxy_url: lane_cfg.proxy_url.clone(),
                     connect_timeout: Duration::from_millis(lane_cfg.connect_timeout_ms),
                     idle_timeout: Duration::from_millis(lane_cfg.idle_timeout_ms),
                     frame_timeout: Duration::from_millis(lane_cfg.frame_timeout_ms),
@@ -588,6 +631,112 @@ base_url = "http://127.0.0.1:8102"
                 .match_route(&http::Method::POST, "/v1/unknown")
                 .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn masked_lane_without_proxy_is_rejected() -> anyhow::Result<()> {
+        let toml_str = r#"
+[server]
+listen = "127.0.0.1:8080"
+
+[[routes]]
+id = "r1"
+path_prefix = "/v1/"
+lane = "masked-lane"
+
+[[lanes]]
+id = "masked-lane"
+base_url = "https://api.example.com/v1"
+egress = "masked"
+"#;
+        let config: GatewayConfig = toml::from_str(toml_str)?;
+        let err = config.compile().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("egress=masked requires a proxy_url"),
+            "masked lane without proxy must be rejected, got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_lane_egress_is_rejected() -> anyhow::Result<()> {
+        let toml_str = r#"
+[server]
+listen = "127.0.0.1:8080"
+
+[[routes]]
+id = "r1"
+path_prefix = "/v1/"
+lane = "weird-lane"
+
+[[lanes]]
+id = "weird-lane"
+base_url = "https://api.example.com/v1"
+egress = "some_future_value"
+"#;
+        let config: GatewayConfig = toml::from_str(toml_str)?;
+        let err = config.compile().unwrap_err();
+        assert!(
+            err.to_string().contains("unknown egress"),
+            "unknown egress must be rejected, got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn masked_lane_with_proxy_compiles() -> anyhow::Result<()> {
+        let toml_str = r#"
+[server]
+listen = "127.0.0.1:8080"
+
+[[routes]]
+id = "r1"
+path_prefix = "/v1/"
+lane = "masked-lane"
+
+[[lanes]]
+id = "masked-lane"
+base_url = "https://api.example.com/v1"
+egress = "masked"
+proxy_url = "socks5://proxy.example.com:1080"
+"#;
+        let config: GatewayConfig = toml::from_str(toml_str)?;
+        let snapshot = config.compile()?;
+        let lane = snapshot
+            .lookup_lane("masked-lane")
+            .ok_or_else(|| anyhow::anyhow!("masked-lane missing"))?;
+        assert_eq!(lane.egress, "masked");
+        assert_eq!(
+            lane.proxy_url.as_deref(),
+            Some("socks5://proxy.example.com:1080")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lane_egress_defaults_to_direct() -> anyhow::Result<()> {
+        let toml_str = r#"
+[server]
+listen = "127.0.0.1:8080"
+
+[[routes]]
+id = "r1"
+path_prefix = "/v1/"
+lane = "plain-lane"
+
+[[lanes]]
+id = "plain-lane"
+base_url = "https://api.example.com/v1"
+"#;
+        let config: GatewayConfig = toml::from_str(toml_str)?;
+        let snapshot = config.compile()?;
+        let lane = snapshot
+            .lookup_lane("plain-lane")
+            .ok_or_else(|| anyhow::anyhow!("plain-lane missing"))?;
+        assert_eq!(lane.egress, "direct");
+        assert!(lane.proxy_url.is_none());
         Ok(())
     }
 }

@@ -35,8 +35,6 @@ pub struct LaneClient {
     egress: String,
     /// Pre-built client keyed by the egress mode.
     client: Arc<dyn std::any::Any + Send + Sync>,
-    /// Shared plain client fallback (admin `/run`, tests).
-    shared: Option<Arc<GatewayHttpClient>>,
 }
 
 /// Per-egress client containers (private — only `LaneClient` dispatches on them).
@@ -67,7 +65,6 @@ impl LaneClient {
         Self {
             egress: "direct".into(),
             client: Arc::new(DirectClient(client)),
-            shared: None,
         }
     }
 
@@ -90,7 +87,6 @@ impl LaneClient {
         Ok(Self {
             egress: "masked".into(),
             client: Arc::new(HttpProxyClient(client)),
-            shared: None,
         })
     }
 
@@ -113,11 +109,14 @@ impl LaneClient {
         Ok(Self {
             egress: "masked".into(),
             client: Arc::new(Socks5Client(client)),
-            shared: None,
         })
     }
 
     /// Build a `LaneClient` from a lane entry using the pool settings.
+    ///
+    /// Fail-closed egress: `masked` without a `proxy_url` is an error —
+    /// the caller must never be handed a direct client for a lane the
+    /// operator expects to be proxied (that would leak the gateway IP).
     pub fn from_lane(
         egress: &str,
         proxy_url: Option<&str>,
@@ -126,30 +125,15 @@ impl LaneClient {
         max_idle: usize,
     ) -> Result<Self, String> {
         match egress {
+            "direct" => Ok(Self::direct(idle_timeout, max_idle)),
             "masked" => match proxy_url {
                 Some(url) if url.starts_with("socks5") => Self::socks5(url, idle_timeout, max_idle),
                 Some(url) => Self::http_proxy(url, idle_timeout, max_idle),
-                None => {
-                    // masked without proxy_url → degrade to direct with warning
-                    tracing::warn!(
-                        "lane egress=masked but proxy_url is None; falling back to direct"
-                    );
-                    Ok(Self::direct(idle_timeout, max_idle))
-                }
+                None => Err("lane egress=masked requires a proxy_url".into()),
             },
-            _ => Ok(Self::direct(idle_timeout, max_idle)),
-        }
-    }
-
-    /// Wrap a pre-built shared `GatewayHttpClient` as a lane client.
-    ///
-    /// Used by the admin `/run` path and tests that inject a plain upstream
-    /// client when per-lane pools are absent.
-    pub fn from_shared(client: Arc<GatewayHttpClient>) -> Self {
-        Self {
-            egress: "direct".into(),
-            client: Arc::new(DirectClient((*client).clone())),
-            shared: Some(client),
+            other => Err(format!(
+                "unknown egress '{other}' (expected 'direct' or 'masked')"
+            )),
         }
     }
 
@@ -158,24 +142,37 @@ impl LaneClient {
         &self.egress
     }
 
+    /// Whether this client can actually send requests.
+    ///
+    /// A correctly built direct or tunnel client is always usable; a
+    /// downcast-mismatched client (wrong egress container for the mode) is
+    /// not. Fallback uses this to decide whether a provider was genuinely
+    /// attempted.
+    pub fn available(&self) -> bool {
+        match self.egress.as_str() {
+            "direct" => self.client.downcast_ref::<DirectClient>().is_some(),
+            "masked" => {
+                self.client.downcast_ref::<HttpProxyClient>().is_some()
+                    || self.client.downcast_ref::<Socks5Client>().is_some()
+            }
+            _ => self.client.downcast_ref::<DirectClient>().is_some(),
+        }
+    }
+
     /// Send a request through this lane's client, awaiting the response.
     ///
     /// Mirrors `hyper_util::legacy::Client::request`; the LLM node calls this
-    /// so it can use either a lane pool or the shared client transparently.
+    /// so it can use a lane pool transparently.
     pub async fn request(
         &self,
         req: http::Request<axum::body::Body>,
     ) -> Result<http::Response<hyper::body::Incoming>, std::io::Error> {
         match self.egress.as_str() {
             "direct" => {
-                if let Some(c) = self.client.downcast_ref::<DirectClient>() {
-                    return c.0.request(req).await.map_err(io_err);
-                }
-                // shared fallback: the `Arc<GatewayHttpClient>` from `from_shared`
-                if let Some(ref shared) = self.shared {
-                    return shared.request(req).await.map_err(io_err);
-                }
-                Err(std::io::Error::other("direct client downcast failed"))
+                let Some(c) = self.client.downcast_ref::<DirectClient>() else {
+                    return Err(std::io::Error::other("direct client downcast failed"));
+                };
+                c.0.request(req).await.map_err(io_err)
             }
             "masked" => {
                 if let Some(c) = self.client.downcast_ref::<HttpProxyClient>() {
@@ -184,22 +181,15 @@ impl LaneClient {
                 if let Some(c) = self.client.downcast_ref::<Socks5Client>() {
                     return c.0.request(req).await.map_err(io_err);
                 }
-                // shared fallback
-                if let Some(ref shared) = self.shared {
-                    return shared.request(req).await.map_err(io_err);
-                }
                 Err(std::io::Error::other("masked client downcast failed"))
             }
             _ => {
-                if let Some(c) = self.client.downcast_ref::<DirectClient>() {
-                    return c.0.request(req).await.map_err(io_err);
-                }
-                if let Some(ref shared) = self.shared {
-                    return shared.request(req).await.map_err(io_err);
-                }
-                Err(std::io::Error::other(
-                    "fallback direct client downcast failed",
-                ))
+                let Some(c) = self.client.downcast_ref::<DirectClient>() else {
+                    return Err(std::io::Error::other(
+                        "fallback direct client downcast failed",
+                    ));
+                };
+                c.0.request(req).await.map_err(io_err)
             }
         }
     }
@@ -566,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn from_lane_masked_without_proxy_degrades_to_direct() {
+    fn from_lane_masked_without_proxy_returns_error() {
         let client = LaneClient::from_lane(
             "masked",
             None,
@@ -574,15 +564,20 @@ mod tests {
             TEST_IDLE_TIMEOUT,
             TEST_MAX_IDLE,
         );
-        assert!(client.is_ok());
-        assert_eq!(
-            client.ok().map(|c| c.egress().to_owned()),
-            Some("direct".into())
+        assert!(
+            client.is_err(),
+            "masked egress requires a proxy_url — a direct fallback would leak the gateway IP"
+        );
+        assert!(
+            client
+                .err()
+                .unwrap_or_default()
+                .contains("requires a proxy_url")
         );
     }
 
     #[test]
-    fn from_lane_unknown_egress_returns_direct() {
+    fn from_lane_unknown_egress_returns_error() {
         let client = LaneClient::from_lane(
             "some_future_value",
             None,
@@ -590,10 +585,9 @@ mod tests {
             TEST_IDLE_TIMEOUT,
             TEST_MAX_IDLE,
         );
-        assert!(client.is_ok());
-        assert_eq!(
-            client.ok().map(|c| c.egress().to_owned()),
-            Some("direct".into())
+        assert!(
+            client.is_err(),
+            "unknown egress must not silently become a direct client"
         );
     }
 
@@ -603,6 +597,34 @@ mod tests {
             LaneClient::http_proxy("http://exa mple.com:8080", TEST_IDLE_TIMEOUT, TEST_MAX_IDLE);
         assert!(client.is_err());
         assert!(client.err().unwrap_or_default().contains("invalid"));
+    }
+
+    #[test]
+    fn masked_client_without_tunnel_is_not_available() {
+        // A lane that resolves to a masked client but lacks a usable tunnel
+        // must report unavailable so fallback treats it as "never attempted"
+        // instead of sending traffic direct from the gateway IP.
+        let client = LaneClient::direct(TEST_IDLE_TIMEOUT, TEST_MAX_IDLE);
+        let client = LaneClient {
+            egress: "masked".into(),
+            client: client.client,
+        };
+        assert!(!client.available());
+    }
+
+    #[test]
+    fn direct_and_masked_clients_are_available() {
+        let direct = LaneClient::direct(TEST_IDLE_TIMEOUT, TEST_MAX_IDLE);
+        assert!(direct.available());
+        let masked = match LaneClient::http_proxy(
+            "http://proxy.example.com:8080",
+            TEST_IDLE_TIMEOUT,
+            TEST_MAX_IDLE,
+        ) {
+            Ok(c) => c,
+            Err(e) => panic!("valid proxy should build a masked client: {e}"),
+        };
+        assert!(masked.available());
     }
 
     #[test]
