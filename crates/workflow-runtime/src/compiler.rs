@@ -21,8 +21,9 @@ use workflow_schema::Workflow;
 pub struct CompileContext {
     /// Available lanes.
     pub lanes: Arc<LaneRegistry>,
-    /// Available extensions. When present, the compiler runs optional
-    /// validators on Custom nodes (non-blocking, warnings only).
+    /// Available extensions. When present, the compiler performs kind
+    /// resolution on Custom nodes and logs warnings for unregistered kinds
+    /// (non-blocking, does not reject the workflow).
     pub extensions: Option<Arc<ExtensionRegistry>>,
 }
 

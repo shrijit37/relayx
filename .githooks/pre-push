@@ -36,7 +36,9 @@ while read local_ref local_sha remote_ref remote_sha; do
     fi
 
     # Fetch latest origin refs (fast, no checkout needed).
-    git fetch --quiet "$remote" 2>/dev/null || true
+    if ! git fetch --quiet "$remote" 2>/dev/null; then
+        echo "WARNING: Failed to fetch from '$remote'. The behind-main check may be stale."
+    fi
 
     # Check if the branch is behind origin/main.
     default_branch="origin/main"

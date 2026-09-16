@@ -135,11 +135,12 @@ impl RuntimeSnapshotBuilder {
     }
 
     /// Record an extension spec (kind + version) for snapshot metadata.
+    /// Duplicate kinds are replaced (matching `ExtensionRegistry::register`).
     pub fn with_extension(mut self, kind: impl Into<String>, version: u64) -> Self {
-        self.extensions.push(ExtensionSpecSnapshot {
-            kind: kind.into(),
-            version,
-        });
+        let kind = kind.into();
+        self.extensions.retain(|e| e.kind != kind);
+        self.extensions
+            .push(ExtensionSpecSnapshot { kind, version });
         self
     }
 

@@ -27,6 +27,8 @@ pub type GatewayClient =
 /// client is injected so LLM nodes can reach their upstream providers;
 /// `lane_clients` (when present) resolves a per-lane pool for each lane.
 // ponytail: 9 params is at the ceiling; group into a RequestSpec struct if another is added.
+// NOTE: This function now has 11 params (ceiling was 9). The next parameter
+// addition should introduce a RequestSpec/ExecutionParams struct.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_workflow(
     snapshot: &Arc<RuntimeSnapshot>,

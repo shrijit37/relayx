@@ -3,6 +3,11 @@ set -euo pipefail
 
 msg=$(head -1 "$1")
 
+# Skip merge commits (they have two parents).
+if [ "$(git cat-file -p HEAD 2>/dev/null | grep -c '^parent ')" -ge 2 ] 2>/dev/null; then
+    exit 0
+fi
+
 # Require scope prefix: type(scope): or type:
 if ! echo "$msg" | grep -qE '^(feat|fix|chore|docs|test|refactor|ci|perf|build)(\([^)]+\))?!?: '; then
     echo "ERROR: Commit message must start with type(scope): or type:"

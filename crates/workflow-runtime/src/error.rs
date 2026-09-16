@@ -46,9 +46,6 @@ pub enum NodeError {
 /// Errors from extension validation or execution.
 #[derive(Debug, Error)]
 pub enum ExtensionError {
-    #[error("extension validation failed: {0}")]
-    Validation(String),
-
     #[error("extension worker unavailable: {0}")]
     WorkerUnavailable(String),
 

@@ -252,7 +252,7 @@ mod tests {
             .await
             .map_err(|e| e.to_string())?;
         let len = u32::from_be_bytes(header);
-        if len as usize as u32 != len {
+        if len > MAX_RESPONSE_FRAME as u32 {
             return Err("frame length overflow".into());
         }
         let mut body = vec![0u8; len as usize];

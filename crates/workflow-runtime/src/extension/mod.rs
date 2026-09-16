@@ -31,6 +31,10 @@ use workflow_schema::CustomConfig;
 ///
 /// At present, validators are not invoked during synchronous workflow
 /// compilation. Full async validation is deferred to the executor at runtime.
+///
+/// TODO: Wire validators into the execution path when async validation is
+/// needed (e.g., before calling `ExtensionExecutor::execute` in
+/// `execution.rs` for `NodeKind::Custom`).
 #[async_trait::async_trait]
 pub trait ExtensionValidator: Send + Sync {
     /// Validate the custom node configuration.
@@ -180,7 +184,7 @@ mod tests {
     #[async_trait::async_trait]
     impl ExtensionValidator for FailingValidator {
         async fn validate(&self, _config: &CustomConfig) -> Result<(), ExtensionError> {
-            Err(ExtensionError::Validation("test validation failure".into()))
+            Err(ExtensionError::Execution("test validation failure".into()))
         }
     }
 
@@ -295,7 +299,7 @@ mod tests {
         let result = validator.validate(&config).await;
         assert!(result.is_err());
         match result {
-            Err(ExtensionError::Validation(msg)) => {
+            Err(ExtensionError::Execution(msg)) => {
                 assert_eq!(msg, "test validation failure");
             }
             other => panic!("unexpected result: {other:?}"),
