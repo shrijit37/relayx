@@ -41,7 +41,7 @@
     "@lovable.dev/vite-tanstack-config": "^2.20.0",
     "@testing-library/react": "^16.3.0",
     "@types/bun": "^1.4.2",
-    "@types/node": "^22.16.5",
+    "@types/node": "^26.5.1",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.2.0",
