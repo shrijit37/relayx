@@ -80,6 +80,8 @@ async function toWireLane(lane: LaneRowWithCred): Promise<WireLane> {
   return {
     base_url: lane.base_url,
     authorization: resolveCredential(lane.credential_ref),
+    egress: lane.egress,
+    proxy_url: lane.proxy_url,
   };
 }
 

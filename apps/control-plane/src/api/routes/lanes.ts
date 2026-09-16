@@ -26,6 +26,7 @@ export function registerLaneRoutes(
       endpoint: string;
       base_url: string;
       egress: string;
+      proxy_url: string | null;
       policies: string[];
       credential_ref: CredentialRef | null;
     } = {
@@ -34,6 +35,7 @@ export function registerLaneRoutes(
       endpoint: parsed.data.endpoint,
       base_url: parsed.data.base_url,
       egress: parsed.data.egress,
+      proxy_url: parsed.data.proxy_url ?? null,
       policies: parsed.data.policies,
       credential_ref: parsed.data.credential_ref ?? null,
     };
@@ -51,6 +53,7 @@ export function registerLaneRoutes(
       endpoint?: string;
       base_url?: string;
       egress?: string;
+      proxy_url?: string | null;
       policies?: string[];
       credential_ref?: CredentialRef | null;
     } = {};
@@ -58,6 +61,7 @@ export function registerLaneRoutes(
     if (data.endpoint !== undefined) patch.endpoint = data.endpoint;
     if (data.base_url !== undefined) patch.base_url = data.base_url;
     if (data.egress !== undefined) patch.egress = data.egress;
+    if (data.proxy_url !== undefined) patch.proxy_url = data.proxy_url;
     if (data.policies !== undefined) patch.policies = data.policies;
     if (data.credential_ref !== undefined) patch.credential_ref = data.credential_ref;
     const updated = await repo.lanes.update(pool, (req.params as { id: string }).id, patch);

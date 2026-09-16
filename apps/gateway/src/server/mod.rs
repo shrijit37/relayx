@@ -97,7 +97,11 @@ impl GatewayServer {
         let client = crate::upstream::build_http_client(Duration::from_secs(90), 64);
 
         // ── Per-lane pools + snapshot publisher ────────────────────────────
-        let pool_builder = crate::lanes::HyperPoolBuilder::new(Duration::from_secs(90), 64);
+        let pool_builder = crate::lanes::HyperPoolBuilder::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(90),
+            64,
+        );
         let publication_state = match (self.publication.clone(), self.workflow_snapshot.clone()) {
             (Some(external), _) => Some(external),
             (None, Some(snap)) => {

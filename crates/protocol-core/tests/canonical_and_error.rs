@@ -277,6 +277,7 @@ fn test_error_status_codes() {
         (
             ProtocolEngineError::ProviderError {
                 message: "upstream".into(),
+                status: None,
             },
             502,
         ),
@@ -326,6 +327,7 @@ fn test_error_categories() {
         (
             ProtocolEngineError::ProviderError {
                 message: "upstream".into(),
+                status: Some(429),
             },
             "provider_error",
         ),

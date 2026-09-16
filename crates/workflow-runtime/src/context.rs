@@ -13,6 +13,261 @@ pub type GatewayHttpClient = hyper_util::client::legacy::Client<
     axum::body::Body,
 >;
 
+/// Type-erased lane-aware HTTP client.
+///
+/// Each lane has its own connection pool backed by one of three connector
+/// families:
+///
+/// | egress   | Underlying connector                         | Purpose                            |
+/// |----------|----------------------------------------------|------------------------------------|
+/// | direct   | `HttpConnector` (TCP, no proxy)              | Default cheapest path              |
+/// | masked   | `Tunnel<HttpConnector>` (HTTP CONNECT)       | Hide egress IP via HTTP CONNECT    |
+/// | masked   | `SocksV5<HttpConnector>` (SOCKS5)            | Hide egress IP via SOCKS5          |
+///
+/// All three connectors return `TokioIo<TcpStream>` — the same transport —
+/// so the `Client`'s response future type is identical across variants.
+/// We store each variant as a pre-built `Client` inside an `Arc<dyn Any>`
+/// and dispatch via `downcast_ref`, avoiding a heap allocation per request.
+///
+/// This type implements `tower::Service` so callers use it transparently.
+#[derive(Clone)]
+pub struct LaneClient {
+    egress: String,
+    /// Pre-built client keyed by the egress mode.
+    client: Arc<dyn std::any::Any + Send + Sync>,
+    /// Shared plain client fallback (admin `/run`, tests).
+    shared: Option<Arc<GatewayHttpClient>>,
+}
+
+/// Per-egress client containers (private — only `LaneClient` dispatches on them).
+struct DirectClient(GatewayHttpClient);
+type HttpProxyClientInner = hyper_util::client::legacy::Client<
+    hyper_util::client::legacy::connect::proxy::Tunnel<
+        hyper_util::client::legacy::connect::HttpConnector,
+    >,
+    axum::body::Body,
+>;
+struct HttpProxyClient(HttpProxyClientInner);
+type Socks5ClientInner = hyper_util::client::legacy::Client<
+    hyper_util::client::legacy::connect::proxy::SocksV5<
+        hyper_util::client::legacy::connect::HttpConnector,
+    >,
+    axum::body::Body,
+>;
+struct Socks5Client(Socks5ClientInner);
+
+impl LaneClient {
+    /// Create a direct client (no proxy).
+    pub fn direct(idle_timeout: Duration, max_idle: usize) -> Self {
+        let client =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_idle_timeout(idle_timeout)
+                .pool_max_idle_per_host(max_idle)
+                .build(hyper_util::client::legacy::connect::HttpConnector::new());
+        Self {
+            egress: "direct".into(),
+            client: Arc::new(DirectClient(client)),
+            shared: None,
+        }
+    }
+
+    /// Create an HTTP CONNECT proxy client.
+    pub fn http_proxy(
+        proxy_url: &str,
+        idle_timeout: Duration,
+        max_idle: usize,
+    ) -> Result<Self, String> {
+        let proxy_uri: http::Uri = proxy_url
+            .parse()
+            .map_err(|e| format!("invalid proxy_url: {e}"))?;
+        let connector = hyper_util::client::legacy::connect::HttpConnector::new();
+        let tunnel = hyper_util::client::legacy::connect::proxy::Tunnel::new(proxy_uri, connector);
+        let client =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_idle_timeout(idle_timeout)
+                .pool_max_idle_per_host(max_idle)
+                .build(tunnel);
+        Ok(Self {
+            egress: "masked".into(),
+            client: Arc::new(HttpProxyClient(client)),
+            shared: None,
+        })
+    }
+
+    /// Create a SOCKS5 proxy client.
+    pub fn socks5(
+        proxy_url: &str,
+        idle_timeout: Duration,
+        max_idle: usize,
+    ) -> Result<Self, String> {
+        let proxy_uri: http::Uri = proxy_url
+            .parse()
+            .map_err(|e| format!("invalid proxy_url: {e}"))?;
+        let connector = hyper_util::client::legacy::connect::HttpConnector::new();
+        let socks = hyper_util::client::legacy::connect::proxy::SocksV5::new(proxy_uri, connector);
+        let client =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .pool_idle_timeout(idle_timeout)
+                .pool_max_idle_per_host(max_idle)
+                .build(socks);
+        Ok(Self {
+            egress: "masked".into(),
+            client: Arc::new(Socks5Client(client)),
+            shared: None,
+        })
+    }
+
+    /// Build a `LaneClient` from a lane entry using the pool settings.
+    pub fn from_lane(
+        egress: &str,
+        proxy_url: Option<&str>,
+        _connect_timeout: Duration,
+        idle_timeout: Duration,
+        max_idle: usize,
+    ) -> Result<Self, String> {
+        match egress {
+            "masked" => match proxy_url {
+                Some(url) if url.starts_with("socks5") => Self::socks5(url, idle_timeout, max_idle),
+                Some(url) => Self::http_proxy(url, idle_timeout, max_idle),
+                None => {
+                    // masked without proxy_url → degrade to direct with warning
+                    tracing::warn!(
+                        "lane egress=masked but proxy_url is None; falling back to direct"
+                    );
+                    Ok(Self::direct(idle_timeout, max_idle))
+                }
+            },
+            _ => Ok(Self::direct(idle_timeout, max_idle)),
+        }
+    }
+
+    /// Wrap a pre-built shared `GatewayHttpClient` as a lane client.
+    ///
+    /// Used by the admin `/run` path and tests that inject a plain upstream
+    /// client when per-lane pools are absent.
+    pub fn from_shared(client: Arc<GatewayHttpClient>) -> Self {
+        Self {
+            egress: "direct".into(),
+            client: Arc::new(DirectClient((*client).clone())),
+            shared: Some(client),
+        }
+    }
+
+    /// Egress mode string — direct, masked, or future value.
+    pub fn egress(&self) -> &str {
+        &self.egress
+    }
+
+    /// Send a request through this lane's client, awaiting the response.
+    ///
+    /// Mirrors `hyper_util::legacy::Client::request`; the LLM node calls this
+    /// so it can use either a lane pool or the shared client transparently.
+    pub async fn request(
+        &self,
+        req: http::Request<axum::body::Body>,
+    ) -> Result<http::Response<hyper::body::Incoming>, std::io::Error> {
+        match self.egress.as_str() {
+            "direct" => {
+                if let Some(c) = self.client.downcast_ref::<DirectClient>() {
+                    return c.0.request(req).await.map_err(io_err);
+                }
+                // shared fallback: the `Arc<GatewayHttpClient>` from `from_shared`
+                if let Some(ref shared) = self.shared {
+                    return shared.request(req).await.map_err(io_err);
+                }
+                Err(std::io::Error::other("direct client downcast failed"))
+            }
+            "masked" => {
+                if let Some(c) = self.client.downcast_ref::<HttpProxyClient>() {
+                    return c.0.request(req).await.map_err(io_err);
+                }
+                if let Some(c) = self.client.downcast_ref::<Socks5Client>() {
+                    return c.0.request(req).await.map_err(io_err);
+                }
+                // shared fallback
+                if let Some(ref shared) = self.shared {
+                    return shared.request(req).await.map_err(io_err);
+                }
+                Err(std::io::Error::other("masked client downcast failed"))
+            }
+            _ => {
+                if let Some(c) = self.client.downcast_ref::<DirectClient>() {
+                    return c.0.request(req).await.map_err(io_err);
+                }
+                if let Some(ref shared) = self.shared {
+                    return shared.request(req).await.map_err(io_err);
+                }
+                Err(std::io::Error::other(
+                    "fallback direct client downcast failed",
+                ))
+            }
+        }
+    }
+}
+
+fn io_err(e: hyper_util::client::legacy::Error) -> std::io::Error {
+    std::io::Error::other(e)
+}
+
+impl tower_service::Service<http::Request<axum::body::Body>> for LaneClient {
+    type Response = http::Response<hyper::body::Incoming>;
+    type Error = std::io::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: http::Request<axum::body::Body>) -> Self::Future {
+        // All three concrete Client types return Response<Incoming> via
+        // `client.request()`.  We dispatch per-variant and box each
+        // future into the same pinned-dyn type so the associated type
+        // is unified across Direct, HttpProxy, and Socks5.
+        match self.egress.as_str() {
+            "direct" => {
+                let Some(c) = self.client.downcast_ref::<DirectClient>() else {
+                    return Box::pin(async {
+                        Err(std::io::Error::other("direct client downcast failed"))
+                    });
+                };
+                let client = c.0.clone();
+                Box::pin(async move { client.request(req).await.map_err(std::io::Error::other) })
+            }
+            "masked" => {
+                if let Some(c) = self.client.downcast_ref::<HttpProxyClient>() {
+                    let client = c.0.clone();
+                    return Box::pin(async move {
+                        client.request(req).await.map_err(std::io::Error::other)
+                    });
+                }
+                if let Some(c) = self.client.downcast_ref::<Socks5Client>() {
+                    let client = c.0.clone();
+                    return Box::pin(async move {
+                        client.request(req).await.map_err(std::io::Error::other)
+                    });
+                }
+                Box::pin(async { Err(std::io::Error::other("masked client downcast failed")) })
+            }
+            _ => {
+                let Some(c) = self.client.downcast_ref::<DirectClient>() else {
+                    return Box::pin(async {
+                        Err(std::io::Error::other(
+                            "fallback direct client downcast failed",
+                        ))
+                    });
+                };
+                let client = c.0.clone();
+                Box::pin(async move { client.request(req).await.map_err(std::io::Error::other) })
+            }
+        }
+    }
+}
+
 /// Build a gateway HTTP client with keep-alive pooling and a bounded idle
 /// pool. This is the single constructor for the plain upstream client —
 /// the gateway's per-lane layer wraps it with `retry_canceled_requests`
@@ -102,7 +357,7 @@ impl ExecutionMetadata {
 /// the runtime knowing anything about per-lane pools.
 pub trait AsLaneClient: Send + Sync {
     /// Client for the named lane, if that lane has a pool.
-    fn client_for_lane(&self, lane_id: &str) -> Option<Arc<GatewayHttpClient>>;
+    fn client_for_lane(&self, lane_id: &str) -> Option<Arc<LaneClient>>;
 }
 
 // ─── MCP tool executor trait ────────────────────────────────────────────────
@@ -150,6 +405,12 @@ pub struct LaneEntry {
     /// time from a `credential_ref` on the control plane — never stored in
     /// workflow JSON. `None` for lanes that carry no auth.
     pub authorization: Option<String>,
+    /// Egress mode: `"direct"` (default, gateway IP) or `"masked"`
+    /// (via a lane proxy). Unknown values degrade to `direct`.
+    pub egress: String,
+    /// Proxy URL for masked egress: `http://host:port` (HTTP CONNECT) or
+    /// `socks5://host:port` (SOCKS5). Ignored unless `egress == "masked"`.
+    pub proxy_url: Option<String>,
 }
 
 impl LaneRegistry {
@@ -227,5 +488,128 @@ impl ExecutionContext {
             extension_registry: self.extension_registry.clone(),
             token_sender: self.token_sender.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+    const TEST_MAX_IDLE: usize = 32;
+    const TEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn direct_client_builds_successfully() {
+        let client = LaneClient::direct(TEST_IDLE_TIMEOUT, TEST_MAX_IDLE);
+        assert_eq!(client.egress(), "direct");
+    }
+
+    #[test]
+    fn http_proxy_builds_successfully() {
+        let client = LaneClient::http_proxy(
+            "http://proxy.example.com:8080",
+            TEST_IDLE_TIMEOUT,
+            TEST_MAX_IDLE,
+        );
+        assert!(client.is_ok());
+        assert_eq!(
+            client.ok().map(|c| c.egress().to_owned()),
+            Some("masked".into())
+        );
+    }
+
+    #[test]
+    fn socks5_builds_successfully() {
+        let client = LaneClient::socks5(
+            "socks5://proxy.example.com:1080",
+            TEST_IDLE_TIMEOUT,
+            TEST_MAX_IDLE,
+        );
+        assert!(client.is_ok());
+        assert_eq!(
+            client.ok().map(|c| c.egress().to_owned()),
+            Some("masked".into())
+        );
+    }
+
+    #[test]
+    fn from_lane_routes_masked_http() {
+        let client = LaneClient::from_lane(
+            "masked",
+            Some("http://proxy.example.com:8080"),
+            TEST_CONNECT_TIMEOUT,
+            TEST_IDLE_TIMEOUT,
+            TEST_MAX_IDLE,
+        );
+        assert!(client.is_ok());
+        assert_eq!(
+            client.ok().map(|c| c.egress().to_owned()),
+            Some("masked".into())
+        );
+    }
+
+    #[test]
+    fn from_lane_routes_masked_socks5() {
+        let client = LaneClient::from_lane(
+            "masked",
+            Some("socks5://proxy.example.com:1080"),
+            TEST_CONNECT_TIMEOUT,
+            TEST_IDLE_TIMEOUT,
+            TEST_MAX_IDLE,
+        );
+        assert!(client.is_ok());
+        assert_eq!(
+            client.ok().map(|c| c.egress().to_owned()),
+            Some("masked".into())
+        );
+    }
+
+    #[test]
+    fn from_lane_masked_without_proxy_degrades_to_direct() {
+        let client = LaneClient::from_lane(
+            "masked",
+            None,
+            TEST_CONNECT_TIMEOUT,
+            TEST_IDLE_TIMEOUT,
+            TEST_MAX_IDLE,
+        );
+        assert!(client.is_ok());
+        assert_eq!(
+            client.ok().map(|c| c.egress().to_owned()),
+            Some("direct".into())
+        );
+    }
+
+    #[test]
+    fn from_lane_unknown_egress_returns_direct() {
+        let client = LaneClient::from_lane(
+            "some_future_value",
+            None,
+            TEST_CONNECT_TIMEOUT,
+            TEST_IDLE_TIMEOUT,
+            TEST_MAX_IDLE,
+        );
+        assert!(client.is_ok());
+        assert_eq!(
+            client.ok().map(|c| c.egress().to_owned()),
+            Some("direct".into())
+        );
+    }
+
+    #[test]
+    fn http_proxy_invalid_url_returns_error() {
+        let client =
+            LaneClient::http_proxy("http://exa mple.com:8080", TEST_IDLE_TIMEOUT, TEST_MAX_IDLE);
+        assert!(client.is_err());
+        assert!(client.err().unwrap_or_default().contains("invalid"));
+    }
+
+    #[test]
+    fn socks5_invalid_url_returns_error() {
+        let client =
+            LaneClient::socks5("http://exa mple.com:8080", TEST_IDLE_TIMEOUT, TEST_MAX_IDLE);
+        assert!(client.is_err());
+        assert!(client.err().unwrap_or_default().contains("invalid"));
     }
 }

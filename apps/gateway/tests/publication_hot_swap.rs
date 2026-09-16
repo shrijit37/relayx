@@ -107,7 +107,7 @@ async fn publication_load_returns_consistent_snapshot_and_pools() {
             .build(),
     );
 
-    let pool_builder = HyperPoolBuilder::new(Duration::from_secs(90), 16);
+    let pool_builder = HyperPoolBuilder::new(Duration::from_secs(5), Duration::from_secs(90), 16);
     let publisher = Arc::new(InMemoryPublisher::new());
     let publication = Arc::new(PublicationState::new(
         publisher.clone(),
@@ -137,6 +137,8 @@ fn lanes_with(url: &str) -> Arc<LaneRegistry> {
             Err(e) => panic!("invalid lane url: {e}"),
         },
         authorization: None,
+        egress: "direct".into(),
+        proxy_url: None,
     });
     Arc::new(lanes)
 }
@@ -200,7 +202,11 @@ async fn publication_state_compiles_and_publishes_wire_snapshot() {
     let state = PublicationState::new(
         publisher.clone(),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     );
 
     state
@@ -224,7 +230,11 @@ async fn validate_compiles_but_does_not_publish() {
     let publication = Arc::new(PublicationState::new(
         publisher.clone(),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
 
     // Seed a v1 runtime so there is something to verify "unchanged".
@@ -258,7 +268,11 @@ async fn published_lanes_carry_resolved_authorization() {
     let publication = Arc::new(PublicationState::new(
         publisher.clone(),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
 
     let wire = WireSnapshot {
@@ -273,6 +287,8 @@ async fn published_lanes_carry_resolved_authorization() {
                 relay_gateway::observability::WireLane {
                     base_url: "http://127.0.0.1:9001".into(),
                     authorization: Some("Bearer sk-test-123".into()),
+                    egress: "direct".into(),
+                    proxy_url: None,
                 },
             )]),
         }],
@@ -311,6 +327,8 @@ async fn published_lanes_carry_resolved_authorization() {
                 relay_gateway::observability::WireLane {
                     base_url: "http://127.0.0.1:9001".into(),
                     authorization: None,
+                    egress: "direct".into(),
+                    proxy_url: None,
                 },
             )]),
         }],
@@ -362,7 +380,11 @@ workflow_id = "echo-wf"
     let publication = Arc::new(PublicationState::new(
         publisher.clone(),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
 
     publication.publish(snapshot_at(1));
@@ -450,7 +472,11 @@ workflow_id = "echo-wf"
     let publication = Arc::new(PublicationState::new(
         Arc::new(InMemoryPublisher::new()),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
 
     // Publish the echo workflow (Input → Output, no provider needed).
@@ -542,7 +568,11 @@ workflow_id = "echo-wf"
     let publication = Arc::new(PublicationState::new(
         Arc::new(InMemoryPublisher::new()),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
     publication.publish(snapshot_at(3));
 

@@ -46,7 +46,7 @@ export type SchemaNodeConfig =
   | { kind: "condition"; condition: string; field: string; operator: string; value: unknown }
   | { kind: "mcp"; server_ref: string; tool_name: string; deferred: boolean }
   | { kind: "skill"; skill_ref: string; progressive: boolean }
-  | { kind: "fallback"; providers: { lane_id: string; model?: string; protocol?: string }[]; rounds: number }
+  | { kind: "fallback"; providers: { lane_id: string; model?: string; protocol?: string }[]; rounds: number; strategy?: "sequential" | "round_robin"; retry_on?: number[] }
   | { kind: "retry"; max_attempts: number; delay_ms: number; on_timeout: boolean; on_provider_error: boolean; target: LlmSchemaConfig }
   | { kind: "custom"; payload: unknown }
   | { kind: "unsupported"; editor_kind: string; reason: string };
@@ -226,7 +226,14 @@ function configFor(n: CanonicalNode, issues: Issue[]): SchemaNodeConfig | null {
         }
         return e;
       });
-      return { kind: "fallback", providers, rounds: c.fallback.rounds };
+      const out: Extract<SchemaNodeConfig, { kind: "fallback" }> = {
+        kind: "fallback",
+        providers,
+        rounds: c.fallback.rounds,
+      };
+      if (c.fallback.strategy !== undefined) out.strategy = c.fallback.strategy;
+      if (c.fallback.retryOn !== undefined && c.fallback.retryOn.length > 0) out.retry_on = c.fallback.retryOn;
+      return out;
     }
     case "retry": {
       if (c.policy.maxAttempts < 1) issues.push({ nodeId: n.id, field: "maxAttempts", severity: "error", message: "Max attempts must be ≥ 1." });
@@ -310,7 +317,15 @@ function configFromSchema(sn: SchemaNode, issues: Issue[]): CanonicalConfig | nu
       tool: { capabilityRef: c.server_ref ? `mcp://${[c.server_ref, c.tool_name].filter(Boolean).join("/")}` : "", serverRef: c.server_ref, toolName: c.tool_name, deferred: c.deferred },
     };
     case "skill": return { kind: "skill", skill: { skillRef: c.skill_ref, progressive: c.progressive } };
-    case "fallback": return { kind: "fallback", fallback: { providers: c.providers.map((p) => ({ lane: p.lane_id, ...(p.model ? { model: p.model } : {}) })), rounds: c.rounds } };
+    case "fallback": return {
+      kind: "fallback",
+      fallback: {
+        providers: c.providers.map((p) => ({ lane: p.lane_id, ...(p.model ? { model: p.model } : {}) })),
+        rounds: c.rounds,
+        ...(c.strategy ? { strategy: c.strategy } : {}),
+        ...(c.retry_on && c.retry_on.length > 0 ? { retryOn: c.retry_on } : {}),
+      },
+    };
     case "retry": return { kind: "retry", policy: { maxAttempts: c.max_attempts, delayMs: c.delay_ms, onTimeout: c.on_timeout, onProviderError: c.on_provider_error }, target: llmFromSchema(c.target) };
     case "custom": {
       issues.push({ nodeId: sn.id, severity: "error", message: `Node '${sn.id}' is a custom runtime node; the editor cannot edit it.` });

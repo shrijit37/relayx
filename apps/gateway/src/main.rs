@@ -38,7 +38,11 @@ async fn main() -> anyhow::Result<()> {
     // endpoint is live (the control plane drives it). Pure-proxy configs
     // simply never receive a publish; workflow configs become
     // control-plane consumers with an atomic hot-swap bundle.
-    let pool_builder = HyperPoolBuilder::new(std::time::Duration::from_secs(90), 64);
+    let pool_builder = HyperPoolBuilder::new(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(90),
+        64,
+    );
     let publication = Arc::new(PublicationState::new(
         Arc::new(InMemoryPublisher::new()),
         Default::default(),

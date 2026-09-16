@@ -106,6 +106,32 @@ fn llm_workflow(model: &str, lane_id: &str, stream: bool) -> Workflow {
 
 /// A workflow with a Fallback node between two providers.
 fn fallback_workflow(primary: &str, backup: &str) -> Workflow {
+    fallback_workflow_with(
+        primary,
+        backup,
+        FallbackConfig {
+            providers: vec![],
+            rounds: 1,
+            strategy: Default::default(),
+            retry_on: vec![],
+        },
+    )
+}
+
+/// A workflow with a Fallback node carrying an explicit strategy/retry_on.
+fn fallback_workflow_with(primary: &str, backup: &str, mut fallback: FallbackConfig) -> Workflow {
+    fallback.providers = vec![
+        FallbackProvider {
+            lane_id: primary.into(),
+            model: "primary-model".into(),
+            protocol: None,
+        },
+        FallbackProvider {
+            lane_id: backup.into(),
+            model: "backup-model".into(),
+            protocol: None,
+        },
+    ];
     Workflow {
         id: "fallback-wf".into(),
         name: "fallback".into(),
@@ -115,21 +141,7 @@ fn fallback_workflow(primary: &str, backup: &str) -> Workflow {
             Node {
                 id: "fb".into(),
                 kind: NodeKind::Fallback,
-                config: NodeConfig::Fallback(FallbackConfig {
-                    providers: vec![
-                        FallbackProvider {
-                            lane_id: primary.into(),
-                            model: "primary-model".into(),
-                            protocol: None,
-                        },
-                        FallbackProvider {
-                            lane_id: backup.into(),
-                            model: "backup-model".into(),
-                            protocol: None,
-                        },
-                    ],
-                    rounds: 1,
-                }),
+                config: NodeConfig::Fallback(fallback),
                 inputs: vec![PortDef {
                     name: "in".into(),
                     port_type: PortType::Message,
@@ -177,7 +189,11 @@ workflow_id = "{workflow_id}"
     let publication = Arc::new(PublicationState::new(
         publisher.clone(),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
 
     // Publish the workflow + its lanes.
@@ -196,6 +212,8 @@ workflow_id = "{workflow_id}"
                         relay_gateway::observability::WireLane {
                             base_url: v.clone(),
                             authorization: None,
+                            egress: "direct".into(),
+                            proxy_url: None,
                         },
                     )
                 })
@@ -384,6 +402,106 @@ async fn fallback_workflow_fails_over_to_backup_provider() {
     assert!(
         rendered.contains("served by backup"),
         "expected backup text, got {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn fallback_429_rotates_to_next_lane() {
+    // Primary returns a 429 (rate limit). With retry_on:[429] the fallback
+    // must fail over to the backup *in the same round* — not exhaust rounds.
+    let primary_mock = match spawn_mock(MockConfig {
+        mode: MockMode::Json,
+        json_status: Some(429),
+        json_body: "{}".into(),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => panic!("primary mock spawn failed: {e}"),
+    };
+    let backup_body = r#"{
+        "id": "chatcmpl-backup",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "backup-model",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "served by backup"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    }"#;
+    let backup_mock = match spawn_mock(MockConfig {
+        mode: MockMode::Json,
+        json_body: backup_body.into(),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => panic!("backup mock spawn failed: {e}"),
+    };
+
+    let wf = fallback_workflow_with(
+        "primary",
+        "backup",
+        FallbackConfig {
+            providers: vec![],
+            rounds: 1,
+            strategy: FallbackStrategy::Sequential,
+            retry_on: vec![429],
+        },
+    );
+
+    let (proxy_port, _p, _pub, url) = spawn_workflow_gateway(
+        "fallback-wf",
+        wf,
+        &[
+            ("primary".into(), format!("http://{}", primary_mock.addr)),
+            ("backup".into(), format!("http://{}", backup_mock.addr)),
+        ],
+    )
+    .await;
+    let _ = proxy_port;
+
+    let (status, body) = match post_hyper(
+        &url,
+        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("429-rotation post failed: {e}"),
+    };
+    assert_eq!(
+        status,
+        http::StatusCode::OK,
+        "fallback with retry_on 429 must succeed via backup"
+    );
+
+    assert_eq!(
+        primary_mock
+            .state
+            .requests_served
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "primary should be hit exactly once (one 429)"
+    );
+    assert_eq!(
+        backup_mock
+            .state
+            .requests_served
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "backup should serve the request after the 429 failover"
+    );
+
+    let json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => panic!("fallback 429 response not JSON: {e}"),
+    };
+    let rendered = serde_json::to_string(&json).unwrap_or_default();
+    assert!(
+        rendered.contains("served by backup"),
+        "expected backup text after 429 rotation, got {rendered}"
     );
 }
 

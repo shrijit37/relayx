@@ -1,5 +1,5 @@
 # ARCHITECTURE.md
-> **Status:** living · **Verified:** 2026-09-16 · **Purpose:** Target system architecture; labels what is implemented vs. planned.
+> **Status:** living · **Verified:** 2026-09-17 · **Purpose:** Target system architecture; labels what is implemented vs. planned.
 
 > **Note (Phase 6.5):** This document describes the **target architecture**. Not all connections shown here exist in the current implementation. What is real today: the backend data plane, the control plane (workflows/versions/providers/lanes + publish + run passthrough), and a backend-authoritative frontend — the editor loads/saves/validates/publishes/runs against the control plane and shows no fabricated data. Not yet wired (honest "not available" in the UI): MCP/skill registries, policy enforcement, observability backend, run-history. See [state.md](state.md) and [PHASE6.5_IMPLEMENTATION_REPORT.md](archive/PHASE6.5_IMPLEMENTATION_REPORT.md) for what is actually wired today.
 
@@ -331,6 +331,41 @@ Possible implementations:
 - cloud egress gateway
 
 The lane should expose health and latency signals.
+
+## 11a. Egress control
+
+> **Implemented (2026-09-16):** `direct`, `masked`, and 429 rotation. See
+> [state.md](state.md) for test counts.
+
+Each lane declares an `egress` mode controlling how upstream traffic leaves the gateway:
+
+| Mode | Behavior | Connector | Use case |
+|------|----------|----------|----------|
+| `direct` (default) | Plain TCP from the gateway IP | `HttpConnector` | Low cost, dev/staging |
+| `masked` | HTTP CONNECT or SOCKS5 tunnel via `proxy_url` | `hyper-util` `Tunnel` / `SocksV5` | Hide origin IP |
+| *(any other value)* | Silently degrades to `direct` | `HttpConnector` | Future values, no-fail |
+
+- `egress: masked` with `proxy_url` absent or invalid falls back to `direct`
+  with a warning — the gateway never blocks publish on a broken proxy config.
+- `proxy_url` accepts `http://host:port` (HTTP CONNECT) or
+  `socks5://host:port` (SOCKS5). It is ignored unless `egress == "masked"`.
+- The wire snapshot carries `egress` + `proxy_url` on each lane
+  (`WireLane`); lane pools are keyed by lane identity and reused across
+  requests (no per-request network setup).
+
+### 429 rotation
+
+The `Fallback` node supports two strategies:
+
+- **`sequential`** (default): try providers in order, retry on any error.
+- **`round_robin`**: the starting offset shifts per request via an atomic
+  counter, spreading requests across providers/lanes.
+
+When a provider returns an HTTP status listed in `retry_on` (default
+`[429]`), the fallback advances to the next provider **within the same
+round** — a transient rate limit triggers lane rotation instead of
+exhausting rounds. The `Retry` node likewise retries any status in its
+`retry_on` list (default `[429]`) regardless of `on_provider_error`.
 
 ## 12. Routing
 

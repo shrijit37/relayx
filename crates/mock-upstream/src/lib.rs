@@ -45,6 +45,10 @@ pub struct MockConfig {
     pub chunk_delay: std::time::Duration,
     /// JSON response body for non-streaming mode.
     pub json_body: String,
+    /// HTTP status code to return for JSON mode. Defaults to 200.
+    /// When `Some(429)`, the mock returns a rate-limit error body — useful
+    /// for testing fallback rotation and retry-on-429 logic.
+    pub json_status: Option<u16>,
     /// Raw SSE wire body for streaming mode (takes precedence over `chunks`).
     /// Each entry is one SSE data line (e.g. `{"type":"..."}`); the mock emits
     /// them in order as `data: <line>\n\n`.
@@ -60,6 +64,7 @@ impl Default for MockConfig {
             ttfb: std::time::Duration::ZERO,
             chunk_delay: std::time::Duration::ZERO,
             json_body: r#"{"ok":true,"result":"hello"}"#.into(),
+            json_status: None,
             raw_sse: None,
         }
     }

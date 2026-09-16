@@ -102,6 +102,8 @@ async fn anthropic_protocol_routes_to_messages_endpoint() {
         id: "anthropic-lane".into(),
         base_url,
         authorization: None,
+        egress: "direct".into(),
+        proxy_url: None,
     });
     let lanes = Arc::new(lanes);
 
@@ -217,6 +219,8 @@ async fn multimodal_content_blocks_are_preserved() {
         id: "anthropic-lane".into(),
         base_url,
         authorization: None,
+        egress: "direct".into(),
+        proxy_url: None,
     });
     let lanes = Arc::new(lanes);
 

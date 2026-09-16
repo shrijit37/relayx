@@ -9,6 +9,10 @@ export type WireLane = {
   base_url: string;
   /** Resolved Authorization header value; never a credential reference. */
   authorization?: string | null;
+  /** Egress mode: "direct" (default, gateway IP) or "masked" (via proxy_url). */
+  egress: string;
+  /** Proxy URL for masked egress (http://… for HTTP CONNECT, socks5://… for SOCKS5). */
+  proxy_url?: string | null;
 };
 
 export type WireWorkflow = {

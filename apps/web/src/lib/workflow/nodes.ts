@@ -66,6 +66,13 @@ export interface FallbackEntryConfig {
 export interface FallbackConfig {
   providers: FallbackEntryConfig[];
   rounds: number;
+  /** How providers are selected across requests: "sequential" (always
+   *  start at index 0) or "round_robin" (each request starts at the next
+   *  provider, spreading traffic across egress IPs). */
+  strategy?: "sequential" | "round_robin";
+  /** HTTP status codes that trigger immediate failover to the next provider
+   *  in the current round (e.g. [429] for rate-limit rotation). */
+  retryOn?: number[];
 }
 
 export interface McpToolRef {

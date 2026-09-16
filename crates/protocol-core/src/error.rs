@@ -43,8 +43,17 @@ pub enum ProtocolEngineError {
     },
 
     /// The upstream provider returned an error.
+    ///
+    /// `status` carries the upstream HTTP status code when the failure came
+    /// from a real upstream response (e.g. 429 rate limits). It is `None`
+    /// for transport-level failures (timeouts, connect errors) that never
+    /// produced an HTTP response. Consumers use it instead of parsing the
+    /// message text to drive retry/rotation policy.
     #[error("provider error: {message}")]
-    ProviderError { message: String },
+    ProviderError {
+        message: String,
+        status: Option<u16>,
+    },
 
     /// An internal error that should never happen.
     #[error("internal protocol error: {0}")]
@@ -52,6 +61,18 @@ pub enum ProtocolEngineError {
 }
 
 impl ProtocolEngineError {
+    /// The upstream HTTP status code when this error came from a real
+    /// upstream response (e.g. `Some(429)` for a rate limit), or `None`
+    /// for transport-level failures and non-provider errors.
+    ///
+    /// Retry/rotation policy uses this instead of parsing `message` text.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            ProtocolEngineError::ProviderError { status, .. } => *status,
+            _ => None,
+        }
+    }
+
     /// HTTP status code for this error.
     pub fn status_code(&self) -> StatusCode {
         match self {

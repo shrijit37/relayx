@@ -113,10 +113,25 @@ async fn chat_completions(
 
     match app.config.mode {
         crate::MockMode::Json => {
+            let status_code = app
+                .config
+                .json_status
+                .and_then(|s| axum::http::StatusCode::from_u16(s).ok())
+                .unwrap_or(axum::http::StatusCode::OK);
+            let is_error = status_code.is_server_error()
+                || status_code == axum::http::StatusCode::TOO_MANY_REQUESTS;
+            if is_error {
+                return (
+                    status_code,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#,
+                )
+                    .into_response();
+            }
             let json_body = app.config.json_body.clone();
             let content_length = json_body.len().to_string();
             (
-                StatusCode::OK,
+                status_code,
                 [
                     (axum::http::header::CONTENT_TYPE, "application/json"),
                     (axum::http::header::CONTENT_LENGTH, content_length.as_str()),

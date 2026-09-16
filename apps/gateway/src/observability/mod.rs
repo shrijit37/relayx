@@ -289,6 +289,20 @@ pub struct WireLane {
     /// Resolved `Authorization` header value, if the lane has credentials.
     #[serde(default)]
     pub authorization: Option<String>,
+    /// Egress mode: `"direct"` (default, gateway IP) or `"masked"`
+    /// (via the lane's `proxy_url`). Unknown values degrade to `direct`.
+    #[serde(default = "default_lane_egress")]
+    pub egress: String,
+    /// Proxy URL for masked egress: `http://host:port` (HTTP CONNECT) or
+    /// `socks5://host:port` (SOCKS5). Ignored unless `egress == "masked"`.
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+}
+
+/// Serde default for `WireLane::egress`: a lane without an explicit egress
+/// value is direct (gateway IP, no proxy).
+fn default_lane_egress() -> String {
+    "direct".into()
 }
 
 /// Modified `WireWorkflow`: `lanes` is now a map of lane name → `WireLane`
@@ -335,6 +349,8 @@ impl PublicationState {
                         id: name.clone(),
                         base_url,
                         authorization: lane_cfg.authorization.clone(),
+                        egress: lane_cfg.egress.clone(),
+                        proxy_url: lane_cfg.proxy_url.clone(),
                     });
                 }
             }
@@ -806,4 +822,51 @@ pub fn admin_router_with_publication(
             publication,
             api_key,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WireLane;
+
+    fn parse(json: serde_json::Value) -> WireLane {
+        match serde_json::from_value(json) {
+            Ok(lane) => lane,
+            Err(e) => panic!("wire lane deserialize failed: {e}"),
+        }
+    }
+
+    #[test]
+    fn wire_lane_serde_roundtrip_preserves_egress_and_proxy_url() {
+        let lane = WireLane {
+            base_url: "https://api.example.com/v1".into(),
+            authorization: Some("Bearer token".into()),
+            egress: "masked".into(),
+            proxy_url: Some("socks5://proxy.example.com:1080".into()),
+        };
+        let json = match serde_json::to_value(&lane) {
+            Ok(v) => v,
+            Err(e) => panic!("wire lane serialize failed: {e}"),
+        };
+        assert_eq!(json["egress"], "masked");
+        assert_eq!(json["proxy_url"], "socks5://proxy.example.com:1080");
+        let back = parse(json);
+        assert_eq!(back.base_url, "https://api.example.com/v1");
+        assert_eq!(back.authorization.as_deref(), Some("Bearer token"));
+        assert_eq!(back.egress, "masked");
+        assert_eq!(
+            back.proxy_url.as_deref(),
+            Some("socks5://proxy.example.com:1080")
+        );
+    }
+
+    #[test]
+    fn wire_lane_serde_defaults_for_direct() {
+        // A lane without egress/proxy_url deserializes as direct with no proxy.
+        let lane = parse(serde_json::json!({
+            "base_url": "https://api.example.com/v1",
+        }));
+        assert_eq!(lane.egress, "direct");
+        assert_eq!(lane.proxy_url, None);
+        assert_eq!(lane.authorization, None);
+    }
 }

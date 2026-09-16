@@ -27,6 +27,8 @@ export const laneDtoSchema = z.object({
   endpoint: z.string().min(1),
   base_url: z.string().url(),
   egress: z.string().default("direct"),
+  /** Proxy URL for masked egress: http://… (HTTP CONNECT) or socks5://… (SOCKS5). */
+  proxy_url: z.string().url().nullable().optional(),
   policies: z.array(z.string()).default([]),
   credential_ref: credentialRefSchema.nullable().optional(),
 });

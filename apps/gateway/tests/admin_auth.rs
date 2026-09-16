@@ -104,7 +104,11 @@ workflow_id = "echo-wf"
     let publication = Arc::new(PublicationState::new(
         publisher.clone(),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
 
     let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
@@ -161,7 +165,11 @@ workflow_id = "echo-wf"
     let publication = Arc::new(PublicationState::new(
         publisher.clone(),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
     let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
         Ok(s) => s,

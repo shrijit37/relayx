@@ -13,25 +13,27 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use workflow_runtime::context::{GatewayHttpClient, LaneEntry};
+use workflow_runtime::context::{LaneClient, LaneEntry};
 
 /// Connection-pool factory — the only place Hyper clients are built.
 pub trait PoolBuilder: Send + Sync {
     /// Build the client (pool) for a lane. The pool key is the lane identity.
-    fn build(&self, lane: &LaneEntry) -> Arc<GatewayHttpClient>;
+    fn build(&self, lane: &LaneEntry) -> Arc<LaneClient>;
 }
 
 /// Standard builder: a Hyper legacy client with keep-alive pooling,
 /// idle timeout, and a bounded idle pool size.
 pub struct HyperPoolBuilder {
+    connect_timeout: Duration,
     idle_timeout: Duration,
     max_idle: usize,
 }
 
 impl HyperPoolBuilder {
-    /// Create a builder with the given idle timeout and max idle connections.
-    pub fn new(idle_timeout: Duration, max_idle: usize) -> Self {
+    /// Create a builder with the given timeouts and pool settings.
+    pub fn new(connect_timeout: Duration, idle_timeout: Duration, max_idle: usize) -> Self {
         Self {
+            connect_timeout,
             idle_timeout,
             max_idle: max_idle.max(1),
         }
@@ -39,16 +41,46 @@ impl HyperPoolBuilder {
 }
 
 impl PoolBuilder for HyperPoolBuilder {
-    fn build(&self, _lane: &LaneEntry) -> Arc<GatewayHttpClient> {
+    fn build(&self, lane: &LaneEntry) -> Arc<LaneClient> {
         // The pool key is the lane identity itself — the builder settings are
         // global; per-lane differentiation lives in `LanePools` keying.
-        Arc::new(
-            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-                .pool_idle_timeout(self.idle_timeout)
-                .pool_max_idle_per_host(self.max_idle)
-                .retry_canceled_requests(false)
-                .build(hyper_util::client::legacy::connect::HttpConnector::new()),
-        )
+        //
+        // Egress mode selects the connector family:
+        //   "direct"                        → plain TCP via HttpConnector
+        //   "masked" + http://proxy         → HTTP CONNECT tunnel
+        //   "masked" + socks5://proxy       → SOCKS5 tunnel
+        //   "masked" without proxy_url      → degrade to direct (logged warning)
+        //   unknown values                  → direct (fail-open, per requirement)
+        match lane.egress.as_str() {
+            "masked" => {
+                let Some(proxy_url) = lane.proxy_url.as_deref() else {
+                    tracing::warn!(
+                        lane = %lane.id,
+                        "lane egress=masked but proxy_url is missing; falling back to direct"
+                    );
+                    return Arc::new(LaneClient::direct(self.idle_timeout, self.max_idle));
+                };
+                match LaneClient::from_lane(
+                    "masked",
+                    Some(proxy_url),
+                    self.connect_timeout,
+                    self.idle_timeout,
+                    self.max_idle,
+                ) {
+                    Ok(client) => Arc::new(client),
+                    Err(e) => {
+                        tracing::warn!(
+                            lane = %lane.id,
+                            proxy_url = %proxy_url,
+                            error = %e,
+                            "invalid proxy_url for masked egress; falling back to direct"
+                        );
+                        Arc::new(LaneClient::direct(self.idle_timeout, self.max_idle))
+                    }
+                }
+            }
+            _ => Arc::new(LaneClient::direct(self.idle_timeout, self.max_idle)),
+        }
     }
 }
 
@@ -58,7 +90,7 @@ pub struct LaneSnapshot {
     /// Compiled lane entry.
     pub lane: LaneEntry,
     /// The lane's dedicated client.
-    pub client: Arc<GatewayHttpClient>,
+    pub client: Arc<LaneClient>,
 }
 
 /// The per-lane pools for one runtime snapshot, keyed by lane id.
@@ -124,6 +156,8 @@ mod tests {
                 Err(e) => panic!("invalid lane url: {e}"),
             },
             authorization: None,
+            egress: "direct".into(),
+            proxy_url: None,
         });
         registry.register(LaneEntry {
             id: "lane-b".into(),
@@ -132,6 +166,8 @@ mod tests {
                 Err(e) => panic!("invalid lane url: {e}"),
             },
             authorization: None,
+            egress: "direct".into(),
+            proxy_url: None,
         });
         Arc::new(registry)
     }
@@ -143,7 +179,7 @@ mod tests {
     #[test]
     fn pools_are_keyed_by_lane_identity() {
         let snap = snapshot();
-        let builder = HyperPoolBuilder::new(Duration::from_secs(90), 16);
+        let builder = HyperPoolBuilder::new(Duration::from_secs(5), Duration::from_secs(90), 16);
         let pools = LanePools::build(&snap, &builder);
 
         assert_eq!(pools.len(), 2);
@@ -164,8 +200,76 @@ mod tests {
     #[test]
     fn unknown_lane_has_no_pool() {
         let snap = snapshot();
-        let builder = HyperPoolBuilder::new(Duration::from_secs(90), 16);
+        let builder = HyperPoolBuilder::new(Duration::from_secs(5), Duration::from_secs(90), 16);
         let pools = LanePools::build(&snap, &builder);
         assert!(pools.get("lane-missing").is_none());
+    }
+
+    #[test]
+    fn masked_egress_with_valid_proxy_builds_lane_client() {
+        let builder = HyperPoolBuilder::new(Duration::from_secs(5), Duration::from_secs(90), 16);
+        let lane = LaneEntry {
+            id: "lane-masked".into(),
+            base_url: match Url::parse("https://api.example.com/v1") {
+                Ok(u) => u,
+                Err(e) => panic!("invalid lane url: {e}"),
+            },
+            authorization: None,
+            egress: "masked".into(),
+            proxy_url: Some("http://proxy.example.com:8080".into()),
+        };
+        let client = builder.build(&lane);
+        assert_eq!(client.egress(), "masked");
+    }
+
+    #[test]
+    fn masked_egress_without_proxy_degrades_to_direct() {
+        let builder = HyperPoolBuilder::new(Duration::from_secs(5), Duration::from_secs(90), 16);
+        let lane = LaneEntry {
+            id: "lane-masked-noproxy".into(),
+            base_url: match Url::parse("https://api.example.com/v1") {
+                Ok(u) => u,
+                Err(e) => panic!("invalid lane url: {e}"),
+            },
+            authorization: None,
+            egress: "masked".into(),
+            proxy_url: None,
+        };
+        let client = builder.build(&lane);
+        assert_eq!(client.egress(), "direct");
+    }
+
+    #[test]
+    fn masked_egress_with_invalid_proxy_degrades_to_direct() {
+        let builder = HyperPoolBuilder::new(Duration::from_secs(5), Duration::from_secs(90), 16);
+        let lane = LaneEntry {
+            id: "lane-masked-badproxy".into(),
+            base_url: match Url::parse("https://api.example.com/v1") {
+                Ok(u) => u,
+                Err(e) => panic!("invalid lane url: {e}"),
+            },
+            authorization: None,
+            egress: "masked".into(),
+            proxy_url: Some("http://exa mple.com:8080".into()),
+        };
+        let client = builder.build(&lane);
+        assert_eq!(client.egress(), "direct");
+    }
+
+    #[test]
+    fn unknown_egress_builds_direct_client() {
+        let builder = HyperPoolBuilder::new(Duration::from_secs(5), Duration::from_secs(90), 16);
+        let lane = LaneEntry {
+            id: "lane-future".into(),
+            base_url: match Url::parse("https://api.example.com/v1") {
+                Ok(u) => u,
+                Err(e) => panic!("invalid lane url: {e}"),
+            },
+            authorization: None,
+            egress: "some_future_value".into(),
+            proxy_url: None,
+        };
+        let client = builder.build(&lane);
+        assert_eq!(client.egress(), "direct");
     }
 }

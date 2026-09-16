@@ -84,6 +84,8 @@ fn workflow_snapshot() -> Arc<workflow_runtime::RuntimeSnapshot> {
         id: "mock".into(),
         base_url: base,
         authorization: None,
+        egress: "direct".into(),
+        proxy_url: None,
     });
     let lanes = Arc::new(lanes);
 

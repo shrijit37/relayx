@@ -302,6 +302,8 @@ fn test_llm_node_with_mock_upstream() {
             id: "test-lane".into(),
             base_url,
             authorization: None,
+            egress: "direct".into(),
+            proxy_url: None,
         });
         let lanes = Arc::new(lanes);
 
@@ -369,6 +371,8 @@ async fn test_concurrent_executions() {
         id: "lane1".into(),
         base_url,
         authorization: None,
+        egress: "direct".into(),
+        proxy_url: None,
     });
     let lanes = Arc::new(lanes);
 

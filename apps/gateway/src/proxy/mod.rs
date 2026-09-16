@@ -35,7 +35,7 @@ impl CurrentSnapshot for AppState {
 /// The data plane knows which pool belongs to which lane; the runtime calls
 /// this through `ExecutionContext::lane_clients` (via `AsLaneClient`).
 impl workflow_runtime::AsLaneClient for AppState {
-    fn client_for_lane(&self, lane_id: &str) -> Option<Arc<crate::execution::GatewayClient>> {
+    fn client_for_lane(&self, lane_id: &str) -> Option<Arc<workflow_runtime::LaneClient>> {
         let pools = self.publication.as_ref()?.pools();
         pools.get(lane_id).map(|snapshot| snapshot.client.clone())
     }
