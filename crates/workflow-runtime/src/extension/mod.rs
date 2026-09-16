@@ -81,8 +81,9 @@ pub struct ExtensionSpec {
     pub kind: String,
     /// Version of this extension (for snapshot identity and observability).
     pub version: u64,
-    /// Optional validator. When present, the compiler runs validation on
-    /// Custom nodes of this kind (non-blocking, warnings only).
+    /// Optional validator. When present, the validator is available for
+    /// runtime validation of Custom nodes of this kind (non-blocking,
+    /// warnings only). Not invoked during compile time.
     pub validator: Option<Arc<dyn ExtensionValidator>>,
     /// Executor that performs the actual work via worker RPC.
     pub executor: Arc<dyn ExtensionExecutor>,
@@ -123,7 +124,12 @@ impl ExtensionRegistry {
     /// Register an extension spec.
     ///
     /// If a spec with the same `kind` already exists, it is replaced.
+    /// Panics in debug builds if `kind` is empty.
     pub fn register(&mut self, spec: ExtensionSpec) {
+        debug_assert!(
+            !spec.kind.is_empty(),
+            "extension kind must not be empty"
+        );
         self.specs.insert(spec.kind.clone(), spec);
     }
 

@@ -668,13 +668,13 @@ async fn execute_node(
         NodeConfig::Retry(config) => crate::nodes::retry::execute(config, ctx, input).await,
         NodeConfig::Custom(cfg) => {
             let registry = ctx.extension_registry.as_ref().ok_or_else(|| {
-                NodeError::Extension(crate::error::ExtensionError::WorkerUnavailable(format!(
+                NodeError::Extension(crate::error::ExtensionError::NotRegistered(format!(
                     "custom node kind '{}' requires an extension registry",
                     cfg.kind
                 )))
             })?;
             let spec = registry.get(&cfg.kind).ok_or_else(|| {
-                NodeError::Extension(crate::error::ExtensionError::WorkerUnavailable(format!(
+                NodeError::Extension(crate::error::ExtensionError::NotRegistered(format!(
                     "no extension registered for kind '{}'",
                     cfg.kind
                 )))

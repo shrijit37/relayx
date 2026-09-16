@@ -49,6 +49,9 @@ pub enum ExtensionError {
     #[error("extension worker unavailable: {0}")]
     WorkerUnavailable(String),
 
+    #[error("extension not registered: {0}")]
+    NotRegistered(String),
+
     #[error("extension execution failed: {0}")]
     Execution(String),
 }

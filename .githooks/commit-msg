@@ -3,8 +3,8 @@ set -euo pipefail
 
 msg=$(head -1 "$1")
 
-# Skip merge commits (they have two parents).
-if [ "$(git cat-file -p HEAD 2>/dev/null | grep -c '^parent ')" -ge 2 ] 2>/dev/null; then
+# Skip merge commits (message starts with "Merge ").
+if echo "$msg" | grep -qiE '^Merge '; then
     exit 0
 fi
 

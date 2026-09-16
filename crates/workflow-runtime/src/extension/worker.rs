@@ -196,10 +196,17 @@ impl UnixSocketExecutor {
         // Read the response frame header.
         let mut header = [0u8; 4];
         stream.read_exact(&mut header).await.map_err(|e| {
-            NodeError::Extension(ExtensionError::Execution(format!(
-                "failed to read extension response header from '{}': {e}",
-                self.socket_path.display()
-            )))
+            if e.kind() == ErrorKind::UnexpectedEof {
+                NodeError::Extension(ExtensionError::WorkerUnavailable(format!(
+                    "extension worker at '{}' closed the connection before sending a response (crashed?)",
+                    self.socket_path.display()
+                )))
+            } else {
+                NodeError::Extension(ExtensionError::Execution(format!(
+                    "failed to read extension response header from '{}': {e}",
+                    self.socket_path.display()
+                )))
+            }
         })?;
         let resp_len = u32::from_be_bytes(header);
         let resp_len = usize::try_from(resp_len).map_err(|_| {
