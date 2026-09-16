@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 1
 
       - name: Run PR-Agent /review
-        uses: The-PR-Agent/pr-agent@v0.28
+        uses: The-PR-Agent/pr-agent@v0.34
         with:
           command: /review
         env:
