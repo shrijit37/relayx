@@ -34,8 +34,7 @@ jobs:
       issues: write
     steps:
       - name: Open Code Review
-        # Pin to a full commit SHA (supply-chain hardening), matching the
-        # SHA-pinning practice for third-party actions in ci.yml.
+        # Pin to a full commit SHA (supply-chain hardening).
         uses: alibaba/open-code-review@f1101fd7f51304c82e4a4f292bbee88aea0823cf
         with:
           llm_url: https://gateway.shrijit.tech/v1

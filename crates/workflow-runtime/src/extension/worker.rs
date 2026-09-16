@@ -166,6 +166,7 @@ impl ExtensionExecutor for UnixSocketExecutor {
 }
 
 impl UnixSocketExecutor {
+    // TODO: pool connections per socket_path to avoid reconnect overhead.
     /// One connect -> write -> read -> close round trip.
     async fn round_trip(&self, body: &[u8]) -> Result<ExtensionResponse, NodeError> {
         let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
