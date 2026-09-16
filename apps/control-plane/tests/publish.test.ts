@@ -93,6 +93,7 @@ describe("publish pipeline", () => {
       endpoint: "/v1/chat/completions",
       base_url: "http://127.0.0.1:9001",
       egress: "direct",
+      proxy_url: null,
       policies: [],
       credential_ref: null,
     });
@@ -140,6 +141,7 @@ describe("publish pipeline", () => {
       endpoint: "/chat",
       base_url: "http://127.0.0.1:9001",
       egress: "direct",
+      proxy_url: null,
       policies: [],
       credential_ref: null,
     });
@@ -172,7 +174,7 @@ describe("publish pipeline", () => {
     await db!.pool.query("INSERT INTO projects (id,name) VALUES ('p1','p1')");
     await repo.lanes.create(db!.pool, {
       id: "lane-a", project_id: "p1", provider_id: null, endpoint: "/chat",
-      base_url: "http://127.0.0.1:9001", egress: "direct", policies: [], credential_ref: null,
+      base_url: "http://127.0.0.1:9001", egress: "direct", proxy_url: null, policies: [], credential_ref: null,
     });
     const wf = await repo.workflows.create(db!.pool, "p1", "echo");
     await repo.workflows.createVersion(db!.pool, wf.id, 1, sampleWorkflow("lane-a"));
@@ -211,7 +213,7 @@ describe("workflow lifecycle", () => {
     await db!.pool.query("INSERT INTO projects (id,name) VALUES ('p1','p1')");
     await repo.lanes.create(db!.pool, {
       id: "lane-a", project_id: "p1", provider_id: null, endpoint: "/chat",
-      base_url: "http://127.0.0.1:9001", egress: "direct", policies: [], credential_ref: null,
+      base_url: "http://127.0.0.1:9001", egress: "direct", proxy_url: null, policies: [], credential_ref: null,
     });
     const wf = await repo.workflows.create(db!.pool, "p1", "echo");
 
