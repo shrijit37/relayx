@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+msg=$(head -1 "$1")
+
+# Require scope prefix: type(scope): or type:
+if ! echo "$msg" | grep -qE '^(feat|fix|chore|docs|test|refactor|ci|perf|build)(\([^)]+\))?!?: '; then
+    echo "ERROR: Commit message must start with type(scope): or type:"
+    echo "  Examples: feat(web):, fix(gateway):, docs:, test:"
+    echo "  Got: $msg"
+    exit 1
+fi
+
+# Warn on non-imperative mood
+if echo "$msg" | grep -qiE '\b(added|fixed|updated|removed|changed|makes?|did)\b'; then
+    echo "WARNING: Commit message may not be in imperative mood."
+    echo "  Use 'add' instead of 'added', 'fix' instead of 'fixed', etc."
+    echo "  Got: $msg"
+fi

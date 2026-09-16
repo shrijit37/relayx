@@ -8,7 +8,7 @@ set -euo pipefail
 # recurring merge conflicts on shared files (CI workflows, etc.).
 # This hook blocks the push and tells the user to rebase first.
 #
-# Applies to: pr/* and feat/* branches (PR head branches).
+# Applies to: pr/*, feat/*, and fix/* branches (PR head branches).
 # Does not apply to: main, dependabot/*, docs/*, or direct pushes.
 #
 
@@ -25,8 +25,8 @@ while read local_ref local_sha remote_ref remote_sha; do
     # Extract short branch name from the ref.
     branch="${local_ref#refs/heads/}"
 
-    # Only apply to PR head branches (pr/* and feat/*).
-    if [[ ! "$branch" =~ ^(pr/|feat/) ]]; then
+    # Only apply to PR head branches (pr/*, feat/*, fix/*).
+    if [[ ! "$branch" =~ ^(pr/|feat/|fix/) ]]; then
         continue
     fi
 
@@ -62,6 +62,13 @@ while read local_ref local_sha remote_ref remote_sha; do
         echo "║    git push --force-with-lease                             ║"
         echo "║                                                            ║"
         echo "╚══════════════════════════════════════════════════════════════╝"
+
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo ""
+            echo "  WARNING: Your working tree has uncommitted changes."
+            echo "  Stash them before rebasing: git stash"
+            echo ""
+        fi
         echo ""
         exit 1
     fi
