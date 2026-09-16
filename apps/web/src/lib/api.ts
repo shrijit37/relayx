@@ -154,6 +154,8 @@ export type LaneRow = {
   endpoint: string;
   base_url: string;
   egress: string;
+  /** Proxy URL for masked egress (http://… or socks5://…); null for direct. */
+  proxy_url: string | null;
   policies: string[];
   credential_ref: { ref: string; provider: string } | null;
   created_at: string;
@@ -168,10 +170,13 @@ export async function createLane(input: {
   id?: string;
   name: string;
   project_id: string;
-  endpoint: string;
+  endpoint?: string;
   base_url: string;
-  egress?: string;
+  egress?: "direct" | "masked";
+  proxy_url?: string | null;
   policies?: string[];
+  provider_id?: string | null;
+  credential_ref?: { ref: string; provider: string } | null;
 }): Promise<LaneRow> {
   return req(`/lanes`, { method: "POST", body: JSON.stringify(input) });
 }
@@ -183,8 +188,10 @@ export async function updateLane(
     endpoint?: string;
     base_url?: string;
     egress?: string;
+    proxy_url?: string | null;
     policies?: string[];
     provider_id?: string | null;
+    credential_ref?: { ref: string; provider: string } | null;
   },
 ): Promise<LaneRow> {
   return req(`/lanes/${encodeURIComponent(id)}`, {
