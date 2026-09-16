@@ -323,6 +323,8 @@ describe("extension collection", () => {
         proxy_url: null,
         policies: [],
         credential_ref: null,
+        created_at: "2026-09-17T00:00:00Z",
+        updated_at: "2026-09-17T00:00:00Z",
       }),
     );
     expect("error" in result).toBe(true);
