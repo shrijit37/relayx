@@ -43,8 +43,7 @@ pnpm-lock.yaml
 apps/web/.output/
 apps/web/.wrangler/
 
-# TanStack Router — generated at dev/build time by the router plugin
-apps/web/src/routeTree.gen.ts
+
 
 # AI agent tooling — imported skills and tool state (not project code)
 .codex/
