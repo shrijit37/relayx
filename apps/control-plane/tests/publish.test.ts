@@ -226,3 +226,62 @@ describe("workflow lifecycle", () => {
     expect(versions[0]!.status).toBe("active");
   });
 });
+
+describe("extension collection", () => {
+  test("collectCustomExtensionKinds extracts distinct kinds from workflow JSON", async () => {
+    const { collectCustomExtensionKinds } = await import("../src/domain/publish");
+    const wf = {
+      nodes: [
+        { id: "in", kind: "input", config: { kind: "input" } },
+        { id: "c1", kind: "custom", config: { kind: "custom", ext_kind: "nordvpn-egress", payload: {} } },
+        { id: "c2", kind: "custom", config: { kind: "custom", ext_kind: "nordvpn-egress", payload: { x: 1 } } },
+        { id: "c3", kind: "custom", config: { kind: "custom", ext_kind: "key-pool", payload: {} } },
+        { id: "out", kind: "output", config: { kind: "output" } },
+      ],
+    };
+    const kinds = collectCustomExtensionKinds(wf);
+    expect(kinds.size).toBe(2);
+    expect(kinds.has("nordvpn-egress")).toBe(true);
+    expect(kinds.has("key-pool")).toBe(true);
+  });
+
+  test("collectCustomExtensionKinds returns empty set for workflow with no custom nodes", async () => {
+    const { collectCustomExtensionKinds } = await import("../src/domain/publish");
+    const wf = {
+      nodes: [
+        { id: "in", kind: "input", config: { kind: "input" } },
+        { id: "out", kind: "output", config: { kind: "output" } },
+      ],
+    };
+    const kinds = collectCustomExtensionKinds(wf);
+    expect(kinds.size).toBe(0);
+  });
+
+  test("buildCoherentWireNoVersion includes extensions in wire snapshot", async () => {
+    const { buildCoherentWireNoVersion } = await import("../src/domain/publish");
+    const flows = [
+      {
+        id: "wf-ext",
+        version: 1,
+        workflowJson: {
+          nodes: [
+            { id: "in", kind: "input", config: { kind: "input" }, inputs: [], outputs: [{ name: "out", port_type: "message" }] },
+            { id: "c1", kind: "custom", config: { kind: "custom", ext_kind: "my-ext", payload: {} }, inputs: [{ name: "in", port_type: "message" }], outputs: [{ name: "out", port_type: "message" }] },
+            { id: "out", kind: "output", config: { kind: "output" }, inputs: [{ name: "in", port_type: "message" }], outputs: [] },
+          ],
+          edges: [
+            { source_node: "in", source_port: "out", target_node: "c1", target_port: "in" },
+            { source_node: "c1", source_port: "out", target_node: "out", target_port: "in" },
+          ],
+        },
+        revision: "target" as const,
+      },
+    ];
+    const result = await buildCoherentWireNoVersion(flows, async () => null);
+    if ("error" in result) throw new Error(result.error);
+    expect(result.extensions).toBeDefined();
+    expect(result.extensions!.length).toBe(1);
+    expect(result.extensions![0]!.kind).toBe("my-ext");
+    expect(result.extensions![0]!.version).toBe(0);
+  });
+});

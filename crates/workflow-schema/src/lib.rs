@@ -283,6 +283,13 @@ fn default_retry_delay_ms() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomConfig {
     /// Opaque kind string identifying this custom node executor.
+    ///
+    /// Renamed on the wire to `ext_kind` — the enclosing `NodeConfig` is
+    /// tagged with the field name `kind`, so an un-renamed `kind` here would
+    /// collide: the tag's `"custom"` discriminant would overwrite the real
+    /// extension kind during deserialization and every registry lookup would
+    /// search for `"custom"` instead of the registered kind.
+    #[serde(default, rename = "ext_kind")]
     pub kind: String,
     /// Opaque configuration passed through to the registered executor.
     #[serde(default)]

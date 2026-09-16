@@ -1177,4 +1177,235 @@ mod runtime_value_integer {
             other => panic!("expected Runtime error, got: {other:?}"),
         }
     }
+
+    // ─── Validator-before-executor tests ─────────────────────────────────────
+
+    /// A recording validator that tracks whether it was called.
+    struct RecordingValidator {
+        called: std::sync::atomic::AtomicBool,
+        should_fail: bool,
+    }
+
+    impl RecordingValidator {
+        fn new(should_fail: bool) -> Self {
+            Self {
+                called: std::sync::atomic::AtomicBool::new(false),
+                should_fail,
+            }
+        }
+
+        fn was_called(&self) -> bool {
+            self.called.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl workflow_runtime::extension::ExtensionValidator for RecordingValidator {
+        async fn validate(
+            &self,
+            _config: &workflow_schema::CustomConfig,
+        ) -> Result<(), workflow_runtime::error::ExtensionError> {
+            self.called
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            if self.should_fail {
+                Err(workflow_runtime::error::ExtensionError::Validation(
+                    "test validation failure".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// A recording executor that tracks whether it was called.
+    struct RecordingExecutor {
+        called: std::sync::atomic::AtomicBool,
+    }
+
+    impl RecordingExecutor {
+        fn new() -> Self {
+            Self {
+                called: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn was_called(&self) -> bool {
+            self.called.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl workflow_runtime::extension::ExtensionExecutor for RecordingExecutor {
+        async fn execute(
+            &self,
+            _config: &workflow_schema::CustomConfig,
+            _version: u64,
+            input: workflow_runtime::nodes::NodeInput,
+        ) -> Result<workflow_runtime::nodes::NodeOutput, workflow_runtime::error::NodeError>
+        {
+            self.called
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(workflow_runtime::nodes::NodeOutput::message(input.value))
+        }
+    }
+
+    #[test]
+    fn validator_called_before_executor() {
+        let wf = Workflow {
+            id: "val-1".into(),
+            name: "validator-before-executor".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                custom_node("ext1", "val-kind"),
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "ext1"), simple_edge("ext1", "out")],
+        };
+        let plan = build_and_validate_ext(&wf);
+
+        let validator = Arc::new(RecordingValidator::new(false));
+        let executor = Arc::new(RecordingExecutor::new());
+        let mut registry = workflow_runtime::extension::ExtensionRegistry::new();
+        registry.register(workflow_runtime::extension::ExtensionSpec {
+            kind: "val-kind".into(),
+            version: 1,
+            validator: Some(validator.clone()),
+            executor: executor.clone(),
+        });
+
+        let lanes = Arc::new(LaneRegistry::new());
+        let mut ctx = ExecutionContext::new("val-wf".into(), "run-val".into(), lanes);
+        ctx.extension_registry = Some(Arc::new(registry));
+
+        let rt = NodeRuntime::new(plan);
+        let result = tokio_test::block_on(rt.execute(
+            &ctx,
+            NodeInput::message(RuntimeValue::String("hello".into())),
+        ));
+        let output = match result {
+            Ok(o) => o,
+            Err(e) => panic!("execution failed: {e}"),
+        };
+        assert_eq!(output.value, RuntimeValue::String("hello".into()));
+        assert!(validator.was_called(), "validator must be called");
+        assert!(
+            executor.was_called(),
+            "executor must be called after validator"
+        );
+    }
+
+    #[test]
+    fn validator_fail_blocks_executor() {
+        let wf = Workflow {
+            id: "val-2".into(),
+            name: "validator-fail-blocks".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                custom_node("ext1", "val-fail-kind"),
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "ext1"), simple_edge("ext1", "out")],
+        };
+        let plan = build_and_validate_ext(&wf);
+
+        let validator = Arc::new(RecordingValidator::new(true));
+        let executor = Arc::new(RecordingExecutor::new());
+        let mut registry = workflow_runtime::extension::ExtensionRegistry::new();
+        registry.register(workflow_runtime::extension::ExtensionSpec {
+            kind: "val-fail-kind".into(),
+            version: 1,
+            validator: Some(validator.clone()),
+            executor: executor.clone(),
+        });
+
+        let lanes = Arc::new(LaneRegistry::new());
+        let mut ctx = ExecutionContext::new("val-fail-wf".into(), "run-val-fail".into(), lanes);
+        ctx.extension_registry = Some(Arc::new(registry));
+
+        let rt = NodeRuntime::new(plan);
+        let result = tokio_test::block_on(rt.execute(
+            &ctx,
+            NodeInput::message(RuntimeValue::String("hello".into())),
+        ));
+        assert!(result.is_err(), "validator failure must reject the node");
+        assert!(validator.was_called(), "validator must be called");
+        assert!(
+            !executor.was_called(),
+            "executor must NOT be called when validator fails"
+        );
+        match result {
+            Err(WorkflowError::Runtime { node_id, source }) => {
+                assert_eq!(node_id, "ext1");
+                let msg = source.to_string();
+                assert!(
+                    msg.contains("validation failed"),
+                    "error should mention validation: {msg}"
+                );
+            }
+            other => panic!("expected Runtime error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_config_ext_kind_serde_roundtrip() {
+        let node = workflow_schema::Node {
+            id: "c1".into(),
+            kind: NodeKind::Custom,
+            config: NodeConfig::Custom(CustomConfig {
+                kind: "nordvpn-egress".into(),
+                payload: serde_json::json!({"x": 1}),
+            }),
+            inputs: vec![PortDef {
+                name: "in".into(),
+                port_type: PortType::Message,
+            }],
+            outputs: vec![PortDef {
+                name: "out".into(),
+                port_type: PortType::Message,
+            }],
+        };
+
+        let json = serde_json::to_string(&node).expect("serialize");
+        assert!(
+            json.contains(r#""ext_kind":"nordvpn-egress"#),
+            "wire must contain ext_kind, got: {json}"
+        );
+
+        let back: workflow_schema::Node =
+            serde_json::from_str(&json).expect("deserialize roundtrip");
+        match back.config {
+            NodeConfig::Custom(cc) => {
+                assert_eq!(cc.kind, "nordvpn-egress");
+                assert_eq!(cc.payload, serde_json::json!({"x": 1}));
+            }
+            other => panic!("expected Custom, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn specs_snapshots_from_registry() {
+        let mut registry = workflow_runtime::extension::ExtensionRegistry::new();
+        registry.register(workflow_runtime::extension::ExtensionSpec {
+            kind: "alpha".into(),
+            version: 1,
+            validator: None,
+            executor: Arc::new(StubExtensionExecutor),
+        });
+        registry.register(workflow_runtime::extension::ExtensionSpec {
+            kind: "beta".into(),
+            version: 3,
+            validator: None,
+            executor: Arc::new(StubExtensionExecutor),
+        });
+
+        let mut snapshots = registry.specs_snapshots();
+        snapshots.sort_by(|a, b| a.kind.cmp(&b.kind));
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].kind, "alpha");
+        assert_eq!(snapshots[0].version, 1);
+        assert_eq!(snapshots[1].kind, "beta");
+        assert_eq!(snapshots[1].version, 3);
+    }
 }

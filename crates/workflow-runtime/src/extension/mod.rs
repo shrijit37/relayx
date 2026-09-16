@@ -25,16 +25,14 @@ use workflow_schema::CustomConfig;
 
 /// Validates a `CustomConfig` (optional, non-blocking).
 ///
-/// Validators can be used to check extension configs. A validation failure
-/// produces a warning but does **not** reject the workflow — the compiler
-/// is lenient to allow draft workflows with unregistered extensions.
+/// Validators can be used to check extension configs before execution. A
+/// validation failure rejects the node — the executor is never invoked.
+/// The validator is invoked at runtime in the `Custom` arm of
+/// `execution.rs::execute_node`, BEFORE the executor.
 ///
-/// At present, validators are not invoked during synchronous workflow
-/// compilation. Full async validation is deferred to the executor at runtime.
-///
-/// TODO: Wire validators into the execution path when async validation is
-/// needed (e.g., before calling `ExtensionExecutor::execute` in
-/// `execution.rs` for `NodeKind::Custom`).
+/// Validators are optional: when absent the executor runs directly.
+/// The compiler is lenient about registration (warns for unknown kinds)
+/// but execution is strict — a missing or invalid config fails closed.
 #[async_trait::async_trait]
 pub trait ExtensionValidator: Send + Sync {
     /// Validate the custom node configuration.
@@ -81,9 +79,9 @@ pub struct ExtensionSpec {
     pub kind: String,
     /// Version of this extension (for snapshot identity and observability).
     pub version: u64,
-    /// Optional validator. When present, the validator is available for
-    /// runtime validation of Custom nodes of this kind (non-blocking,
-    /// warnings only). Not invoked during compile time.
+    /// Optional validator. When present, the validator runs before the
+    /// executor for every Custom node of this kind; a validation failure
+    /// fails the node closed (the executor is never invoked).
     pub validator: Option<Arc<dyn ExtensionValidator>>,
     /// Executor that performs the actual work via worker RPC.
     pub executor: Arc<dyn ExtensionExecutor>,
@@ -148,6 +146,20 @@ impl ExtensionRegistry {
     /// Whether the registry has no extensions.
     pub fn is_empty(&self) -> bool {
         self.specs.is_empty()
+    }
+
+    /// Snapshot metadata for every registered extension (kind + version).
+    ///
+    /// Used by `build_snapshot` and the gateway's compile path to populate
+    /// `RuntimeSnapshot::extensions` for observability.
+    pub fn specs_snapshots(&self) -> Vec<ExtensionSpecSnapshot> {
+        self.specs
+            .values()
+            .map(|s| ExtensionSpecSnapshot {
+                kind: s.kind.clone(),
+                version: s.version,
+            })
+            .collect()
     }
 }
 

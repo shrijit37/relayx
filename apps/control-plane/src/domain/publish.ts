@@ -55,6 +55,26 @@ export function collectReferencedLanes(workflowJson: Record<string, unknown>): S
   return ids;
 }
 
+/**
+ * Distinct custom extension kinds referenced by a workflow's Custom nodes.
+ *
+ * Walks `workflowJson.nodes` looking for `config.kind === "custom"` and
+ * reading `config.ext_kind` (the extension kind identifier after the
+ * serde `ext_kind` rename). Returns the set of distinct kinds so the
+ * wire snapshot can carry extension metadata for observability.
+ */
+export function collectCustomExtensionKinds(workflowJson: Record<string, unknown>): Set<string> {
+  const kinds = new Set<string>();
+  const nodes = Array.isArray(workflowJson.nodes) ? workflowJson.nodes : [];
+  for (const node of nodes as Array<Record<string, unknown>>) {
+    const config = (node?.config ?? {}) as Record<string, unknown>;
+    if (config.kind === "custom" && typeof config.ext_kind === "string" && config.ext_kind) {
+      kinds.add(config.ext_kind as string);
+    }
+  }
+  return kinds;
+}
+
 /** Resolve a lane row to the wire lane config, credentials out-of-band. */
 async function toWireLane(lane: LaneRowWithCred): Promise<WireLane> {
   return {
@@ -77,12 +97,18 @@ async function toWireLane(lane: LaneRowWithCred): Promise<WireLane> {
  * The snapshot version is a placeholder (0) that must be patched via
  * `allocateSnapshotVersion` before sending to the gateway. This avoids
  * burning a version number when validation or lane resolution fails.
+ *
+ * `getExtVersions` is an optional callback that maps a set of extension
+ * kind strings to a `{ kind → version }` record for snapshot metadata.
+ * When omitted, all collected kinds get version 0 (the placeholder).
  */
 export async function buildCoherentWireNoVersion(
   flows: BundleWorkflow[],
   getLane: (id: string) => Promise<LaneRowWithCred | null>,
+  getExtVersions?: (kinds: Set<string>) => Record<string, number>,
 ): Promise<WireSnapshot | { error: string }> {
   const workflows: WireWorkflow[] = [];
+  const allKinds = new Set<string>();
 
   for (const flow of flows) {
     const referenced = collectReferencedLanes(flow.workflowJson);
@@ -92,11 +118,26 @@ export async function buildCoherentWireNoVersion(
       if (!lane) return { error: `workflow '${flow.id}' references unknown lane '${id}'` };
       flowLanes[id] = await toWireLane(lane);
     }
+
+    // Collect custom extension kinds from this workflow's Custom nodes.
+    for (const kind of collectCustomExtensionKinds(flow.workflowJson)) {
+      allKinds.add(kind);
+    }
+
     workflows.push({ id: flow.id, workflow: flow.workflowJson, lanes: flowLanes, version: flow.version });
   }
 
+  // Build extension metadata: kind + version for each distinct extension
+  // referenced by any workflow in the bundle. The actual validator/executor
+  // trait objects live in the runtime registry, not here.
+  const versionMap = getExtVersions ? getExtVersions(allKinds) : {};
+  const extensions = [...allKinds].map((kind) => ({
+    kind,
+    version: versionMap[kind] ?? 0,
+  }));
+
   // Placeholder — patched by allocateSnapshotVersion before gateway publish.
-  return { snapshot_version: 0, workflows };
+  return { snapshot_version: 0, workflows, extensions };
 }
 
 /**

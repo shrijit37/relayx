@@ -679,6 +679,20 @@ async fn execute_node(
                     cfg.kind
                 )))
             })?;
+
+            // Fail closed: a registered validator runs BEFORE the executor. A
+            // validation failure rejects the node outright — the executor is
+            // never invoked for an invalid config. Validators are optional;
+            // without one the executor runs directly.
+            if let Some(validator) = spec.validator.as_ref() {
+                validator.validate(cfg).await.map_err(|e| {
+                    NodeError::Extension(crate::error::ExtensionError::Validation(format!(
+                        "custom node kind '{}' failed validation: {e}",
+                        cfg.kind
+                    )))
+                })?;
+            }
+
             spec.executor.execute(cfg, spec.version, input).await
         }
     }

@@ -32,6 +32,11 @@ pub struct PublicationState {
     /// Active snapshot + its per-lane pools, swapped atomically together.
     bundle: Arc<arc_swap::ArcSwap<PublishedBundle>>,
     pool_builder: Box<dyn PoolBuilder>,
+    /// Extension registry for compile-time kind resolution and runtime
+    /// execution. Set at startup via [`Self::with_extensions`]; the
+    /// compile path reads the current value so a hot-reload is possible
+    /// without rebuilding `PublicationState`.
+    extensions: Arc<arc_swap::ArcSwap<Option<Arc<workflow_runtime::ExtensionRegistry>>>>,
 }
 
 impl PublicationState {
@@ -48,7 +53,20 @@ impl PublicationState {
                 pools: Arc::new(lane_pools),
             }))),
             pool_builder,
+            extensions: Arc::new(arc_swap::ArcSwap::from(Arc::new(None))),
         }
+    }
+
+    /// Attach an extension registry for compile-time kind resolution and
+    /// runtime execution. Can be called at any time; the compile path
+    /// observes the latest value.
+    pub fn with_extensions(&self, extensions: Arc<workflow_runtime::ExtensionRegistry>) {
+        self.extensions.store(Arc::new(Some(extensions)));
+    }
+
+    /// Current extension registry, if one has been registered.
+    pub fn current_extensions(&self) -> Option<Arc<workflow_runtime::ExtensionRegistry>> {
+        (*self.extensions.load_full()).clone()
     }
 
     /// Atomically publish a new snapshot and rebuild the per-lane pools.
@@ -323,6 +341,8 @@ impl PublicationState {
         }
         let lane_registry = Arc::new(lane_registry);
 
+        let extensions = self.current_extensions();
+
         for wf in &wire.workflows {
             let plan = workflow_runtime::compile_workflow_with_lanes(
                 &wf.workflow,
@@ -330,6 +350,7 @@ impl PublicationState {
                     .iter()
                     .map(|(k, v)| (k.clone(), v.base_url.clone()))
                     .collect::<Vec<_>>(),
+                extensions.clone(),
             )
             .map_err(|e| format!("workflow '{}' failed to compile: {e}", wf.id))?;
             builder = builder
@@ -606,6 +627,7 @@ pub fn admin_router_with_publication(
             let pl = plan.clone();
             let rid = request_id.clone();
             let bb = body_bytes;
+            let extension_registry = publication.current_extensions();
 
             tokio::spawn(async move {
                 let cancel = tokio_util::sync::CancellationToken::new();
@@ -627,7 +649,7 @@ pub fn admin_router_with_publication(
                         deadline,
                         Some(tx.clone()),
                         cancel_run,
-                        None,
+                        extension_registry,
                     ) => r,
                     _ = tx.closed() => {
                         cancel.cancel();
@@ -709,6 +731,7 @@ pub fn admin_router_with_publication(
         }
 
         // Buffered (non-streaming) path — unchanged.
+        let extension_registry = publication.current_extensions();
         let response = crate::execution::execute_workflow(
             &snapshot,
             plan,
@@ -720,7 +743,7 @@ pub fn admin_router_with_publication(
             deadline,
             None,
             tokio_util::sync::CancellationToken::new(),
-            None,
+            extension_registry,
         )
         .await?;
 

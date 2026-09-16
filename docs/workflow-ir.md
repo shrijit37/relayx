@@ -83,10 +83,13 @@ execute them unless an `ExtensionRegistry` is installed in the
 never `dlopen` in the gateway process.
 
 ```text
-Workflow JSON (CustomConfig { kind, payload })
+Workflow JSON (CustomConfig { ext_kind, payload })
     |
     v
 ExtensionRegistry.get(kind) -> ExtensionSpec { validator, executor }
+    |
+    v
+validator.validate(config) -> Ok(())          (optional; fail-closed on Err)
     |
     v
 ExtensionExecutor.execute(config, input) -> NodeOutput
@@ -99,8 +102,24 @@ The compiler is lenient: Custom nodes pass through even if the extension
 kind is not registered. Execution-time resolution is the enforcement
 point. The compiler does emit a warning for unregistered kinds.
 
+Runtime validation is strict and ordered: when a validator is registered
+it runs BEFORE the executor, and a validation failure rejects the node
+(the executor is never invoked). A Custom node with no registry, or with
+a kind no registry entry matches, fails with a typed `NotRegistered`
+error. `CustomConfig.kind` is renamed to `ext_kind` on the wire (the
+enclosing `NodeConfig` already uses a `kind` tag), so a Custom node's
+extension kind survives serialization instead of being overwritten by
+the `"custom"` discriminant.
+
 The plan hash includes the opaque `CustomConfig` payload, so any change
 to the payload produces a different plan hash.
+
+The control plane's publish pipeline collects the distinct extension
+kinds referenced by every workflow in the coherent bundle and carries
+them as `WireSnapshot.extensions` (kind + version metadata) for
+observability. The gateway records them on the runtime snapshot; actual
+validator/executor trait objects are registered out-of-band in the
+gateway's `ExtensionRegistry` and never serialized on the wire.
 
 ## Static validation
 

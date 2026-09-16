@@ -69,7 +69,7 @@ fn passthrough_workflow() -> Workflow {
 }
 
 fn passthrough_compiled() -> workflow_runtime::ExecutionPlan {
-    match workflow_runtime::compile_workflow_with_lanes(&passthrough_workflow(), &[]) {
+    match workflow_runtime::compile_workflow_with_lanes(&passthrough_workflow(), &[], None) {
         Ok(p) => p,
         Err(e) => panic!("compile failed: {e}"),
     }

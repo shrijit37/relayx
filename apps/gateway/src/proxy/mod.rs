@@ -498,6 +498,11 @@ async fn workflow_route_request(
     // mirror that deadline into the context so workflow-level deadline checks fire.
     let deadline = Some(tokio::time::Instant::now() + state.timeout);
 
+    let extension_registry = state
+        .publication
+        .as_ref()
+        .and_then(|p| p.current_extensions());
+
     crate::execution::execute_workflow(
         &snapshot,
         plan,
@@ -509,7 +514,7 @@ async fn workflow_route_request(
         deadline,
         None,
         tokio_util::sync::CancellationToken::new(),
-        None,
+        extension_registry,
     )
     .await
 }

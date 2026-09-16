@@ -52,6 +52,9 @@ pub enum ExtensionError {
     #[error("extension not registered: {0}")]
     NotRegistered(String),
 
+    #[error("extension validation failed: {0}")]
+    Validation(String),
+
     #[error("extension execution failed: {0}")]
     Execution(String),
 }

@@ -67,6 +67,7 @@ fn snapshot_with_lanes() -> Arc<workflow_runtime::RuntimeSnapshot> {
     let plan = match workflow_runtime::compile_workflow_with_lanes(
         &wf,
         &[("lane-a".into(), "http://127.0.0.1:9001".into())],
+        None,
     ) {
         Ok(p) => p,
         Err(e) => panic!("compile failed: {e}"),
