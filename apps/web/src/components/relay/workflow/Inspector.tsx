@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 import { KV, SectionLabel } from "../primitives";
 import { nodeMeta } from "./nodes";
 import type { CanonicalConfig, CanonicalNode, InputVariable } from "@/lib/workflow/nodes";
-import { getNodeDefinition, VARIABLE_TYPES, type FieldDef } from "@/lib/workflow/node-definitions";
+import { getNodeDefinition, parseStatusList, formatStatusList, VARIABLE_TYPES, type FieldDef } from "@/lib/workflow/node-definitions";
 import type { Issue } from "@/lib/workflow/validation";
 
 function Group({ label, children }: { label: string; children: React.ReactNode }) {
@@ -105,6 +105,13 @@ function Field({
                         const v = e.target.valueAsNumber;
                         onChange(Number.isFinite(v) ? v : undefined);
                     }}
+                    className={cn(inputCls, "num")}
+                />
+            ) : def.type === "list" ? (
+                <input
+                    value={Array.isArray(value) ? formatStatusList(value) : ""}
+                    placeholder={def.placeholder}
+                    onChange={(e) => onChange(parseStatusList(e.target.value))}
                     className={cn(inputCls, "num")}
                 />
             ) : (
@@ -464,10 +471,16 @@ function applyField(config: CanonicalConfig, name: string, value: unknown): void
         case "fallback":
             if (name === "rounds")
                 config.fallback.rounds = Number.isFinite(Number(value)) ? Number(value) : 1;
+            else if (name === "strategy")
+                config.fallback.strategy = value as "sequential" | "round_robin";
+            else if (name === "retryOn")
+                config.fallback.retryOn = Array.isArray(value) ? (value as number[]) : [];
             break;
         case "retry":
             if (name.startsWith("target."))
                 (config.target as unknown as Record<string, unknown>)[name.slice(7)] = value;
+            else if (name === "retryOn")
+                config.policy.retryOn = Array.isArray(value) ? (value as number[]) : [];
             else (config.policy as unknown as Record<string, unknown>)[name] = value;
             break;
     }

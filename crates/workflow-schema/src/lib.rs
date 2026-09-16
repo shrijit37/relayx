@@ -246,9 +246,10 @@ pub struct FallbackConfig {
     #[serde(default)]
     pub strategy: FallbackStrategy,
     /// HTTP status codes that trigger immediate failover to the next
-    /// provider in the current round, regardless of `rounds` remaining.
-    /// `429` is the canonical rate-limit use-case.
-    #[serde(default)]
+    /// provider in the current round. Defaults to `[429]` — a fresh fallback
+    /// rotates on rate limits out of the box. An empty list disables
+    /// status-driven failover (only transport/policy errors advance).
+    #[serde(default = "default_fallback_retry_on")]
     pub retry_on: Vec<u16>,
 }
 
@@ -278,6 +279,10 @@ pub struct FallbackProvider {
 
 fn fallback_default_rounds() -> u32 {
     1
+}
+
+fn default_fallback_retry_on() -> Vec<u16> {
+    vec![429]
 }
 
 /// Configuration for a Retry node.

@@ -19,6 +19,11 @@ export function registerLaneRoutes(
   app.post("/lanes", async (req, reply) => {
     const parsed = laneDtoSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (parsed.data.egress === "masked" && !parsed.data.proxy_url) {
+      return reply
+        .code(400)
+        .send({ error: "egress=masked requires a proxy_url (http://… or socks5://…)" });
+    }
     const laneData: {
       id?: string;
       project_id: string;
@@ -47,6 +52,16 @@ export function registerLaneRoutes(
   app.put("/lanes/:id", async (req, reply) => {
     const parsed = laneDtoSchema.partial().safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    // Masked without a proxy is invalid whether created or updated; the
+    // effective egress after a PATCH considers the existing lane row too.
+    const existing = await repo.lanes.get(pool, (req.params as { id: string }).id);
+    const effectiveEgress = parsed.data.egress ?? existing?.egress;
+    const effectiveProxy = parsed.data.proxy_url !== undefined ? parsed.data.proxy_url : (existing?.proxy_url ?? null);
+    if (effectiveEgress === "masked" && !effectiveProxy) {
+      return reply
+        .code(400)
+        .send({ error: "egress=masked requires a proxy_url (http://… or socks5://…)" });
+    }
     const data = parsed.data;
     const patch: {
       provider_id?: string | null;

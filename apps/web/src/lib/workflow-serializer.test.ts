@@ -515,4 +515,156 @@ describe("phase 6.6 canonical serializer", () => {
     expect(result.workflow).toBeNull();
     expect(result.errors.join()).toContain("Condition");
   });
+
+  test("fallback strategy + retryOn round-trip through persisted JSON", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      {
+        ...node("fb", "fallback"),
+        data: {
+          kind: "fallback",
+          title: "Rotation",
+          lines: ["2 fallbacks"],
+          canonicalConfig: {
+            kind: "fallback",
+            fallback: {
+              providers: [
+                { lane: "primary", model: "m1" },
+                { lane: "backup", model: "m2" },
+              ],
+              rounds: 1,
+              strategy: "round_robin",
+              retryOn: [429, 503],
+            },
+          },
+        } as RelayNode["data"],
+      },
+      node("out", "output"),
+    ];
+    const edges: Edge[] = [edge("e1", "in", "fb"), edge("e2", "fb", "out")];
+    const ser = serializeWorkflow(nodes, edges);
+    expect(ser.errors).toEqual([]);
+    const fb = ser.workflow!.nodes.find((n) => n.id === "fb")!;
+    expect(fb.config).toMatchObject({
+      kind: "fallback",
+      strategy: "round_robin",
+      retry_on: [429, 503],
+      rounds: 1,
+    });
+    // RetryOn [] (default off) is omitted for compactness — never fabricated.
+    const deser = deserializeWorkflow(ser.workflow!);
+    const back = deser.nodes.find((n) => n.id === "fb")!;
+    const cc = back.data as { canonicalConfig?: { kind: string; fallback?: { strategy?: string; retryOn?: number[]; rounds?: number } } };
+    expect(cc.canonicalConfig).toMatchObject({
+      kind: "fallback",
+      fallback: { strategy: "round_robin", retryOn: [429, 503], rounds: 1 },
+    });
+  });
+
+  test("fallback default retryOn [429] persists on wire (fresh nodes fail over on 429)", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      {
+        ...node("fb", "fallback"),
+        data: {
+          kind: "fallback",
+          title: "Fallback",
+          lines: ["1 fallback"],
+          canonicalConfig: {
+            kind: "fallback",
+            fallback: {
+              providers: [{ lane: "primary", model: "m1" }],
+              rounds: 1,
+              strategy: "sequential",
+              retryOn: [429],
+            },
+          },
+        } as RelayNode["data"],
+      },
+      node("out", "output"),
+    ];
+    const edges: Edge[] = [edge("e1", "in", "fb"), edge("e2", "fb", "out")];
+    const ser = serializeWorkflow(nodes, edges);
+    expect(ser.errors).toEqual([]);
+    const fb = ser.workflow!.nodes.find((n) => n.id === "fb")!;
+    expect(fb.config).toMatchObject({ kind: "fallback", retry_on: [429] });
+  });
+
+  test("retry retry_on round-trips through persisted JSON (no silent drop)", () => {
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      {
+        ...node("rt", "retry"),
+        data: {
+          kind: "retry",
+          title: "Retry",
+          lines: [],
+          canonicalConfig: {
+            kind: "retry",
+            policy: { maxAttempts: 3, delayMs: 500, onTimeout: true, onProviderError: false, retryOn: [429, 503] },
+            target: { provider: "openai", model: "gpt-4", lane: "openai-direct", stream: true },
+          },
+        } as RelayNode["data"],
+      },
+      node("out", "output"),
+    ];
+    const edges: Edge[] = [edge("e1", "in", "rt"), edge("e2", "rt", "out")];
+    const ser = serializeWorkflow(nodes, edges);
+    expect(ser.errors).toEqual([]);
+    const rt = ser.workflow!.nodes.find((n) => n.id === "rt")!;
+    expect(rt.config).toMatchObject({
+      kind: "retry",
+      max_attempts: 3,
+      on_provider_error: false,
+      retry_on: [429, 503],
+    });
+    // Deserialize → the retry_on value must be preserved in canonical policy
+    const deser = deserializeWorkflow(ser.workflow!);
+    const back = deser.nodes.find((n) => n.id === "rt")!;
+    const cc = back.data as { canonicalConfig?: { kind: string; policy?: { retryOn?: number[]; maxAttempts?: number } } };
+    expect(cc.canonicalConfig).toMatchObject({
+      kind: "retry",
+      policy: { maxAttempts: 3, retryOn: [429, 503] },
+    });
+  });
+
+  test("retry without retry_on stays default (no fabricated retry_on)", () => {
+    // A retry config with NO retryOn (legacy) must not gain a retry_on on wire.
+    const nodes: RelayNode[] = [
+      node("in", "input"),
+      {
+        ...node("rt", "retry"),
+        data: {
+          kind: "retry",
+          title: "Retry",
+          lines: [],
+          canonicalConfig: {
+            kind: "retry",
+            policy: { maxAttempts: 2, delayMs: 1000, onTimeout: true, onProviderError: true },
+            target: { lane: "openai-direct", stream: true },
+          },
+        } as RelayNode["data"],
+      },
+      node("out", "output"),
+    ];
+    const edges: Edge[] = [edge("e1", "in", "rt"), edge("e2", "rt", "out")];
+    const ser = serializeWorkflow(nodes, edges);
+    expect(ser.errors).toEqual([]);
+    const rt = ser.workflow!.nodes.find((n) => n.id === "rt")!;
+    expect(rt.config).toMatchObject({ kind: "retry", max_attempts: 2 });
+    expect((rt.config as { retry_on?: number[] }).retry_on).toBeUndefined();
+  });
+
+  test("parseStatusList normalizes comma-separated input into number[]", () => {
+    const { parseStatusList, formatStatusList } = require("@/lib/workflow/node-definitions") as {
+      parseStatusList: (s: string) => number[];
+      formatStatusList: (v: number[]) => string;
+    };
+    expect(parseStatusList("429,503")).toEqual([429, 503]);
+    expect(parseStatusList(" 429 , 503 ")).toEqual([429, 503]);
+    expect(parseStatusList("429,,503,abc")).toEqual([429, 503]);
+    expect(parseStatusList("")).toEqual([]);
+    expect(parseStatusList("99,700")).toEqual([]);
+    expect(formatStatusList([429, 503])).toBe("429,503");
+  });
 });

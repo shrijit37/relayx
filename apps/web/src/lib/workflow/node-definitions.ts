@@ -16,8 +16,26 @@ import type {
 } from "./nodes";
 
 export type FieldType =
-  | "string" | "number" | "integer" | "boolean" | "enum"
+  | "string" | "number" | "integer" | "boolean" | "enum" | "list"
   | "reference" | "provider" | "model" | "lane";
+
+/** Parse a comma-separated status list ("429,503") into a `number[]`,
+ *  preserving order and dropping blanks/non-numeric tokens. Used by the
+ *  `list` field renderer so `retryOn` stays a `number[]` end-to-end. */
+export function parseStatusList(input: string): number[] {
+  return input
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .map(Number)
+    .filter((n) => Number.isInteger(n) && n >= 100 && n <= 599);
+}
+
+/** Format a `number[]` back to a comma-separated string for the `list`
+ *  input field. */
+export function formatStatusList(values: number[]): string {
+  return values.join(",");
+}
 
 export interface FieldOption {
   value: string;
@@ -257,12 +275,12 @@ const defs: Record<EditorKind, NodeDefinition> = {
         ],
         help: "Round robin spreads traffic across lanes / egress IPs.",
       },
-      { name: "retryOn", label: "Failover on HTTP status", type: "string",
+      { name: "retryOn", label: "Failover on HTTP status", type: "list",
         placeholder: "e.g. 429,503",
         help: "Comma-separated HTTP status codes that trigger immediate failover to the next provider (e.g. 429 for rate-limit rotation).",
       },
     ],
-    defaults: () => ({ kind: "fallback", fallback: { providers: [], rounds: 1, strategy: "sequential", retryOn: [] } }),
+    defaults: () => ({ kind: "fallback", fallback: { providers: [], rounds: 1, strategy: "sequential", retryOn: [429] } }),
     displayTitle: () => "Fallback",
     displayLines: (c) => (c.kind === "fallback" ? [`${c.fallback.providers.length} fallback(s)`] : []),
     executable: true,
@@ -276,11 +294,15 @@ const defs: Record<EditorKind, NodeDefinition> = {
       { name: "delayMs", label: "Delay (ms)", type: "integer", required: true, min: 0, default: 1000 },
       { name: "onTimeout", label: "Retry on timeout", type: "boolean", default: true },
       { name: "onProviderError", label: "Retry on provider error", type: "boolean", default: true },
+      { name: "retryOn", label: "Retry on HTTP status", type: "list",
+        placeholder: "e.g. 429,503",
+        help: "Comma-separated HTTP status codes that trigger an unconditional retry (e.g. 429 for rate limits), even when the policy flags are off.",
+      },
       ...LLM_FIELDS.slice(0, 3).map((f) => ({ ...f, name: `target.${f.name}` as const, label: `Target ${f.label}` })),
     ],
     defaults: () => ({
       kind: "retry",
-      policy: { maxAttempts: 2, delayMs: 1000, onTimeout: true, onProviderError: true },
+      policy: { maxAttempts: 2, delayMs: 1000, onTimeout: true, onProviderError: true, retryOn: [429] },
       target: { ...EMPTY_LLM },
     }),
     displayTitle: (c) => (c.kind === "retry" ? `Retry · ${c.policy.maxAttempts} attempts` : "Retry"),

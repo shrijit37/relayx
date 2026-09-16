@@ -352,6 +352,68 @@ describe("REST API", () => {
     expect(JSON.stringify(lane)).not.toContain("sk-");
   });
 
+  test("lane egress rejects unknown values (fail closed)", async () => {
+    const res = await fetch(`${base()}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "lane-typo",
+        name: "typo",
+        project_id: "proj_default",
+        endpoint: "/v1/chat/completions",
+        base_url: "http://127.0.0.1:9001",
+        egress: "maskeed",
+        policies: [],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    // The zod enum rejects the unknown value — no silent degrade to direct.
+    expect(body.error).toContain("egress");
+    expect(body.error).toContain("direct");
+  });
+
+  test("lane egress=masked requires proxy_url", async () => {
+    const res = await fetch(`${base()}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "lane-masked-noproxy",
+        name: "masked",
+        project_id: "proj_default",
+        endpoint: "/v1/chat/completions",
+        base_url: "http://127.0.0.1:9001",
+        egress: "masked",
+        policies: [],
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("proxy_url");
+  });
+
+  test("lane egress=masked with proxy_url is accepted", async () => {
+    const res = await fetch(`${base()}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "lane-masked-ok",
+        name: "masked",
+        project_id: "proj_default",
+        endpoint: "/v1/chat/completions",
+        base_url: "http://127.0.0.1:9001",
+        egress: "masked",
+        proxy_url: "http://proxy.example.com:8080",
+        policies: [],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const lane = (await res.json()) as { id: string; egress: string; proxy_url: string };
+    expect(lane.id).toBe("lane-masked-ok");
+    expect(lane.egress).toBe("masked");
+    expect(lane.proxy_url).toBe("http://proxy.example.com:8080");
+  });
+
   test("validate + compile through the API yields a plan hash", async () => {
     // Seed a lane, workflow, version.
     await fetch(`${base()}/lanes`, {

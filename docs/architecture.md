@@ -343,10 +343,15 @@ Each lane declares an `egress` mode controlling how upstream traffic leaves the 
 |------|----------|----------|----------|
 | `direct` (default) | Plain TCP from the gateway IP | `HttpConnector` | Low cost, dev/staging |
 | `masked` | HTTP CONNECT or SOCKS5 tunnel via `proxy_url` | `hyper-util` `Tunnel` / `SocksV5` | Hide origin IP |
-| *(any other value)* | Silently degrades to `direct` | `HttpConnector` | Future values, no-fail |
 
-- `egress: masked` with `proxy_url` absent or invalid falls back to `direct`
-  with a warning — the gateway never blocks publish on a broken proxy config.
+- Egress is **fail-closed**: an unknown `egress` value rejects the bundle at
+  `/validate`/`/publish` (the control-plane API also rejects it at lane
+  create/update). An operator who expects `masked` traffic must not silently
+  leak the gateway IP because of a typo.
+- `egress: masked` requires a `proxy_url` — without it the connector cannot
+  tunnel, so the bundle is rejected rather than degraded. The only runtime
+  degrade that remains is a proxy that fails to connect at request time;
+  that surfaces as an upstream error, never a silent IP leak.
 - `proxy_url` accepts `http://host:port` (HTTP CONNECT) or
   `socks5://host:port` (SOCKS5). It is ignored unless `egress == "masked"`.
 - The wire snapshot carries `egress` + `proxy_url` on each lane
@@ -361,11 +366,13 @@ The `Fallback` node supports two strategies:
 - **`round_robin`**: the starting offset shifts per request via an atomic
   counter, spreading requests across providers/lanes.
 
-When a provider returns an HTTP status listed in `retry_on` (default
-`[429]`), the fallback advances to the next provider **within the same
-round** — a transient rate limit triggers lane rotation instead of
-exhausting rounds. The `Retry` node likewise retries any status in its
-`retry_on` list (default `[429]`) regardless of `on_provider_error`.
+When a provider returns an HTTP status listed in `retry_on`, the fallback
+advances to the next provider **within the same round** — a transient rate
+limit triggers lane rotation instead of exhausting rounds. The default
+`retry_on` is `[429]`, so a fresh fallback rotates on rate limits out of the
+box; an empty list disables status-driven failover. The `Retry` node likewise
+retries any status in its `retry_on` list (default `[429]`) regardless of
+`on_provider_error`.
 
 ## 12. Routing
 

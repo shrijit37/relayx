@@ -47,7 +47,7 @@ export type SchemaNodeConfig =
   | { kind: "mcp"; server_ref: string; tool_name: string; deferred: boolean }
   | { kind: "skill"; skill_ref: string; progressive: boolean }
   | { kind: "fallback"; providers: { lane_id: string; model?: string; protocol?: string }[]; rounds: number; strategy?: "sequential" | "round_robin"; retry_on?: number[] }
-  | { kind: "retry"; max_attempts: number; delay_ms: number; on_timeout: boolean; on_provider_error: boolean; target: LlmSchemaConfig }
+  | { kind: "retry"; max_attempts: number; delay_ms: number; on_timeout: boolean; on_provider_error: boolean; retry_on?: number[]; target: LlmSchemaConfig }
   | { kind: "custom"; payload: unknown }
   | { kind: "unsupported"; editor_kind: string; reason: string };
 
@@ -238,7 +238,7 @@ function configFor(n: CanonicalNode, issues: Issue[]): SchemaNodeConfig | null {
     case "retry": {
       if (c.policy.maxAttempts < 1) issues.push({ nodeId: n.id, field: "maxAttempts", severity: "error", message: "Max attempts must be ≥ 1." });
       if (c.target.lane === undefined) issues.push({ nodeId: n.id, field: "target.lane", severity: "error", message: "Retry target requires a lane." });
-      return {
+      const out: Extract<SchemaNodeConfig, { kind: "retry" }> = {
         kind: "retry",
         max_attempts: c.policy.maxAttempts,
         delay_ms: c.policy.delayMs,
@@ -246,6 +246,8 @@ function configFor(n: CanonicalNode, issues: Issue[]): SchemaNodeConfig | null {
         on_provider_error: c.policy.onProviderError,
         target: llmToSchema(c.target),
       };
+      if (c.policy.retryOn !== undefined && c.policy.retryOn.length > 0) out.retry_on = c.policy.retryOn;
+      return out;
     }
   }
 }
@@ -326,7 +328,17 @@ function configFromSchema(sn: SchemaNode, issues: Issue[]): CanonicalConfig | nu
         ...(c.retry_on && c.retry_on.length > 0 ? { retryOn: c.retry_on } : {}),
       },
     };
-    case "retry": return { kind: "retry", policy: { maxAttempts: c.max_attempts, delayMs: c.delay_ms, onTimeout: c.on_timeout, onProviderError: c.on_provider_error }, target: llmFromSchema(c.target) };
+    case "retry": return {
+      kind: "retry",
+      policy: {
+        maxAttempts: c.max_attempts,
+        delayMs: c.delay_ms,
+        onTimeout: c.on_timeout,
+        onProviderError: c.on_provider_error,
+        ...(c.retry_on && c.retry_on.length > 0 ? { retryOn: c.retry_on } : {}),
+      },
+      target: llmFromSchema(c.target),
+    };
     case "custom": {
       issues.push({ nodeId: sn.id, severity: "error", message: `Node '${sn.id}' is a custom runtime node; the editor cannot edit it.` });
       return null;

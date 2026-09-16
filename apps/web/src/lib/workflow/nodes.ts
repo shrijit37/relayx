@@ -51,6 +51,9 @@ export interface RetryPolicy {
   delayMs: number;
   onTimeout: boolean;
   onProviderError: boolean;
+  /** HTTP status codes that trigger an unconditional retry regardless of
+   *  `onTimeout`/`onProviderError` (e.g. [429] for rate limits). */
+  retryOn?: number[];
 }
 
 export interface FallbackEntryConfig {

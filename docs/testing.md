@@ -153,7 +153,7 @@ Test:
 
 ## Frontend interaction tests (Phase 6.5+)
 
-`apps/web/` has 38 frontend tests across workflow-serializer, run-state reducer, and WorkflowBuilder interaction tests:
+`apps/web/` has 43 frontend tests across workflow-serializer, run-state reducer, and WorkflowBuilder interaction tests:
 
 - **Panel opens** — toolbar "Run test" button triggers a real panel render (not `return null`)
 - **Run submits** — clicking "Run" in the panel fires `POST /workflows/:id/run`, the real backend envelope (request_id, workflow_version, snapshot_version, plan_hash, output) surfaces in the panel
