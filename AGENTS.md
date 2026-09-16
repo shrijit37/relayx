@@ -101,7 +101,7 @@ Fix the underlying issue instead. Narrow, item-scoped `#[allow(...)]` for FFI, g
 - **Commit messages**: Use imperative mood. Prefix with a scope tag in parentheses when applicable: `fix(gateway):`, `feat(protocol-core):`, `fix(control-plane):`, `test:`, `docs:`.
 - **CI must pass**: All Rust and frontend checks (policy, fmt, clippy, tests, typecheck, build) must be green before merging.
 - **Keep PRs focused**: Each PR should address a single concern. Cross-boundary changes (data plane + control plane + frontend) should clearly describe the integration points.
-- **Documentation sync (enforced)**: When implementation differs from docs, update the docs in the same change. `scripts/verify-docs.sh` fails the Claude Code hook, the git pre-commit hook, and CI when canonical counts or links drift. See [Documentation conventions](#documentation-conventions).
+- **Documentation sync (enforced)**: When implementation differs from docs, update the docs in the same change. `scripts/verify-docs.sh` fails the Claude Code hook, the git pre-commit hook, the pre-push gate, and CI when canonical counts or links drift. See [Documentation conventions](#documentation-conventions).
 - **Definition of done**: A change is not complete when it merely compiles. For gateway-path changes, verify functional correctness, streaming correctness, protocol fidelity, hot-path performance, failure behavior, security implications, and tests for happy and adversarial cases.
 
 ## Documentation conventions

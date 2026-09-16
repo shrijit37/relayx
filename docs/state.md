@@ -297,6 +297,7 @@ Hooks active:
 - Stop: `.claude/hooks/check-rust-gates.sh` (advisory `fmt` / `clippy` / `test` reminder when the working tree holds changed `.rs` files; always exits 0 and never blocks the stop)
 - Hookify (`hookify@claude-plugins-official`, rules in `.claude/hookify.*.local.md`): `block-dead-code-suppression`, `block-todo-macros`, `block-unwrap-expect` deny `.rs` edits at PreToolUse (`action: block`). Rules match on the `content` field, which resolves for both `Write` and `Edit`/`MultiEdit`; the loader also resolves rule files relative to the session CWD.
 - Git pre-commit: `.githooks/pre-commit` runs the Rust policy gate, plus `scripts/verify-docs.sh` when docs, markdown, or the verifier itself are staged (`git config core.hooksPath .githooks`)
+- Git pre-push: `.githooks/pre-push` runs the full CI battery locally (rust policy/fmt/docs/clippy/test, MSRV 1.88, web typecheck/lint/test/build, control-plane typecheck/test) and blocks the push on any failure; auto-starts the `relayx-pg` Postgres container when the control-plane tests need it
 - CI: the `docs` job runs `scripts/verify-docs.sh`
 
 MCP servers (context7, GitHub) will be added at Phase 0 start — they require `claude mcp add`, which modifies the global Claude Code config rather than this repository.

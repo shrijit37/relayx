@@ -86,6 +86,11 @@ docs/                   Architecture, ADRs, specs (docs/README.md is the index)
 
 See [docs/development.md](docs/development.md) for local dev setup, CI pipeline, and coding standards.
 
+Pushes are gated locally: the pre-push hook runs the full CI battery (rust
+policy/fmt/docs/clippy/test, MSRV, web, control-plane) and blocks the push on
+any failure. Keep build disk usage bounded with `scripts/sweep-build.sh`
+(see the docs for details).
+
 ## License
 
 MIT
