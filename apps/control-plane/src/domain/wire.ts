@@ -19,7 +19,13 @@ export type WireWorkflow = {
   version: number;
 };
 
+export type WireExtension = {
+  kind: string;
+  version: number;
+};
+
 export type WireSnapshot = {
   snapshot_version: number;
   workflows: WireWorkflow[];
+  extensions?: WireExtension[];
 };

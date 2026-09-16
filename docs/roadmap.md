@@ -144,7 +144,7 @@
 - [ ] tenant isolation
 - [ ] policy engine
 - [ ] SSRF protections
-- [ ] sandboxed tool workers
+- [x] sandboxed tool workers (extension core: out-of-process worker RPC via Unix socket)
 - [ ] audit log
 
 ## Phase 9 — Advanced routing

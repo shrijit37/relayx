@@ -96,6 +96,7 @@ workflow_id = "echo-wf"
 
     let wire = WireSnapshot {
         snapshot_version: 42,
+        extensions: vec![],
         workflows: vec![WireWorkflow {
             id: "echo-wf".into(),
             workflow: passthrough_workflow(),

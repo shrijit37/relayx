@@ -183,6 +183,7 @@ workflow_id = "{workflow_id}"
     // Publish the workflow + its lanes.
     let wire = WireSnapshot {
         snapshot_version: 1,
+        extensions: vec![],
         workflows: vec![WireWorkflow {
             id: workflow_id.into(),
             workflow,

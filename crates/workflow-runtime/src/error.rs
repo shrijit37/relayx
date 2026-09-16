@@ -38,4 +38,20 @@ pub enum NodeError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("extension error: {0}")]
+    Extension(#[from] ExtensionError),
+}
+
+/// Errors from extension validation or execution.
+#[derive(Debug, Error)]
+pub enum ExtensionError {
+    #[error("extension validation failed: {0}")]
+    Validation(String),
+
+    #[error("extension worker unavailable: {0}")]
+    WorkerUnavailable(String),
+
+    #[error("extension execution failed: {0}")]
+    Execution(String),
 }

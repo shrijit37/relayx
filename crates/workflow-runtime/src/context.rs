@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::extension::ExtensionRegistry;
 use crate::nodes::RuntimeValue;
 use crate::snapshot::RuntimeSnapshot;
 
@@ -59,6 +60,8 @@ pub struct ExecutionContext {
     pub snapshot: Option<Arc<crate::snapshot::RuntimeSnapshot>>,
     /// Optional reporter of execution milestones.
     pub reporter: Arc<dyn crate::milestone::MilestoneReporter>,
+    /// Extension registry — maps custom node kinds to validator + executor.
+    pub extension_registry: Option<Arc<ExtensionRegistry>>,
     /// Optional SSE wire-bytes sender for token-level streaming.
     /// When present, LLM nodes send formatted SSE token deltas through
     /// this channel as they arrive from upstream providers.
@@ -199,6 +202,7 @@ impl ExecutionContext {
             metadata: ExecutionMetadata::default(),
             snapshot: None,
             reporter: Arc::new(crate::milestone::NoopReporter),
+            extension_registry: None,
             token_sender: None,
         }
     }
@@ -220,6 +224,7 @@ impl ExecutionContext {
             metadata: self.metadata.clone(),
             snapshot: self.snapshot.clone(),
             reporter: self.reporter.clone(),
+            extension_registry: self.extension_registry.clone(),
             token_sender: self.token_sender.clone(),
         }
     }

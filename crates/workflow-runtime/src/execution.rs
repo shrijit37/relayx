@@ -303,7 +303,7 @@ fn classify_plan(nodes: &[ExecNode]) -> (PlanClassification, Option<FastPathMeta
             .any(|n| matches!(n.kind, NodeKind::Condition | NodeKind::Router));
         let has_external = nodes
             .iter()
-            .any(|n| matches!(n.kind, NodeKind::Skill | NodeKind::Mcp));
+            .any(|n| matches!(n.kind, NodeKind::Skill | NodeKind::Mcp | NodeKind::Custom));
 
         if !has_branching
             && !has_external
@@ -666,9 +666,17 @@ async fn execute_node(
         NodeConfig::Skill(config) => crate::nodes::skill::execute(config, ctx, input).await,
         NodeConfig::Fallback(config) => crate::nodes::fallback::execute(config, ctx, input).await,
         NodeConfig::Retry(config) => crate::nodes::retry::execute(config, ctx, input).await,
-        NodeConfig::Custom(cfg) => Err(NodeError::Internal(format!(
-            "custom node kind '{}' is not supported: no extension registry is installed",
-            cfg.kind
-        ))),
+        NodeConfig::Custom(cfg) => {
+            let registry = ctx.extension_registry.as_ref().ok_or_else(|| {
+                NodeError::Internal(format!(
+                    "custom node kind '{}' requires an extension registry",
+                    cfg.kind
+                ))
+            })?;
+            let spec = registry.get(&cfg.kind).ok_or_else(|| {
+                NodeError::Internal(format!("no extension registered for kind '{}'", cfg.kind))
+            })?;
+            spec.executor.execute(cfg, input).await
+        }
     }
 }

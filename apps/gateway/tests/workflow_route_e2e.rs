@@ -87,7 +87,13 @@ fn workflow_snapshot() -> Arc<workflow_runtime::RuntimeSnapshot> {
     });
     let lanes = Arc::new(lanes);
 
-    let plan = match compile_workflow(&wf, &CompileContext { lanes }) {
+    let plan = match compile_workflow(
+        &wf,
+        &CompileContext {
+            lanes,
+            extensions: None,
+        },
+    ) {
         Ok(p) => p,
         Err(e) => panic!("workflow compile failed: {e}"),
     };
