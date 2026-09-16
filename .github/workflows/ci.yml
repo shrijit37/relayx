@@ -137,8 +137,11 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # `bun run test` (not bare `bun test`): package.json carries
+      # `--timeout 20000` so DB provisioning in beforeAll cannot trip bun's
+      # default 5000ms hook timeout (root cause of flaky runs).
       - name: Test
-        run: bun test
+        run: bun run test
 
   docs:
     runs-on: ubuntu-latest

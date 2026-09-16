@@ -12,6 +12,8 @@ let db: Awaited<ReturnType<typeof freshDb>> | null = null;
 let app: Awaited<ReturnType<typeof Fastify>> | null = null;
 
 beforeEach(async () => {
+  // Empty-state tests must see a truly empty DB, so each test gets a fresh
+  // throwaway database (created once, migrations run once, then dropped).
   db = await freshDb("catalog");
   // buildApp calls startCatalogSync — we DON'T want the real network sync
   // running in tests, so we use a separate pool without the sync.
@@ -87,12 +89,12 @@ test("migration 003 creates catalog tables", async () => {
 });
 
 test("migration is idempotent (re-run does not fail)", async () => {
-  // Fresh DB already has migration applied; apply it again.
+  // Fresh DB already has migration applied; apply it again. The directory
+  // is resolved from db.ts (never cwd), so this works from any dir.
   const { migrate } = await import("../src/db/db");
   const pool = db!.pool;
-  const applied = await migrate(pool, "./src/db");
-  // 003_catalog.sql should NOT appear (already applied).
-  expect(applied).not.toContain("003_catalog.sql");
+  const applied = await migrate(pool);
+  expect(applied).toEqual([]);
 });
 
 // ─── API: empty state ─────────────────────────────────────────────────

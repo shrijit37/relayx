@@ -70,7 +70,7 @@ bun test          # Serializer + run-state reducer + WorkflowBuilder interaction
 cd apps/control-plane
 bun install
 bun run dev       # Fastify API on :9091 (needs Postgres on 127.0.0.1:5433)
-bun test          # Integration tests (real Postgres + in-process mock gateway)
+bun run test      # Integration tests (real Postgres + in-process mock gateway)
 ```
 
 ## Local development
@@ -270,7 +270,9 @@ which overrides whatever toolchain `rustup default` points at.
 
 1. **Install** — `bun install --frozen-lockfile`
 2. **Typecheck** — `tsc --noEmit`
-3. **Test** — `bun test` against a real Postgres 16 service container
+3. **Test** — `bun run test` against a real Postgres 16 service container
+   (the script carries `--timeout 20000`, so per-suite DB provisioning in
+   `beforeAll` cannot trip bun's default 5s hook timeout)
 
 The `postgres:16-alpine` service is published on host port **5433**, matching the
 `RELAYX_PG_PORT` default the app and test helpers read

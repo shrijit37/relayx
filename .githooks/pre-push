@@ -146,7 +146,7 @@ if [ "$dry_run" = "1" ]; then
   step "6. Rust tests:    cargo test --locked --all-features --workspace"
   step "7. MSRV 1.88:     cargo +1.88.0 check --locked --all-features --workspace"
   step "8. Web:           cd apps/web && bun install && bun run typecheck && eslint (changed ts/tsx) && bun test && bun run build"
-  step "9. Control plane: cd apps/control-plane && bun install && bun run typecheck && bun test"
+  step "9. Control plane: cd apps/control-plane && bun install && bun run typecheck && bun run test"
   exit 0
 fi
 
@@ -265,9 +265,12 @@ if ! (cd "$root/apps/web" && bun install --frozen-lockfile \
 fi
 
 # --- 8. Control plane --------------------------------------------------------
+# `bun run test` (NOT bare `bun test`): package.json carries the flags the
+# suite needs — `--timeout 20000` so DB provisioning in beforeAll cannot
+# trip bun's default 5000ms hook timeout (root cause of flaky pushes).
 if ! (cd "$root/apps/control-plane" && bun install --frozen-lockfile \
   && bun run typecheck \
-  && bun test); then
+  && bun run test); then
   record_failure "control-plane (typecheck/test)"
   exit 1
 fi
