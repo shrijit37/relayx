@@ -93,6 +93,23 @@ impl GatewayServer {
 
     /// Run the gateway until shutdown signal.
     pub async fn run(self) -> anyhow::Result<()> {
+        let proxy_listener = TcpListener::bind(self.server_config.listen).await?;
+        let admin_listener = TcpListener::bind(self.server_config.admin_listen).await?;
+        self.run_with_listeners(proxy_listener, admin_listener)
+            .await
+    }
+
+    /// Run the gateway over already-bound listeners.
+    ///
+    /// Test harnesses use this to eliminate the bind race: the listeners
+    /// are bound (and their ports reserved) before the config string is
+    /// even built, so a concurrent test binary can never steal the port
+    /// between selection and bind.
+    pub async fn run_with_listeners(
+        self,
+        proxy_listener: TcpListener,
+        admin_listener: TcpListener,
+    ) -> anyhow::Result<()> {
         // ── Proxy client (connection pool) ─────────────────────────────────
         let client = crate::upstream::build_http_client(Duration::from_secs(90), 64);
 
@@ -134,7 +151,6 @@ impl GatewayServer {
             .fallback(any(proxy_handler))
             .with_state(state.clone());
 
-        let proxy_listener = TcpListener::bind(self.server_config.listen).await?;
         tracing::info!(addr = %self.server_config.listen, "proxy listener started");
 
         // ── Admin listener ────────────────────────────────────────────────
@@ -150,7 +166,6 @@ impl GatewayServer {
             ),
         };
 
-        let admin_listener = TcpListener::bind(self.server_config.admin_listen).await?;
         tracing::info!(addr = %self.server_config.admin_listen, "admin listener started");
 
         // ── Serve both listeners until shutdown ────────────────────────────

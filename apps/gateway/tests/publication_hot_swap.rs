@@ -14,21 +14,12 @@ use std::time::Duration;
 use relay_gateway::lanes::HyperPoolBuilder;
 use relay_gateway::observability::{PublicationState, WireSnapshot, WireWorkflow};
 use relay_gateway::server::GatewayServer;
-use test_harness::post_hyper;
+use test_harness::{post_hyper, reserved_listeners};
 use workflow_runtime::context::{LaneEntry, LaneRegistry};
 use workflow_runtime::{
     InMemoryPublisher, RuntimeSnapshotBuilder, SnapshotPublisher, SnapshotReader,
 };
 use workflow_schema::*;
-
-fn free_port() -> u16 {
-    use std::net::TcpListener;
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
 
 /// A workflow whose output echoes its input through an Output node.
 fn passthrough_workflow() -> Workflow {
@@ -501,8 +492,10 @@ async fn published_lanes_carry_resolved_authorization() {
 
 #[tokio::test]
 async fn gateway_hot_swaps_snapshots_without_restart() {
-    let proxy_port = free_port();
-    let admin_port = free_port();
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
 
     let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
         r#"
@@ -546,7 +539,9 @@ workflow_id = "echo-wf"
         Err(e) => panic!("server build failed: {e}"),
     };
     tokio::spawn(async move {
-        let _ = server.run().await;
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
     });
 
     // Wait for readiness.
@@ -602,8 +597,10 @@ workflow_id = "echo-wf"
 
 #[tokio::test]
 async fn gateway_admin_run_executes_published_workflow() {
-    let proxy_port = free_port();
-    let admin_port = free_port();
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
 
     let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
         r#"
@@ -645,7 +642,9 @@ workflow_id = "echo-wf"
         Err(e) => panic!("server build failed: {e}"),
     };
     tokio::spawn(async move {
-        let _ = server.run().await;
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
     });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -700,8 +699,10 @@ workflow_id = "echo-wf"
 /// Boot a gateway server with `admin_api_key` set and the echo workflow
 /// published, waiting for the admin listener.
 async fn gateway_with_admin_api_key() -> (String, String) {
-    let proxy_port = free_port();
-    let admin_port = free_port();
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
 
     let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
         r#"
@@ -742,7 +743,9 @@ workflow_id = "echo-wf"
         Err(e) => panic!("server build failed: {e}"),
     };
     tokio::spawn(async move {
-        let _ = server.run().await;
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
     });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -883,8 +886,10 @@ async fn admin_run_resolves_masked_lane_from_pools() {
     // Regression for the fix: admin /run used to thread `lane_clients=None`,
     // so an LLM node on a masked lane fell back to a plain direct client and
     // leaked the gateway IP. /run must resolve the lane's per-lane pool.
-    let proxy_port = free_port();
-    let admin_port = free_port();
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
 
     let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
         r#"
@@ -955,7 +960,9 @@ workflow_id = "llm-wf"
         Err(e) => panic!("server build failed: {e}"),
     };
     tokio::spawn(async move {
-        let _ = server.run().await;
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
     });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

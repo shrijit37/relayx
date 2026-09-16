@@ -17,18 +17,9 @@ use mock_upstream::{MockConfig, MockMode, spawn_mock};
 use relay_gateway::lanes::HyperPoolBuilder;
 use relay_gateway::observability::{PublicationState, WireSnapshot, WireWorkflow};
 use relay_gateway::server::GatewayServer;
-use test_harness::post_hyper;
+use test_harness::{post_hyper, reserved_listeners};
 use workflow_runtime::InMemoryPublisher;
 use workflow_schema::*;
-
-fn free_port() -> u16 {
-    use std::net::TcpListener;
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
 
 fn input_node() -> Node {
     Node {
@@ -164,8 +155,10 @@ async fn spawn_workflow_gateway(
     workflow: Workflow,
     lanes: &[(String, String)],
 ) -> (u16, Arc<InMemoryPublisher>, Arc<PublicationState>, String) {
-    let proxy_port = free_port();
-    let admin_port = free_port();
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
     let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
         r#"
 snapshot_version = 1
@@ -230,7 +223,9 @@ workflow_id = "{workflow_id}"
         Err(e) => panic!("server build failed: {e}"),
     };
     tokio::spawn(async move {
-        let _ = server.run().await;
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
     });
 
     // Wait for readiness.
@@ -356,7 +351,7 @@ async fn fallback_workflow_fails_over_to_backup_provider() {
     };
 
     // Use a never-listening port as the dead primary.
-    let dead_port = free_port();
+    let dead_port = test_harness::free_port();
     let dead_lane = format!("http://127.0.0.1:{dead_port}");
 
     let (proxy_port, _p, _pub, url) = spawn_workflow_gateway(
@@ -677,15 +672,17 @@ async fn fallback_requires_lane_pools_no_shared_fallback() {
         Err(e) => panic!("mock spawn failed: {e}"),
     };
 
-    let dead_port = free_port();
+    let dead_port = test_harness::free_port();
     let dead_lane = format!("http://127.0.0.1:{dead_port}");
 
     let wf = fallback_workflow("dead", "backup");
 
     // Publish the workflow WITH its lane pools (the gateway builds pools from
     // the snapshot's lanes at publish time).
-    let proxy_port = free_port();
-    let admin_port = free_port();
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
     let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
         r#"
 snapshot_version = 1
@@ -756,7 +753,9 @@ workflow_id = "fallback-wf"
         Err(e) => panic!("server build failed: {e}"),
     };
     tokio::spawn(async move {
-        let _ = server.run().await;
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
     });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);

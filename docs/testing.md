@@ -102,6 +102,10 @@ The `crates/test-harness` crate provides in-process spawn helpers:
 - `spawn_sse_stack(chunks, chunk_size)` — mock (SSE mode) + gateway
 - `dead_upstream_addr()` — port that will refuse connections
 - `post_hyper(url, body, headers)` / `get_hyper(url)` — raw HTTP client helpers
+- `reserved_listeners()` — a proxy/admin port pair **reserved up front** (bound
+  and held open) so parallel `cargo test` binaries can never be handed the
+  same port between selection and bind; hand the tokio listeners to
+  `GatewayServer::run_with_listeners` to close the bind race entirely
 
 ## Protocol conformance (Phase 2, COMPLETE)
 

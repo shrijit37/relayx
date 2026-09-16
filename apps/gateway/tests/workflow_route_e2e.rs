@@ -10,7 +10,7 @@ use std::time::Duration;
 use http::StatusCode;
 use relay_gateway::config::GatewayConfig;
 use relay_gateway::server::GatewayServer;
-use test_harness::post_hyper;
+use test_harness::{post_hyper, reserved_listeners};
 use url::Url;
 use workflow_runtime::context::{LaneEntry, LaneRegistry};
 use workflow_runtime::{CompileContext, RuntimeSnapshotBuilder, compile_workflow};
@@ -109,8 +109,10 @@ fn workflow_snapshot() -> Arc<workflow_runtime::RuntimeSnapshot> {
 
 #[tokio::test]
 async fn workflow_route_executes_compiled_plan() {
-    let proxy_port = free_port();
-    let admin_port = free_port();
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
 
     let config = workflow_config(proxy_port, admin_port);
     let snapshot = workflow_snapshot();
@@ -121,7 +123,9 @@ async fn workflow_route_executes_compiled_plan() {
     };
 
     let handle = tokio::spawn(async move {
-        let _ = server.run().await;
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
     });
 
     // Wait for readiness.
@@ -158,13 +162,4 @@ async fn workflow_route_executes_compiled_plan() {
         json.is_object() || json.is_string() || json.is_null(),
         "expected an echo of the input, got {json}"
     );
-}
-
-fn free_port() -> u16 {
-    use std::net::TcpListener;
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind")
-        .local_addr()
-        .expect("local addr")
-        .port()
 }

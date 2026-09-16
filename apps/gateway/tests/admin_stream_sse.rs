@@ -14,18 +14,9 @@ use std::time::Duration;
 use relay_gateway::lanes::HyperPoolBuilder;
 use relay_gateway::observability::{PublicationState, WireSnapshot, WireWorkflow};
 use relay_gateway::server::GatewayServer;
-use test_harness::post_hyper;
+use test_harness::{post_hyper, reserved_listeners};
 use workflow_runtime::InMemoryPublisher;
 use workflow_schema::*;
-
-fn free_port() -> u16 {
-    use std::net::TcpListener;
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
 
 fn passthrough_workflow() -> Workflow {
     Workflow {
@@ -66,8 +57,10 @@ fn passthrough_workflow() -> Workflow {
 
 /// Spawn a gateway with the workflow published as snapshot v42, workflow v7.
 async fn spawn_gateway() -> u16 {
-    let proxy_port = free_port();
-    let admin_port = free_port();
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
     let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
         r#"
 snapshot_version = 1
@@ -118,7 +111,9 @@ workflow_id = "echo-wf"
         Err(e) => panic!("server build failed: {e}"),
     };
     tokio::spawn(async move {
-        let _ = server.run().await;
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
     });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
