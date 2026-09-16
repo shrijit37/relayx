@@ -872,4 +872,309 @@ mod runtime_value_integer {
             "Skill with no loader should return error, not fabricated success"
         );
     }
+
+    // ─── Extension registry tests ────────────────────────────────────────────
+
+    /// A stub executor that passes input through as output.
+    struct StubExtensionExecutor;
+
+    #[async_trait::async_trait]
+    impl workflow_runtime::extension::ExtensionExecutor for StubExtensionExecutor {
+        async fn execute(
+            &self,
+            _config: &workflow_schema::CustomConfig,
+            _version: u64,
+            input: workflow_runtime::nodes::NodeInput,
+        ) -> Result<workflow_runtime::nodes::NodeOutput, workflow_runtime::error::NodeError>
+        {
+            Ok(workflow_runtime::nodes::NodeOutput::message(input.value))
+        }
+    }
+
+    /// A stub executor that always returns an error.
+    struct FailingStubExtensionExecutor;
+
+    #[async_trait::async_trait]
+    impl workflow_runtime::extension::ExtensionExecutor for FailingStubExtensionExecutor {
+        async fn execute(
+            &self,
+            _config: &workflow_schema::CustomConfig,
+            _version: u64,
+            _input: workflow_runtime::nodes::NodeInput,
+        ) -> Result<workflow_runtime::nodes::NodeOutput, workflow_runtime::error::NodeError>
+        {
+            Err(workflow_runtime::error::NodeError::Extension(
+                workflow_runtime::error::ExtensionError::Execution("test executor failure".into()),
+            ))
+        }
+    }
+
+    fn custom_node(id: &str, kind: &str) -> Node {
+        Node {
+            id: id.into(),
+            kind: NodeKind::Custom,
+            config: NodeConfig::Custom(CustomConfig {
+                kind: kind.into(),
+                payload: serde_json::json!({"key": "value"}),
+            }),
+            inputs: vec![PortDef {
+                name: "in".into(),
+                port_type: PortType::Message,
+            }],
+            outputs: vec![PortDef {
+                name: "out".into(),
+                port_type: PortType::Message,
+            }],
+        }
+    }
+
+    fn build_and_validate_ext(wf: &Workflow) -> ExecutionPlan {
+        match ExecutionPlan::compile(wf) {
+            Ok(p) => p,
+            Err(e) => panic!("plan compilation failed: {e}"),
+        }
+    }
+
+    #[test]
+    fn custom_node_with_registry_executes() {
+        let wf = Workflow {
+            id: "ext-1".into(),
+            name: "custom-registered".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                custom_node("ext1", "test-kind"),
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "ext1"), simple_edge("ext1", "out")],
+        };
+        let plan = build_and_validate_ext(&wf);
+
+        let mut registry = workflow_runtime::extension::ExtensionRegistry::new();
+        registry.register(workflow_runtime::extension::ExtensionSpec {
+            kind: "test-kind".into(),
+            version: 1,
+            validator: None,
+            executor: Arc::new(StubExtensionExecutor),
+        });
+
+        let lanes = Arc::new(LaneRegistry::new());
+        let mut ctx = ExecutionContext::new("ext-wf".into(), "run-1".into(), lanes);
+        ctx.extension_registry = Some(Arc::new(registry));
+
+        let rt = NodeRuntime::new(plan);
+        let result = tokio_test::block_on(rt.execute(
+            &ctx,
+            NodeInput::message(RuntimeValue::String("hello".into())),
+        ));
+        let output = match result {
+            Ok(o) => o,
+            Err(e) => panic!("execution failed: {e}"),
+        };
+        assert_eq!(output.value, RuntimeValue::String("hello".into()));
+    }
+
+    #[test]
+    fn custom_node_without_registry_returns_error() {
+        let wf = Workflow {
+            id: "ext-2".into(),
+            name: "custom-no-registry".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                custom_node("ext1", "unknown-kind"),
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "ext1"), simple_edge("ext1", "out")],
+        };
+        let plan = build_and_validate_ext(&wf);
+
+        let lanes = Arc::new(LaneRegistry::new());
+        let ctx = ExecutionContext::new("ext-wf".into(), "run-2".into(), lanes);
+        // No extension_registry set (None).
+
+        let rt = NodeRuntime::new(plan);
+        let result = tokio_test::block_on(rt.execute(
+            &ctx,
+            NodeInput::message(RuntimeValue::String("hello".into())),
+        ));
+        assert!(result.is_err(), "Custom node without registry must fail");
+        match result {
+            Err(WorkflowError::Runtime { node_id, source }) => {
+                assert_eq!(node_id, "ext1");
+                let msg = source.to_string();
+                assert!(
+                    msg.contains("extension registry"),
+                    "error should mention registry: {msg}"
+                );
+            }
+            other => panic!("expected Runtime error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_node_unregistered_kind_returns_error() {
+        let wf = Workflow {
+            id: "ext-3".into(),
+            name: "custom-unregistered-kind".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                custom_node("ext1", "no-such-kind"),
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "ext1"), simple_edge("ext1", "out")],
+        };
+        let plan = build_and_validate_ext(&wf);
+
+        let mut registry = workflow_runtime::extension::ExtensionRegistry::new();
+        registry.register(workflow_runtime::extension::ExtensionSpec {
+            kind: "other-kind".into(),
+            version: 1,
+            validator: None,
+            executor: Arc::new(StubExtensionExecutor),
+        });
+
+        let lanes = Arc::new(LaneRegistry::new());
+        let mut ctx = ExecutionContext::new("ext-wf".into(), "run-3".into(), lanes);
+        ctx.extension_registry = Some(Arc::new(registry));
+
+        let rt = NodeRuntime::new(plan);
+        let result = tokio_test::block_on(rt.execute(
+            &ctx,
+            NodeInput::message(RuntimeValue::String("hello".into())),
+        ));
+        assert!(result.is_err(), "Custom node with wrong kind must fail");
+        match result {
+            Err(WorkflowError::Runtime { node_id, source }) => {
+                assert_eq!(node_id, "ext1");
+                let msg = source.to_string();
+                assert!(
+                    msg.contains("no extension registered"),
+                    "error should mention no registration: {msg}"
+                );
+            }
+            other => panic!("expected Runtime error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_node_plan_hash_includes_payload() {
+        let wf1 = Workflow {
+            id: "hash-1".into(),
+            name: "hash-test".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                custom_node("ext1", "k"),
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "ext1"), simple_edge("ext1", "out")],
+        };
+        let wf2 = Workflow {
+            id: "hash-1".into(),
+            name: "hash-test".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                Node {
+                    id: "ext1".into(),
+                    kind: NodeKind::Custom,
+                    config: NodeConfig::Custom(CustomConfig {
+                        kind: "k".into(),
+                        payload: serde_json::json!({"different": true}),
+                    }),
+                    inputs: vec![PortDef {
+                        name: "in".into(),
+                        port_type: PortType::Message,
+                    }],
+                    outputs: vec![PortDef {
+                        name: "out".into(),
+                        port_type: PortType::Message,
+                    }],
+                },
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "ext1"), simple_edge("ext1", "out")],
+        };
+        let p1 = build_and_validate_ext(&wf1);
+        let p2 = build_and_validate_ext(&wf2);
+        assert_ne!(
+            p1.plan_hash(),
+            p2.plan_hash(),
+            "different payloads must produce different plan hashes"
+        );
+    }
+
+    #[test]
+    fn extension_registry_roundtrip_via_snapshot() {
+        let mut builder = workflow_runtime::RuntimeSnapshotBuilder::new(1)
+            .with_extension("nordvpn-egress", 1)
+            .with_extension("key-pool-policy", 2);
+        let wf = Workflow {
+            id: "snap-ext".into(),
+            name: "snap-ext".into(),
+            version: 1,
+            nodes: vec![input_node("in"), output_node("out")],
+            edges: vec![simple_edge("in", "out")],
+        };
+        let plan = match ExecutionPlan::compile(&wf) {
+            Ok(p) => p,
+            Err(e) => panic!("compile failed: {e}"),
+        };
+        builder = builder.with_plan("snap-ext", plan);
+        let snapshot = builder.build();
+        let exts = snapshot.extensions();
+        assert_eq!(exts.len(), 2);
+        assert_eq!(exts[0].kind, "nordvpn-egress");
+        assert_eq!(exts[0].version, 1);
+        assert_eq!(exts[1].kind, "key-pool-policy");
+        assert_eq!(exts[1].version, 2);
+    }
+
+    #[test]
+    fn custom_node_failing_executor_propagates_error() {
+        let wf = Workflow {
+            id: "ext-fail".into(),
+            name: "custom-failing-executor".into(),
+            version: 1,
+            nodes: vec![
+                input_node("in"),
+                custom_node("ext1", "fail-kind"),
+                output_node("out"),
+            ],
+            edges: vec![simple_edge("in", "ext1"), simple_edge("ext1", "out")],
+        };
+        let plan = build_and_validate_ext(&wf);
+
+        let mut registry = workflow_runtime::extension::ExtensionRegistry::new();
+        registry.register(workflow_runtime::extension::ExtensionSpec {
+            kind: "fail-kind".into(),
+            version: 1,
+            validator: None,
+            executor: Arc::new(FailingStubExtensionExecutor),
+        });
+
+        let lanes = Arc::new(LaneRegistry::new());
+        let mut ctx = ExecutionContext::new("ext-fail-wf".into(), "run-fail".into(), lanes);
+        ctx.extension_registry = Some(Arc::new(registry));
+
+        let rt = NodeRuntime::new(plan);
+        let result = tokio_test::block_on(rt.execute(
+            &ctx,
+            NodeInput::message(RuntimeValue::String("hello".into())),
+        ));
+        assert!(result.is_err(), "Failing executor must propagate error");
+        match result {
+            Err(WorkflowError::Runtime { node_id, source }) => {
+                assert_eq!(node_id, "ext1");
+                let msg = source.to_string();
+                assert!(
+                    msg.contains("extension execution failed"),
+                    "error should mention extension execution: {msg}"
+                );
+            }
+            other => panic!("expected Runtime error, got: {other:?}"),
+        }
+    }
 }

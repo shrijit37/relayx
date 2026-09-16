@@ -168,6 +168,7 @@ workflow_id = "wf6"
     // credential — exactly what the control plane serializes at publish time.
     let wire = WireSnapshot {
         snapshot_version: 1,
+        extensions: vec![],
         workflows: vec![WireWorkflow {
             id: "wf6".into(),
             workflow: llm_workflow("lane-a", true),
@@ -332,6 +333,7 @@ workflow_id = "wf6"
     // v1: valid lane URL, publishes fine.
     let good_wire = WireSnapshot {
         snapshot_version: 1,
+        extensions: vec![],
         workflows: vec![WireWorkflow {
             id: "wf6".into(),
             workflow: llm_workflow("lane-a", false),
@@ -354,6 +356,7 @@ workflow_id = "wf6"
     // v2: invalid lane URL — must be rejected, and v1 must stay active.
     let bad_wire = WireSnapshot {
         snapshot_version: 2,
+        extensions: vec![],
         workflows: vec![WireWorkflow {
             id: "wf6".into(),
             workflow: llm_workflow("bad-lane", true),

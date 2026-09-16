@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::context::LaneRegistry;
 use crate::error::WorkflowError;
 use crate::execution::ExecutionPlan;
+use crate::extension::ExtensionRegistry;
 use workflow_schema::Workflow;
 
 /// Validation context for the compiler.
@@ -20,6 +21,10 @@ use workflow_schema::Workflow;
 pub struct CompileContext {
     /// Available lanes.
     pub lanes: Arc<LaneRegistry>,
+    /// Available extensions. When present, the compiler performs kind
+    /// resolution on Custom nodes and logs warnings for unregistered kinds
+    /// (non-blocking, does not reject the workflow).
+    pub extensions: Option<Arc<ExtensionRegistry>>,
 }
 
 /// Additional compiler-specific validation errors.
@@ -63,7 +68,8 @@ impl From<CompileError> for WorkflowError {
 ///
 /// 1. Schema validation (duplicate IDs, cycles, reachability, ports).
 /// 2. Lane reference validation (Llm nodes with explicit lane_id must resolve).
-/// 3. Execution plan compilation (topological sort, classification, hashing).
+/// 3. Extension kind resolution (non-blocking, warnings only).
+/// 4. Execution plan compilation (topological sort, classification, hashing).
 pub fn compile_workflow(
     workflow: &Workflow,
     ctx: &CompileContext,
@@ -76,10 +82,49 @@ pub fn compile_workflow(
     // 2. Lane reference validation.
     validate_lane_refs(workflow, ctx)?;
 
-    // 3. Full compilation via ExecutionPlan::compile.
+    // 3. Extension kind resolution (non-blocking, warnings only).
+    resolve_extension_kinds(workflow, ctx);
+
+    // 4. Full compilation via ExecutionPlan::compile.
     let plan = ExecutionPlan::compile(workflow)?;
 
     Ok(plan)
+}
+
+/// Check extension kind resolution at compile time.
+///
+/// Non-blocking by design: an unknown extension kind must not reject a
+/// draft workflow at compile time. Registered extensions with validators
+/// are flagged as an available-but-not-yet-invoked capability. Full async
+/// validation is deferred to the executor at runtime.
+fn resolve_extension_kinds(workflow: &Workflow, ctx: &CompileContext) {
+    use workflow_schema::NodeConfig;
+
+    let Some(registry) = ctx.extensions.as_ref() else {
+        return;
+    };
+
+    for node in &workflow.nodes {
+        if let NodeConfig::Custom(cfg) = &node.config {
+            match registry.get(&cfg.kind) {
+                Some(_spec) => {
+                    tracing::debug!(
+                        node_id = %node.id,
+                        kind = %cfg.kind,
+                        "extension kind resolved at compile time"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        node_id = %node.id,
+                        kind = %cfg.kind,
+                        "custom node kind '{}' has no registered extension (will fail at runtime)",
+                        cfg.kind
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn validate_lane_refs(workflow: &Workflow, ctx: &CompileContext) -> Result<(), CompileError> {
@@ -225,6 +270,7 @@ mod tests {
         };
         let ctx = CompileContext {
             lanes: test_lane_registry(),
+            extensions: None,
         };
         let plan = match compile_workflow(&wf, &ctx) {
             Ok(p) => p,
@@ -249,6 +295,7 @@ mod tests {
         };
         let ctx = CompileContext {
             lanes: test_lane_registry(),
+            extensions: None,
         };
         let result = compile_workflow(&wf, &ctx);
         match result {
@@ -269,6 +316,7 @@ mod tests {
         };
         let ctx = CompileContext {
             lanes: test_lane_registry(),
+            extensions: None,
         };
         let hash1 = match compile_workflow(&wf, &ctx) {
             Ok(p) => p.plan_hash().to_owned(),
@@ -295,6 +343,7 @@ mod tests {
         };
         let ctx = CompileContext {
             lanes: Arc::new(LaneRegistry::new()),
+            extensions: None,
         };
         let result = compile_workflow(&wf, &ctx);
         assert!(
@@ -336,6 +385,7 @@ mod tests {
         };
         let ctx = CompileContext {
             lanes: Arc::new(two_lanes),
+            extensions: None,
         };
         let result = compile_workflow(&wf, &ctx);
         assert!(
@@ -355,6 +405,7 @@ mod tests {
         };
         let ctx = CompileContext {
             lanes: test_lane_registry(),
+            extensions: None,
         };
         let plan = match compile_workflow(&wf, &ctx) {
             Ok(p) => p,
@@ -414,6 +465,7 @@ mod tests {
         };
         let ctx = CompileContext {
             lanes: test_lane_registry(),
+            extensions: None,
         };
         let plan = match compile_workflow(&wf, &ctx) {
             Ok(p) => p,
@@ -435,6 +487,7 @@ mod tests {
         };
         let ctx = CompileContext {
             lanes: test_lane_registry(),
+            extensions: None,
         };
         let plan = match compile_workflow(&wf, &ctx) {
             Ok(p) => p,

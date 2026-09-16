@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use crate::context::LaneRegistry;
 use crate::execution::ExecutionPlan;
+use crate::extension::ExtensionSpecSnapshot;
 
 /// A compiled plan plus the workflow version it was compiled from (the
 /// ACTIVE version executed, carried out-of-band from the wire). One map
@@ -34,6 +35,9 @@ pub struct RuntimeSnapshot {
     plans: HashMap<String, PlanEntry>,
     /// Registered lanes.
     lanes: Arc<LaneRegistry>,
+    /// Extension specs (kind + version) for observability. The actual
+    /// validator/executor trait objects live in the runtime, not here.
+    extensions: Vec<ExtensionSpecSnapshot>,
     /// When this snapshot was published.
     published_at: Instant,
 }
@@ -45,6 +49,7 @@ impl RuntimeSnapshot {
             wall_version,
             plans: HashMap::new(),
             lanes: Arc::new(LaneRegistry::new()),
+            extensions: Vec::new(),
             published_at: Instant::now(),
         }
     }
@@ -94,6 +99,11 @@ impl RuntimeSnapshot {
     pub fn plan_count(&self) -> usize {
         self.plans.len()
     }
+
+    /// Extension specs in this snapshot (kind + version metadata).
+    pub fn extensions(&self) -> &[ExtensionSpecSnapshot] {
+        &self.extensions
+    }
 }
 
 /// Builder for constructing a snapshot before publication.
@@ -104,6 +114,7 @@ pub struct RuntimeSnapshotBuilder {
     wall_version: u64,
     plans: HashMap<String, PlanEntry>,
     lanes: Arc<LaneRegistry>,
+    extensions: Vec<ExtensionSpecSnapshot>,
 }
 
 impl RuntimeSnapshotBuilder {
@@ -113,12 +124,23 @@ impl RuntimeSnapshotBuilder {
             wall_version,
             plans: HashMap::new(),
             lanes: Arc::new(LaneRegistry::new()),
+            extensions: Vec::new(),
         }
     }
 
     /// Insert a lane registry.
     pub fn with_lanes(mut self, lanes: Arc<LaneRegistry>) -> Self {
         self.lanes = lanes;
+        self
+    }
+
+    /// Record an extension spec (kind + version) for snapshot metadata.
+    /// Duplicate kinds are replaced (matching `ExtensionRegistry::register`).
+    pub fn with_extension(mut self, kind: impl Into<String>, version: u64) -> Self {
+        let kind = kind.into();
+        self.extensions.retain(|e| e.kind != kind);
+        self.extensions
+            .push(ExtensionSpecSnapshot { kind, version });
         self
     }
 
@@ -162,6 +184,7 @@ impl RuntimeSnapshotBuilder {
             wall_version: self.wall_version,
             plans: self.plans,
             lanes: self.lanes,
+            extensions: self.extensions,
             published_at: Instant::now(),
         }
     }
@@ -232,5 +255,18 @@ mod tests {
         assert_eq!(snapshot.version(), 42);
         assert!(snapshot.get_plan("wf1").is_some());
         assert_eq!(snapshot.plan_count(), 1);
+    }
+
+    #[test]
+    fn builder_records_extension_specs() {
+        let snapshot = RuntimeSnapshotBuilder::new(9)
+            .with_extension("nordvpn-egress", 1)
+            .with_extension("key-pool-policy", 2)
+            .build();
+        assert_eq!(snapshot.extensions().len(), 2);
+        assert_eq!(snapshot.extensions()[0].kind, "nordvpn-egress");
+        assert_eq!(snapshot.extensions()[0].version, 1);
+        assert_eq!(snapshot.extensions()[1].kind, "key-pool-policy");
+        assert_eq!(snapshot.extensions()[1].version, 2);
     }
 }

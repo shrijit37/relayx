@@ -33,6 +33,8 @@ pub fn compile_workflow_with_lanes(
 
     let ctx = crate::CompileContext {
         lanes: Arc::new(lane_registry),
+        extensions: None, // TODO: thread through an optional ExtensionRegistry so gateway
+                          // workflows get compile-time kind resolution.
     };
     crate::compile_workflow(workflow, &ctx).map_err(Into::into)
 }

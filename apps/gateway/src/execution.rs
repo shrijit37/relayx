@@ -11,6 +11,7 @@ use http::StatusCode;
 
 use crate::errors::GatewayError;
 use workflow_runtime::execution::{ExecutionPlan, PlanClassification};
+use workflow_runtime::extension::ExtensionRegistry;
 use workflow_runtime::nodes::{NodeInput, RuntimeValue};
 use workflow_runtime::{ExecutionContext, RuntimeSnapshot};
 
@@ -26,6 +27,8 @@ pub type GatewayClient =
 /// client is injected so LLM nodes can reach their upstream providers;
 /// `lane_clients` (when present) resolves a per-lane pool for each lane.
 // ponytail: 9 params is at the ceiling; group into a RequestSpec struct if another is added.
+// NOTE: This function now has 11 params (ceiling was 9). The next parameter
+// addition should introduce a RequestSpec/ExecutionParams struct.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_workflow(
     snapshot: &Arc<RuntimeSnapshot>,
@@ -38,6 +41,7 @@ pub async fn execute_workflow(
     deadline: Option<tokio::time::Instant>,
     token_sender: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
     cancel_token: tokio_util::sync::CancellationToken,
+    extension_registry: Option<Arc<ExtensionRegistry>>,
 ) -> Result<axum::response::Response<Body>, GatewayError> {
     // Decode request body.
     let input_json: serde_json::Value =
@@ -60,6 +64,7 @@ pub async fn execute_workflow(
     ctx.deadline = deadline; // NEW: propagate execution deadline
     ctx.metadata = workflow_runtime::ExecutionMetadata::from_snapshot(snapshot, workflow_id);
     ctx.reporter = Arc::new(GatewayMilestones);
+    ctx.extension_registry = extension_registry;
     ctx.token_sender = token_sender;
     ctx.cancel_token = cancel_token;
 
