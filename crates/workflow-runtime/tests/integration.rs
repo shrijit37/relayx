@@ -386,13 +386,9 @@ async fn test_concurrent_executions() {
     });
     let lanes = Arc::new(lanes);
 
-    let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-        .build_http();
-
     let mut handles = vec![];
     for i in 0..5 {
         let lanes = lanes.clone();
-        let client = client.clone();
         let wf = Workflow {
             id: format!("wf-concurrent-{i}"),
             name: format!("concurrent-{i}"),
@@ -406,8 +402,7 @@ async fn test_concurrent_executions() {
                 Err(e) => panic!("compile failed: {e}"),
             };
             let rt = NodeRuntime::new(plan);
-            let mut ctx = ExecutionContext::new(wf.id.clone(), format!("run-{i}"), lanes);
-            ctx.upstream_client = Some(Arc::new(client.clone()));
+            let ctx = ExecutionContext::new(wf.id.clone(), format!("run-{i}"), lanes);
             let input = NodeInput::message(RuntimeValue::String(format!("msg-{i}")));
             match rt.execute(&ctx, input).await {
                 Ok(o) => o.value,

@@ -68,6 +68,20 @@ impl LaneClient {
         }
     }
 
+    /// Wrap a pre-built shared direct client as a direct `LaneClient`.
+    ///
+    /// Used by the proxy path for `direct`-egress lanes that have no
+    /// published lane pool (pure-proxy deployments): the shared client is
+    /// already the gateway's connection pool, so wrapping it adds no new
+    /// sockets and keeps the fast path exactly as before. Never used for
+    /// `masked` lanes — a masked lane must resolve its own tunneled pool.
+    pub fn from_shared(client: Arc<GatewayHttpClient>) -> Self {
+        Self {
+            egress: "direct".into(),
+            client: Arc::new(DirectClient((*client).clone())),
+        }
+    }
+
     /// Create an HTTP CONNECT proxy client.
     pub fn http_proxy(
         proxy_url: &str,
@@ -291,8 +305,6 @@ pub struct ExecutionContext {
     pub default_timeout: Duration,
     /// Lane registry for LLM nodes to resolve provider connections.
     pub lane_registry: Arc<LaneRegistry>,
-    /// HTTP client for upstream provider calls.
-    pub upstream_client: Option<Arc<GatewayHttpClient>>,
     /// MCP tool executor — if provided, MCP nodes call real tools.
     pub mcp_executor: Option<Arc<dyn McpToolExecutor>>,
     /// Skill loader — if provided, Skill nodes load real skills.
@@ -396,7 +408,8 @@ pub struct LaneEntry {
     /// workflow JSON. `None` for lanes that carry no auth.
     pub authorization: Option<String>,
     /// Egress mode: `"direct"` (default, gateway IP) or `"masked"`
-    /// (via a lane proxy). Unknown values degrade to `direct`.
+    /// (via a lane proxy). Unknown values are rejected at publish/pool-build
+    /// time — they never silently degrade to `direct`.
     pub egress: String,
     /// Proxy URL for masked egress: `http://host:port` (HTTP CONNECT) or
     /// `socks5://host:port` (SOCKS5). Ignored unless `egress == "masked"`.
@@ -446,7 +459,6 @@ impl ExecutionContext {
             deadline: None,
             default_timeout: std::time::Duration::from_secs(60),
             lane_registry,
-            upstream_client: None,
             mcp_executor: None,
             skill_loader: None,
             lane_clients: None,
@@ -468,7 +480,6 @@ impl ExecutionContext {
             deadline: self.deadline,
             default_timeout: self.default_timeout,
             lane_registry: self.lane_registry.clone(),
-            upstream_client: self.upstream_client.clone(),
             mcp_executor: self.mcp_executor.clone(),
             skill_loader: self.skill_loader.clone(),
             lane_clients: self.lane_clients.clone(),

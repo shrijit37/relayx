@@ -307,7 +307,8 @@ pub struct WireLane {
     #[serde(default)]
     pub authorization: Option<String>,
     /// Egress mode: `"direct"` (default, gateway IP) or `"masked"`
-    /// (via the lane's `proxy_url`). Unknown values degrade to `direct`.
+    /// (via the lane's `proxy_url`). Unknown values are rejected at
+    /// publish/pool-build time — they never silently degrade to `direct`.
     #[serde(default = "default_lane_egress")]
     pub egress: String,
     /// Proxy URL for masked egress: `http://host:port` (HTTP CONNECT) or
@@ -655,18 +656,13 @@ pub fn admin_router_with_publication(
             }
         };
 
-        // ponytail: per-run Hyper client (human-paced UI runs). The shared
-        // proxy client lives on AppState and isn't reachable from the admin
-        // router's state type; thread it through if run throughput ever needs
-        // connection reuse.
-        let client = workflow_runtime::gateway_client(std::time::Duration::from_secs(90), 64);
-
-        // Lane pools: admin /run must resolve each lane's dedicated pool the
-        // same way proxy workflow routes do. Without this, an LLM/fallback
-        // node would fall back to a plain direct client and leak a masked
-        // lane's egress IP. The pools are captured once from the same
-        // PublicationState that produced `snapshot`, so run and proxy traffic
-        // observe one coherent (snapshot, pools) pair.
+        // Lane pools: admin /run resolves each lane's dedicated pool the
+        // same way proxy workflow routes do. LLM/fallback nodes only ever
+        // send traffic through a lane's dedicated pool — never a shared
+        // direct client — so a masked lane cannot leak its egress IP. The
+        // pools are captured once from the same PublicationState that
+        // produced `snapshot`, so run and proxy traffic observe one coherent
+        // (snapshot, pools) pair.
         let lane_clients = publication.pools_arc();
 
         // 120s hard deadline for admin-triggered runs — prevents orphaned
@@ -704,7 +700,6 @@ pub fn admin_router_with_publication(
                         bb,
                         &wf_id,
                         &rid,
-                        client,
                         Some(lane_clients.clone()),
                         deadline,
                         Some(tx.clone()),
@@ -799,7 +794,6 @@ pub fn admin_router_with_publication(
             body_bytes,
             &req.workflow_id,
             &request_id,
-            client,
             Some(lane_clients),
             deadline,
             None,

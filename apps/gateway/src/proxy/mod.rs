@@ -14,7 +14,7 @@ use tokio_stream::Stream;
 use crate::errors::GatewayError;
 use crate::server::AppState;
 use crate::transport;
-use workflow_runtime::RuntimeSnapshot;
+use workflow_runtime::{AsLaneClient, RuntimeSnapshot};
 
 /// Extension: read the current published runtime snapshot.
 ///
@@ -39,6 +39,33 @@ impl workflow_runtime::AsLaneClient for AppState {
         let pools = self.publication.as_ref()?.pools();
         pools.client_for_lane(lane_id)
     }
+}
+
+/// Resolve the client a proxy route uses to reach its upstream lane.
+///
+/// The lane's per-lane pool is preferred when one is published (the workflow
+/// data plane's egress mode applies — masked lanes tunnel through their
+/// proxy). A `direct` lane without a published pool (pure-proxy deployment)
+/// falls back to the shared gateway client, which is itself a direct
+/// connection pool — no new sockets, same fast path as before. A `masked`
+/// lane with no published pool is a hard error: failing closed beats
+/// silently egressing from the gateway IP.
+fn resolve_proxy_client(
+    state: &AppState,
+    lane_id: &str,
+    lane: &crate::config::CompiledLane,
+) -> Result<Arc<workflow_runtime::LaneClient>, GatewayError> {
+    if let Some(client) = state.client_for_lane(lane_id) {
+        return Ok(client);
+    }
+    if lane.egress == "masked" {
+        return Err(GatewayError::Internal(format!(
+            "no lane pool for masked lane '{lane_id}' (pure-proxy deployment cannot egress masked)"
+        )));
+    }
+    Ok(Arc::new(workflow_runtime::LaneClient::from_shared(
+        state.client.clone(),
+    )))
 }
 
 /// A stream wrapper that enforces a per-frame timeout.
@@ -213,12 +240,16 @@ async fn passthrough_proxy_request(
         .lookup_lane(lane_id)
         .ok_or_else(|| GatewayError::Internal(format!("unknown lane: {lane_id}")))?;
 
+    // Egress-aware: prefer the lane's dedicated pool (masked lanes tunnel),
+    // fall back to the shared direct client for direct lanes without a pool.
+    let client = resolve_proxy_client(&state, lane_id, lane)?;
+
     let upstream_req = build_upstream_request(&lane.base_url, req, &path)?;
     let frame_timeout = lane.frame_timeout;
 
     forward_upstream(
-        state,
         upstream_req,
+        client,
         lane_id,
         route_id,
         request_id,
@@ -248,6 +279,10 @@ async fn translate_proxy_request(
         .config
         .lookup_lane(lane_id)
         .ok_or_else(|| GatewayError::Internal(format!("unknown lane: {lane_id}")))?;
+
+    // Egress-aware: prefer the lane's dedicated pool (masked lanes tunnel),
+    // fall back to the shared direct client for direct lanes without a pool.
+    let client = resolve_proxy_client(&state, lane_id, lane)?;
 
     // ── Buffer client request body and decode ────────────────────────────────
     let (_parts, body) = req.into_parts();
@@ -299,7 +334,7 @@ async fn translate_proxy_request(
         .map_err(|e| GatewayError::Internal(format!("failed to build upstream request: {e}")))?;
 
     let connect_start = Instant::now();
-    let upstream_response = state.client.request(upstream_req).await.map_err(|e| {
+    let upstream_response = client.request(upstream_req).await.map_err(|e| {
         tracing::warn!(error = %e, request_id = %request_id, "upstream request failed");
         GatewayError::UpstreamConnection {
             upstream: lane_id.to_owned(),
@@ -354,12 +389,14 @@ async fn translate_proxy_request(
 }
 
 /// Forward an upstream request and stream the response back.
-/// When `override_body` is Some, that body replaces the upstream response.
-// ponytail: 8 params; group into a ForwardSpec struct if another is added.
+/// `client` is the lane's egress-aware client (dedicated pool, or the shared
+/// direct client wrapped for a direct lane without a pool). When
+/// `override_body` is Some, that body replaces the upstream response.
+// ponytail: 7 params; group into a ForwardSpec struct if another is added.
 #[allow(clippy::too_many_arguments)]
 async fn forward_upstream(
-    state: Arc<AppState>,
     upstream_req: HttpRequest<Body>,
+    client: Arc<workflow_runtime::LaneClient>,
     lane_id: &str,
     _route_id: &str,
     request_id: &str,
@@ -368,7 +405,7 @@ async fn forward_upstream(
     frame_timeout: Duration,
 ) -> Result<axum::response::Response<Body>, GatewayError> {
     let connect_start = Instant::now();
-    let upstream_response = state.client.request(upstream_req).await.map_err(|e| {
+    let upstream_response = client.request(upstream_req).await.map_err(|e| {
         tracing::warn!(error = %e, request_id = %request_id, "upstream request failed");
         GatewayError::UpstreamConnection {
             upstream: lane_id.to_owned(),
@@ -509,7 +546,6 @@ async fn workflow_route_request(
         body_bytes,
         workflow_id,
         request_id,
-        state.client.clone(),
         Some(state.clone()),
         deadline,
         None,
@@ -576,6 +612,85 @@ base_url = "http://127.0.0.1:9000"
             .get("content-type")
             .ok_or_else(|| anyhow::anyhow!("upstream request missing content-type header"))?;
         assert_eq!(content_type, "application/json");
+        Ok(())
+    }
+
+    /// A direct lane with no published pool resolves to a client wrapping the
+    /// shared gateway client (same direct fast path as before).
+    #[test]
+    fn resolve_proxy_client_direct_lane_without_pool_wraps_shared_client() -> anyhow::Result<()> {
+        let config = test_config()?;
+        let snapshot = config.compile()?;
+        let lane = snapshot
+            .lookup_lane("mock")
+            .ok_or_else(|| anyhow::anyhow!("mock lane missing"))?
+            .clone();
+        assert_eq!(lane.egress, "direct");
+
+        let state = Arc::new(AppState {
+            config: Arc::new(snapshot),
+            client: Arc::new(crate::upstream::build_http_client(
+                Duration::from_secs(90),
+                64,
+            )),
+            timeout: Duration::from_secs(30),
+            publication: None,
+        });
+
+        let client = resolve_proxy_client(&state, "mock", &lane)?;
+        assert_eq!(client.egress(), "direct");
+        Ok(())
+    }
+
+    /// A masked lane with no published pool is a hard error — the proxy must
+    /// never silently egress a masked lane direct from the gateway IP.
+    #[test]
+    fn resolve_proxy_client_masked_lane_without_pool_fails_closed() -> anyhow::Result<()> {
+        let toml_str = r#"
+snapshot_version = 1
+
+[server]
+listen = "127.0.0.1:8080"
+
+[[routes]]
+id = "masked"
+path_prefix = "/v1/masked"
+methods = ["POST"]
+lane = "masked-lane"
+
+[[lanes]]
+id = "masked-lane"
+base_url = "https://api.example.com/v1"
+egress = "masked"
+proxy_url = "socks5://proxy.example.com:1080"
+"#;
+        let config: GatewayConfig = toml::from_str(toml_str)?;
+        let snapshot = config.compile()?;
+        let lane = snapshot
+            .lookup_lane("masked-lane")
+            .ok_or_else(|| anyhow::anyhow!("masked-lane missing"))?
+            .clone();
+        assert_eq!(lane.egress, "masked");
+
+        // Pure-proxy deployment: no publication state, hence no lane pools.
+        let state = Arc::new(AppState {
+            config: Arc::new(snapshot),
+            client: Arc::new(crate::upstream::build_http_client(
+                Duration::from_secs(90),
+                64,
+            )),
+            timeout: Duration::from_secs(30),
+            publication: None,
+        });
+
+        let err = resolve_proxy_client(&state, "masked-lane", &lane)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("masked lane without a pool must fail closed"))?;
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no lane pool for masked lane 'masked-lane'"),
+            "error should name the lane and the missing pool, got: {msg}"
+        );
         Ok(())
     }
 }

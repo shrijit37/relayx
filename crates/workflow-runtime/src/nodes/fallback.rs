@@ -53,7 +53,6 @@ pub async fn execute(
     let rounds = config.rounds.max(1);
     let n = config.providers.len();
     let mut last_error: Option<NodeError> = None;
-    let mut any_ran = false;
 
     // RoundRobin: each request starts at the next provider (fetch_add % n).
     // Sequential: always start at provider[0].
@@ -79,14 +78,10 @@ pub async fn execute(
             // A provider is only "attempted" when its lane actually has a
             // usable client. The per-lane pool is the only source: proxy-only
             // deployments have no shared upstream client, and a shared direct
-            // wrapper must never stand in for a masked lane.
-            let client = resolve_lane_client(ctx, lane_id)?;
-            if client.available() {
-                any_ran = true;
-            } else {
-                last_error = Some(NodeError::Internal("no upstream client".into()));
-                continue;
-            }
+            // wrapper must never stand in for a masked lane. `resolve_lane_client`
+            // fails hard when the pool is missing and the value is otherwise
+            // unused — the call itself is the fail-closed guard.
+            let _client = resolve_lane_client(ctx, lane_id)?;
 
             tracing::debug!(
                 node_id = %ctx.node_id,
@@ -151,14 +146,6 @@ pub async fn execute(
                 }
             }
         }
-    }
-
-    if !any_ran {
-        // None of the providers could be attempted (e.g. all lanes missing or
-        // the client absent) — that's a hard error, not a "tried and failed".
-        return Err(NodeError::Internal(
-            "fallback: no provider could be attempted (missing lanes or client)".into(),
-        ));
     }
 
     Err(last_error
