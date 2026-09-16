@@ -14,7 +14,7 @@
  */
 
 import type { CanonicalConfig, CanonicalWorkflow, EditorKind, LlmRequestConfig } from "./nodes";
-import { getNodeDefinition, portsForType } from "./node-definitions";
+import { getNodeDefinition, KNOWN_PROVIDERS, portsForType } from "./node-definitions";
 
 export interface Issue {
   nodeId?: string;
@@ -41,8 +41,6 @@ export interface ValidationResult {
 
 export type LaneRef = { id: string; baseUrl: string };
 
-const KNOWN_PROVIDERS = new Set(["anthropic", "openai"]);
-
 export function validateConfig(type: EditorKind, config: CanonicalConfig, issues: Issue[]): void {
   const def = getNodeDefinition(type);
   if (!def) return;
@@ -66,8 +64,23 @@ export function validateConfig(type: EditorKind, config: CanonicalConfig, issues
   }
   if (config.kind === "llm") {
     const llm = config.config;
-    if (llm?.provider && !KNOWN_PROVIDERS.has(llm.provider)) {
+    if (llm?.provider && !KNOWN_PROVIDERS.includes(llm.provider as never)) {
       issues.push(issueFor(config, { field: "provider", severity: "warn", message: `Provider '${llm.provider}' is not in the known set (anthropic, openai) — backend will verify.` }));
+    }
+    // Provider and protocol are separate axes; an inconsistent pairing
+    // (e.g. provider `anthropic` + protocol `openai_chat`) is a config
+    // error, not a warn-and-drop. `openai_responses` is a valid protocol
+    // value (not a provider) — it must never warn as a provider.
+    if (llm?.provider && llm?.protocol) {
+      const p = llm.provider.toLowerCase();
+      const proto = llm.protocol.toLowerCase();
+      if (
+        (p === "anthropic" && proto !== "anthropic" && proto !== "anthropic_messages") ||
+        (p === "openai" && proto !== "openai_chat" && proto !== "openai_chat_completions" && proto !== "openai_responses") ||
+        (p === "openai_responses")
+      ) {
+        issues.push(issueFor(config, { field: "provider", severity: "error", message: `Provider '${llm.provider}' is inconsistent with protocol '${llm.protocol}'.` }));
+      }
     }
   }
   if (config.kind === "input" && config.variables) {

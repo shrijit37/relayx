@@ -102,11 +102,18 @@ export const STREAM_PROTOCOLS = [
   { value: "anthropic", label: "Anthropic Messages" },
 ];
 
+/** Provider names KNOWN on the editor — the wire protocol is a separate
+ *  axis (`STREAM_PROTOCOLS`); a provider + protocol combination must be
+ *  consistent for the backend to accept it. */
+export const KNOWN_PROVIDERS = ["anthropic", "openai"] as const;
+
 const LLM_FIELDS: FieldDef[] = [
-  { name: "provider", label: "Provider", type: "provider", reference: "providers", placeholder: "e.g. anthropic" },
+  { name: "provider", label: "Provider", type: "provider", reference: "providers", placeholder: "e.g. anthropic",
+    help: "Display reference — the runtime routes by lane + protocol; the backend has no provider field." },
   { name: "model", label: "Model", type: "model", reference: "models", placeholder: "e.g. claude-sonnet" },
   { name: "lane", label: "Lane", type: "lane", reference: "lanes", required: true, placeholder: "lane id" },
-  { name: "protocol", label: "Protocol", type: "enum", options: STREAM_PROTOCOLS, placeholder: "lane default" },
+  { name: "protocol", label: "Protocol", type: "enum", options: STREAM_PROTOCOLS, placeholder: "lane default",
+    help: "Wire protocol on the upstream. Must match the lane's provider (see validation)." },
   { name: "temperature", label: "Temperature", type: "number", min: 0, max: 2, step: 0.1, default: 0.2 },
   { name: "maxTokens", label: "Max tokens", type: "integer", min: 1, default: 1024 },
   { name: "stream", label: "Streaming", type: "boolean", default: true },
