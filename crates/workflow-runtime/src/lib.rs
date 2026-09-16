@@ -13,6 +13,7 @@ pub mod compiler;
 pub mod context;
 pub mod error;
 pub mod execution;
+pub mod extension;
 pub mod fast_path;
 pub mod milestone;
 pub mod nodes;
@@ -25,9 +26,12 @@ pub use compiler::{CompileContext, CompileError, compile_workflow};
 pub use context::{
     AsLaneClient, ExecutionContext, ExecutionMetadata, GatewayHttpClient, gateway_client,
 };
-pub use error::{NodeError, WorkflowError};
+pub use error::{ExtensionError, NodeError, WorkflowError};
 pub use execution::{
     EdgeCondition, ExecEdge, ExecNode, ExecutionPlan, NodeRuntime, PlanClassification,
+};
+pub use extension::{
+    ExtensionExecutor, ExtensionRegistry, ExtensionSpec, ExtensionSpecSnapshot, ExtensionValidator,
 };
 pub use milestone::{MilestoneReporter, NoopReporter};
 pub use nodes::{NodeInput, NodeKind, NodeOutput, RuntimeValue};

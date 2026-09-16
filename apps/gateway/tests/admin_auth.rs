@@ -66,6 +66,7 @@ fn passthrough_workflow() -> Workflow {
 fn wire_snapshot() -> relay_gateway::observability::WireSnapshot {
     relay_gateway::observability::WireSnapshot {
         snapshot_version: 1,
+        extensions: vec![],
         workflows: vec![relay_gateway::observability::WireWorkflow {
             id: "echo-wf".into(),
             workflow: passthrough_workflow(),

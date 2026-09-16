@@ -33,6 +33,7 @@ pub fn compile_workflow_with_lanes(
 
     let ctx = crate::CompileContext {
         lanes: Arc::new(lane_registry),
+        extensions: None,
     };
     crate::compile_workflow(workflow, &ctx).map_err(Into::into)
 }

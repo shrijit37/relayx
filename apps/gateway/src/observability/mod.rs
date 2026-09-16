@@ -247,6 +247,20 @@ pub struct WireSnapshot {
     pub snapshot_version: u64,
     /// Workflows (plans to compile and publish).
     pub workflows: Vec<WireWorkflow>,
+    /// Extension specs (kind + version) for observability. The actual
+    /// validator/executor trait objects are not serialized — they live
+    /// in the runtime `ExtensionRegistry`, not on the wire.
+    #[serde(default)]
+    pub extensions: Vec<WireExtension>,
+}
+
+/// An extension spec on the wire (kind + version only).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WireExtension {
+    /// The extension kind identifier.
+    pub kind: String,
+    /// Version of this extension.
+    pub version: u64,
 }
 
 /// A lane's runtime configuration within a `WireSnapshot`.
@@ -282,6 +296,11 @@ impl PublicationState {
     /// publishes nothing), so a bad plan never reaches the data plane.
     fn compile_snapshot(&self, wire: &WireSnapshot) -> Result<Arc<RuntimeSnapshot>, String> {
         let mut builder = workflow_runtime::RuntimeSnapshotBuilder::new(wire.snapshot_version);
+
+        // Record extension specs (kind + version) as snapshot metadata.
+        for ext in &wire.extensions {
+            builder = builder.with_extension(ext.kind.clone(), ext.version);
+        }
 
         // Union of lane name → runtime lane config across every workflow.
         let mut lane_registry = workflow_runtime::context::LaneRegistry::new();
@@ -608,6 +627,7 @@ pub fn admin_router_with_publication(
                         deadline,
                         Some(tx.clone()),
                         cancel_run,
+                        None,
                     ) => r,
                     _ = tx.closed() => {
                         cancel.cancel();
@@ -700,6 +720,7 @@ pub fn admin_router_with_publication(
             deadline,
             None,
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await?;
 

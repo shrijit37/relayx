@@ -79,6 +79,7 @@ fn passthrough_compiled() -> workflow_runtime::ExecutionPlan {
 fn wire_snapshot(version: u64) -> WireSnapshot {
     WireSnapshot {
         snapshot_version: version,
+        extensions: vec![],
         workflows: vec![WireWorkflow {
             id: "echo-wf".into(),
             workflow: passthrough_workflow(),
@@ -262,6 +263,7 @@ async fn published_lanes_carry_resolved_authorization() {
 
     let wire = WireSnapshot {
         snapshot_version: 1,
+        extensions: vec![],
         workflows: vec![WireWorkflow {
             id: "echo-wf".into(),
             workflow: passthrough_workflow(),
@@ -299,6 +301,7 @@ async fn published_lanes_carry_resolved_authorization() {
     // The default (test-only) path must NOT leak a credential by accident.
     let plain = WireSnapshot {
         snapshot_version: 2,
+        extensions: vec![],
         workflows: vec![WireWorkflow {
             id: "echo-wf".into(),
             workflow: passthrough_workflow(),

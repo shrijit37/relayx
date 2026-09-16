@@ -33,6 +33,7 @@ Initial categories:
 - condition
 - fallback
 - retry
+- custom (extension-registered, out-of-process worker RPC)
 - MCP discovery
 - tool activation
 - Skill activation
@@ -73,6 +74,33 @@ IR should be:
 - serializable
 - independent of React Flow
 - cheap to execute
+
+## Custom node execution
+
+Custom nodes are externally registered node kinds. The runtime refuses to
+execute them unless an `ExtensionRegistry` is installed in the
+`ExecutionContext`. Extensions execute out-of-process via worker RPC —
+never `dlopen` in the gateway process.
+
+```text
+Workflow JSON (CustomConfig { kind, payload })
+    |
+    v
+ExtensionRegistry.get(kind) -> ExtensionSpec { validator, executor }
+    |
+    v
+ExtensionExecutor.execute(config, input) -> NodeOutput
+    |
+    v
+Worker RPC (Unix domain socket) -> External process
+```
+
+The compiler is lenient: Custom nodes pass through even if the extension
+kind is not registered. Execution-time resolution is the enforcement
+point. The compiler does emit a warning for unregistered kinds.
+
+The plan hash includes the opaque `CustomConfig` payload, so any change
+to the payload produces a different plan hash.
 
 ## Static validation
 
