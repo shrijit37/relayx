@@ -2,7 +2,10 @@
 model = "big-pickle"
 large_model = "big-pickle"
 turbo_model = "big-pickle"
-custom_model_max_tokens = 128000
+# Custom (gateway-defined) model names are not in PR-Agent's built-in
+# MAX_TOKENS table; without this every run fails with
+# "Model big-pickle is not defined in MAX_TOKENS".
+custom_model_max_tokens = 200000
 
 [pr_reviewer]
 extra_instructions = """You are reviewing a Rust + TypeScript AI gateway project (relay-x).
