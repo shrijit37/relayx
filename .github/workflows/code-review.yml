@@ -1,0 +1,31 @@
+name: Code Review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+jobs:
+  review:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/review'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Open Code Review
+        uses: alibaba/open-code-review@main
+        with:
+          llm_url: https://gateway.shrijit.tech/v1
+          llm_auth_token: ${{ secrets.GATEWAY_AUTH_TOKEN }}
+          llm_model: big-pickle
+          llm_use_anthropic: true
+          language: English
+          effort: high
+          stream_progress: 'false'
+          sticky_summary: 'true'
+          incremental: 'true'
