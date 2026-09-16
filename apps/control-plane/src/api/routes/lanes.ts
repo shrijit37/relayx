@@ -37,7 +37,9 @@ export function registerLaneRoutes(
     } = {
       project_id: parsed.data.project_id,
       provider_id: parsed.data.provider_id ?? null,
-      endpoint: parsed.data.endpoint,
+      // The DB column is NOT NULL; the runtime ignores `endpoint`, so derive
+      // a display value from the base URL when the client omits it.
+      endpoint: parsed.data.endpoint ?? parsed.data.base_url,
       base_url: parsed.data.base_url,
       egress: parsed.data.egress,
       proxy_url: parsed.data.proxy_url ?? null,

@@ -414,6 +414,27 @@ describe("REST API", () => {
     expect(lane.proxy_url).toBe("http://proxy.example.com:8080");
   });
 
+  test("lane endpoint is optional and defaults to the base_url", async () => {
+    // `endpoint` is display-only (the runtime forwards to `base_url`); the
+    // DB column is NOT NULL, so the API derives it from the base URL when
+    // the client omits it instead of rejecting the request.
+    const res = await fetch(`${base()}/lanes`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: "lane-no-endpoint",
+        name: "no-endpoint",
+        project_id: "proj_default",
+        base_url: "http://127.0.0.1:9002",
+        egress: "direct",
+      }),
+    });
+    expect(res.status).toBe(201);
+    const lane = (await res.json()) as { id: string; endpoint: string };
+    expect(lane.id).toBe("lane-no-endpoint");
+    expect(lane.endpoint).toBe("http://127.0.0.1:9002");
+  });
+
   test("validate + compile through the API yields a plan hash", async () => {
     // Seed a lane, workflow, version.
     await fetch(`${base()}/lanes`, {
