@@ -33,8 +33,28 @@ jobs:
       pull-requests: write
       issues: write
     steps:
+      # The review action only posts its sticky summary AFTER the review
+      # finishes, so a long run looks silent on the PR.
+      # scripts/review-liveness.sh gives it a live heartbeat comment (updated
+      # in place with the last 5 files reviewed, deleted by the final always()
+      # step on success, kept as a red banner on failure). The
+      # review-cleanup workflow removes stale comments when this job cannot
+      # run its final step (runner death).
+      - name: Post liveness comment
+        id: liveness
+        env:
+          # Resolve the PR number the same way the action itself does:
+          # explicit pr_number input, then the event payload.
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/review-liveness.sh start "${PR_NUMBER}" "${GITHUB_RUN_ID}" \
+            > "$RUNNER_TEMP/liveness-comment-id.txt"
+          echo "comment-id=$(cat "$RUNNER_TEMP/liveness-comment-id.txt")" >> "$GITHUB_OUTPUT"
+
       - name: Open Code Review
         # Pin to a full commit SHA (supply-chain hardening).
+        id: review
         uses: alibaba/open-code-review@f1101fd7f51304c82e4a4f292bbee88aea0823cf
         with:
           review_concurrency: '1'
@@ -47,9 +67,43 @@ jobs:
           llm_use_anthropic: true
           language: English
           effort: high
-          stream_progress: 'false'
+          # stream_progress streams per-file [ocr] progress to stderr
+          # (/tmp/ocr-stderr.log), which the liveness watcher consumes.
+          stream_progress: 'true'
           sticky_summary: 'true'
           incremental: 'true'
           base_ref: ${{ inputs.base_ref || '' }}
           head_sha: ${{ inputs.head_sha || '' }}
           pr_number: ${{ inputs.pr_number || '' }}
+
+      # Live-update the liveness comment while the review runs. Background
+      # processes persist on the same runner, so the whole loop survives the
+      # step.
+      - name: Watch review progress
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
+          COMMENT_ID: ${{ steps.liveness.outputs.comment-id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/review-liveness.sh watch "${PR_NUMBER}" "${COMMENT_ID}" "${GITHUB_RUN_ID}" \
+            /tmp/ocr-stderr.log &
+          echo $! > "$RUNNER_TEMP/liveness-watch-pid.txt"
+
+      # Delete the liveness comment on success (the sticky summary stays as
+      # the only visible output); keep it as a red "stopped" banner otherwise,
+      # so a dead review is never silent.
+      - name: Finalize liveness comment
+        if: always()
+        env:
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
+          COMMENT_ID: ${{ steps.liveness.outputs.comment-id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f "$RUNNER_TEMP/liveness-watch-pid.txt" ]; then
+            kill "$(cat "$RUNNER_TEMP/liveness-watch-pid.txt")" 2>/dev/null || true
+          fi
+          if [ "${{ steps.review.outcome }}" = "success" ]; then
+            scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" success
+          else
+            scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" "review ${{ steps.review.outcome }}"
+          fi

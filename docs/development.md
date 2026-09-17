@@ -231,7 +231,23 @@ git push --no-verify
 ```
 
 The PR review workflow (`.github/workflows/code-review.yml`) runs on the
-server and is deliberately not replayed by the local gate.
+server and is deliberately not replayed by the local gate. It uses the
+SHA-pinned `alibaba/open-code-review` action (the `ocr` CLI) and wraps it
+with a **liveness comment** so reviewers can see progress on the PR during a
+long review run:
+
+- `scripts/review-liveness.sh start` posts a hidden `<!-- ocr-liveness -->`
+  comment on the PR (delete any stale comments from prior runs first).
+- `scripts/review-liveness.sh watch` polls the OCR stderr log every ~15s and
+  PATCHes the comment in place with the last 5 files reviewed plus a heartbeat.
+- `scripts/review-liveness.sh finish` deletes the comment on success or
+  rewrites it into a red "review stopped" banner on failure.
+- `scripts/review-liveness.sh finish-pr` is called by the independent
+  `review-cleanup.yml` workflow (triggered by `workflow_run`) as a safety net
+  for runner death: it finds the comment by run tag and deletes or banners it.
+
+The tests are in `scripts/test-review-liveness.sh` (runs against a mocked
+`gh` in a temp sandbox).
 
 ## CI pipeline
 
