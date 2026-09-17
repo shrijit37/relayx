@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use workflow_runtime::RuntimeSnapshotBuilder;
 use workflow_runtime::context::{
-    AsLaneClient, ExecutionContext, GatewayHttpClient, LaneEntry, LaneRegistry,
+    AsLaneClient, ExecutionContext, LaneClient, LaneEntry, LaneRegistry,
 };
 use workflow_runtime::milestone::MilestoneReporter;
 use workflow_schema::*;
@@ -22,6 +22,8 @@ fn lane(id: &str, url: &str) -> LaneEntry {
             Err(e) => panic!("invalid lane url: {e}"),
         },
         authorization: None,
+        egress: "direct".into(),
+        proxy_url: None,
     }
 }
 
@@ -82,10 +84,10 @@ fn snapshot_with_lanes() -> Arc<workflow_runtime::RuntimeSnapshot> {
 
 /// A lane-client resolver that hands back a stub client for one lane.
 #[derive(Clone)]
-struct StubLaneClients(Arc<GatewayHttpClient>);
+struct StubLaneClients(Arc<LaneClient>);
 
 impl AsLaneClient for StubLaneClients {
-    fn client_for_lane(&self, lane_id: &str) -> Option<Arc<GatewayHttpClient>> {
+    fn client_for_lane(&self, lane_id: &str) -> Option<Arc<LaneClient>> {
         if lane_id == "lane-a" {
             Some(self.0.clone())
         } else {
@@ -94,11 +96,8 @@ impl AsLaneClient for StubLaneClients {
     }
 }
 
-fn stub_client() -> Arc<GatewayHttpClient> {
-    Arc::new(
-        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-            .build(hyper_util::client::legacy::connect::HttpConnector::new()),
-    )
+fn stub_client() -> Arc<LaneClient> {
+    Arc::new(LaneClient::direct(std::time::Duration::from_secs(30), 16))
 }
 
 #[test]

@@ -8,16 +8,94 @@ use mock_upstream::{MockConfig, MockMode, spawn_mock};
 use relay_gateway::config::GatewayConfig;
 use relay_gateway::server::GatewayServer;
 
+use std::io;
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
-/// Pick an ephemeral free port by binding and dropping the listener.
+/// A port that is reserved (a `TcpListener` bound and held open) so a
+/// concurrent test binary cannot steal it between pick and bind.
+///
+/// The old `free_port()` bound a listener, read its port, and dropped it
+/// immediately — a TOCTOU race: under parallel `cargo test` binaries, two
+/// spawns could be handed the same port and one would fail to bind with
+/// "Address already in use". Holding the listener open until the gateway
+/// actually binds closes that window.
+pub struct ReservedPort {
+    listener: TcpListener,
+}
+
+impl ReservedPort {
+    /// Bind an ephemeral loopback port and keep it reserved.
+    pub fn new() -> io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        Ok(Self { listener })
+    }
+
+    pub fn port(&self) -> u16 {
+        self.listener
+            .local_addr()
+            .map(|a| a.port())
+            .unwrap_or(18080)
+    }
+
+    /// Hand over the reserved listener for the gateway to serve on.
+    ///
+    /// The listener is converted to a tokio listener and returned, so the
+    /// port is bound continuously from reservation until the gateway
+    /// serves — no window for a concurrent test to steal it.
+    pub fn into_tokio(self) -> io::Result<tokio::net::TcpListener> {
+        self.listener.set_nonblocking(true)?;
+        tokio::net::TcpListener::from_std(self.listener)
+    }
+}
+
+/// Pick an ephemeral free port, reserved (held open) until released.
+///
+/// Prefer [`ReservedPort`] for anything that later binds the port; this
+/// bare form is only for callers that need a number immediately.
 pub fn free_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .ok()
-        .and_then(|l| l.local_addr().ok())
-        .map(|a| a.port())
-        .unwrap_or(18080)
+    ReservedPort::new().map(|r| r.port()).unwrap_or(18080)
+}
+
+/// A pair of reserved listeners (proxy + admin) for one gateway.
+///
+/// Two consecutive bind-and-drop `free_port()` calls can be handed the
+/// *same* port once the first is released — the second call binds port 0
+/// again and the OS may reuse it — so the config ends up with proxy and
+/// admin on one address and the second bind fails with "Address already
+/// in use". Reserving both listeners up front makes the two ports distinct
+/// by construction and keeps them bound until the gateway serves them.
+pub struct ReservedListeners {
+    proxy: ReservedPort,
+    admin: ReservedPort,
+}
+
+impl ReservedListeners {
+    /// Reserve a distinct proxy and admin port.
+    pub fn new() -> io::Result<Self> {
+        Ok(Self {
+            proxy: ReservedPort::new()?,
+            admin: ReservedPort::new()?,
+        })
+    }
+
+    pub fn proxy_addr(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.proxy.port()))
+    }
+
+    pub fn admin_addr(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.admin.port()))
+    }
+
+    /// Convert both reservations to tokio listeners for `run_with_listeners`.
+    pub fn into_tokio(self) -> io::Result<(tokio::net::TcpListener, tokio::net::TcpListener)> {
+        Ok((self.proxy.into_tokio()?, self.admin.into_tokio()?))
+    }
+}
+
+/// Reserve a distinct proxy/admin port pair for a hand-rolled gateway spawn.
+pub fn reserved_listeners() -> io::Result<ReservedListeners> {
+    ReservedListeners::new()
 }
 
 /// An error produced when a test fixture fails to spawn.
@@ -53,10 +131,16 @@ pub async fn spawn_gateway_with_timeout(
     upstream_addr: SocketAddr,
     timeout_ms: u64,
 ) -> Result<GatewayAddrs, SpawnError> {
-    let port = free_port();
-    let admin_port = free_port();
-    let listen = SocketAddr::from(([127, 0, 0, 1], port));
-    let admin_listen = SocketAddr::from(([127, 0, 0, 1], admin_port));
+    // Reserve both ports up front: the listeners stay bound while the config
+    // is built and the server spawns, so a concurrent test binary cannot
+    // steal the port between selection and bind (the "Address already in
+    // use" flake under parallel cargo test).
+    let proxy_reserved =
+        ReservedPort::new().map_err(|e| SpawnError(format!("reserve proxy port: {e}")))?;
+    let admin_reserved =
+        ReservedPort::new().map_err(|e| SpawnError(format!("reserve admin port: {e}")))?;
+    let listen = SocketAddr::from(([127, 0, 0, 1], proxy_reserved.port()));
+    let admin_listen = SocketAddr::from(([127, 0, 0, 1], admin_reserved.port()));
 
     let config = GatewayConfig::from_toml_str(&format!(
         r#"
@@ -98,10 +182,20 @@ max_idle = 16
     ))
     .map_err(|e| SpawnError(format!("gateway config parse: {e}")))?;
 
+    let proxy_listener = proxy_reserved
+        .into_tokio()
+        .map_err(|e| SpawnError(format!("proxy listener convert: {e}")))?;
+    let admin_listener = admin_reserved
+        .into_tokio()
+        .map_err(|e| SpawnError(format!("admin listener convert: {e}")))?;
+
     tokio::spawn(async move {
         match GatewayServer::new(config) {
             Ok(server) => {
-                if let Err(e) = server.run().await {
+                if let Err(e) = server
+                    .run_with_listeners(proxy_listener, admin_listener)
+                    .await
+                {
                     eprintln!("gateway server exited: {e:#}");
                 }
             }
@@ -173,10 +267,13 @@ pub async fn spawn_translation_gateway(
     source_protocol: &str,
     target_protocol: &str,
 ) -> Result<GatewayAddrs, SpawnError> {
-    let port = free_port();
-    let admin_port = free_port();
-    let listen = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let admin_listen = std::net::SocketAddr::from(([127, 0, 0, 1], admin_port));
+    // Reserve both ports up front (see spawn_gateway_with_timeout).
+    let proxy_reserved =
+        ReservedPort::new().map_err(|e| SpawnError(format!("reserve proxy port: {e}")))?;
+    let admin_reserved =
+        ReservedPort::new().map_err(|e| SpawnError(format!("reserve admin port: {e}")))?;
+    let listen = std::net::SocketAddr::from(([127, 0, 0, 1], proxy_reserved.port()));
+    let admin_listen = std::net::SocketAddr::from(([127, 0, 0, 1], admin_reserved.port()));
 
     let config = GatewayConfig::from_toml_str(&format!(
         r#"
@@ -208,10 +305,20 @@ max_idle = 16
     ))
     .map_err(|e| SpawnError(format!("gateway config parse: {e}")))?;
 
+    let proxy_listener = proxy_reserved
+        .into_tokio()
+        .map_err(|e| SpawnError(format!("proxy listener convert: {e}")))?;
+    let admin_listener = admin_reserved
+        .into_tokio()
+        .map_err(|e| SpawnError(format!("admin listener convert: {e}")))?;
+
     tokio::spawn(async move {
         match GatewayServer::new(config) {
             Ok(server) => {
-                if let Err(e) = server.run().await {
+                if let Err(e) = server
+                    .run_with_listeners(proxy_listener, admin_listener)
+                    .await
+                {
                     eprintln!("gateway server exited: {e:#}");
                 }
             }

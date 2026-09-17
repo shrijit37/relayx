@@ -161,7 +161,11 @@ workflow_id = "wf6"
     let publication = Arc::new(PublicationState::new(
         publisher.clone(),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
 
     // The wire snapshot carries the lane as a `WireLane` with a resolved
@@ -178,6 +182,8 @@ workflow_id = "wf6"
                 WireLane {
                     base_url: lane_url.clone(),
                     authorization: Some("Bearer sk-test-credential".into()),
+                    egress: "direct".into(),
+                    proxy_url: None,
                 },
             )]),
         }],
@@ -327,7 +333,11 @@ workflow_id = "wf6"
     let publication = Arc::new(PublicationState::new(
         Arc::new(InMemoryPublisher::new()),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
 
     // v1: valid lane URL, publishes fine.
@@ -343,6 +353,8 @@ workflow_id = "wf6"
                 WireLane {
                     base_url: format!("http://{}", mock.addr),
                     authorization: None,
+                    egress: "direct".into(),
+                    proxy_url: None,
                 },
             )]),
         }],
@@ -366,6 +378,8 @@ workflow_id = "wf6"
                 WireLane {
                     base_url: "not a url".into(),
                     authorization: None,
+                    egress: "direct".into(),
+                    proxy_url: None,
                 },
             )]),
         }],

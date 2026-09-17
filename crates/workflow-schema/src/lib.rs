@@ -92,6 +92,31 @@ pub struct InputConfig {
     /// Expected input port type.
     #[serde(default)]
     pub input_type: PortType,
+    /// Editor metadata persisted on the wire (display/hydration only — the
+    /// runtime ignores value/description/variables for execution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Human-readable description of the accepted input (display only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Declared input variables (display only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<Vec<InputVariable>>,
+}
+
+/// Declared expected input variable (editor metadata, not executed).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InputVariable {
+    /// Variable name.
+    pub name: String,
+    /// Value type (string | number | boolean | object | array).
+    pub r#type: String,
+    /// Optional description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Whether the variable is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
 }
 
 /// Configuration for an Output node.
@@ -100,6 +125,10 @@ pub struct OutputConfig {
     /// Output port type.
     #[serde(default)]
     pub output_type: PortType,
+    /// Editor metadata persisted on the wire (display/hydration only — the
+    /// runtime ignores `value` for execution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
 }
 
 /// Configuration for an LLM node.
@@ -237,10 +266,32 @@ pub struct FallbackConfig {
     /// failures. `0` means try each provider exactly once.
     #[serde(default = "fallback_default_rounds")]
     pub rounds: u32,
+    /// How providers are selected across requests.
+    ///
+    /// - `Sequential`: always start at provider[0] (pure ordered fallback).
+    /// - `RoundRobin`: each request starts at a different provider
+    ///   (requests spread across egress IPs / lanes; 429 failover advances
+    ///   to the next lane in the same round).
+    #[serde(default)]
+    pub strategy: FallbackStrategy,
+    /// HTTP status codes that trigger immediate failover to the next
+    /// provider in the current round. Defaults to `[429]` — a fresh fallback
+    /// rotates on rate limits out of the box. An empty list disables
+    /// status-driven failover (only transport/policy errors advance).
+    #[serde(default = "default_fallback_retry_on")]
+    pub retry_on: Vec<u16>,
 }
 
-fn fallback_default_rounds() -> u32 {
-    1
+/// How providers are selected across requests in a Fallback node.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackStrategy {
+    /// Always start at provider[0] — pure ordered fallback.
+    #[default]
+    Sequential,
+    /// Each request starts at the next provider (fetch_add(1) % n).
+    /// 429 failover advances to the next provider in the same round.
+    RoundRobin,
 }
 
 /// A single provider entry in a fallback chain.
@@ -253,6 +304,14 @@ pub struct FallbackProvider {
     /// Optional protocol override. If unset, defaults to OpenAI Chat.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
+}
+
+fn fallback_default_rounds() -> u32 {
+    1
+}
+
+fn default_fallback_retry_on() -> Vec<u16> {
+    vec![429]
 }
 
 /// Configuration for a Retry node.
@@ -269,10 +328,19 @@ pub struct RetryConfig {
     /// Retry on provider errors (5xx / connection).
     #[serde(default = "default_true")]
     pub on_provider_error: bool,
+    /// HTTP status codes that trigger an unconditional retry, regardless of
+    /// `on_provider_error`/`on_timeout`. `429` is the canonical use-case
+    /// (rate-limit → immediate retry on same lane).
+    #[serde(default = "default_retry_on")]
+    pub retry_on: Vec<u16>,
 
     /// The LLM node configuration this retry re-invokes. Replaces the
     /// hard-coded "default" lane the previous implementation invented.
     pub target: LlmConfig,
+}
+
+fn default_retry_on() -> Vec<u16> {
+    vec![429]
 }
 
 fn default_retry_delay_ms() -> u64 {

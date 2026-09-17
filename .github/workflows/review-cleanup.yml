@@ -1,0 +1,69 @@
+name: Review Cleanup
+
+# Safety net for the review liveness comment (scripts/review-liveness.sh).
+# The main "Code Review" workflow deletes its liveness comment in a final
+# always() step, but when the job dies mid-run (runner failure, lost job) that
+# step never runs. This workflow runs independently, after "Code Review"
+# finishes, and finishes the liveness comment: delete on success, red banner
+# otherwise.
+#
+# The comment stays if the run is still in progress (lifecycle: queued /
+# in_progress / waiting / requested / pending) so the main job is not racing
+# an in-flight review, and the same exclusive concurrency group means a fresh
+# "Code Review" run superseding a cancelled one will post its own comment and
+# delete the previous run's stale one.
+
+on:
+  workflow_run:
+    workflows: ["Code Review"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: review-cleanup-${{ github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: github.event.workflow_run.conclusion != 'success' || true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve run conclusion and PR number
+        id: resolve
+        env:
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
+          echo "pr-number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "run-id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Trigger run: $RUN_ID, conclusion: $CONCLUSION, PR: ${PR_NUMBER:-none}"
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Finish liveness comment
+        if: steps.resolve.outputs.pr-number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr="${{ steps.resolve.outputs.pr-number }}"
+          conclusion="${{ steps.resolve.outputs.conclusion }}"
+          # The banner needs the run id the comment was posted under; it is
+          # embedded in the comment body via the run tag, so the finish path
+          # just passes the trigger run id. The script only cleans comments
+          # for the CURRENT run, and the stale ones (from dead runners) get
+          # deleted by the next review run's start step anyway.
+          if [ "$conclusion" = "success" ]; then
+            # Find and delete liveness comments for THIS run.
+            bash "${{ github.workspace }}/scripts/review-liveness.sh" \
+              finish-pr "$pr" "$conclusion" "${{ steps.resolve.outputs.run-id }}"
+          else
+            bash "${{ github.workspace }}/scripts/review-liveness.sh" \
+              finish-pr "$pr" "$conclusion" "${{ steps.resolve.outputs.run-id }}"
+          fi

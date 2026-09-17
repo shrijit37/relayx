@@ -49,6 +49,8 @@ export type LaneRow = {
   endpoint: string;
   base_url: string;
   egress: string;
+  /** Proxy URL for masked egress (http://… or socks5://…); null for direct. */
+  proxy_url: string | null;
   policies: string[];
   credential_ref: CredentialRef | null;
   created_at: string;
@@ -79,7 +81,7 @@ export type WorkflowActiveRow = {
 /** Update SQL uses only these columns, regardless of what a caller passes.
  *  Unknown fields are silently ignored rather than interpolated into SQL. */
 const ALLOWED_PROVIDER_UPDATE_FIELDS = new Set(["name", "protocol", "base_url", "model"]);
-const ALLOWED_LANE_UPDATE_FIELDS = new Set(["provider_id", "endpoint", "base_url", "egress", "policies", "credential_ref"]);
+const ALLOWED_LANE_UPDATE_FIELDS = new Set(["provider_id", "endpoint", "base_url", "egress", "proxy_url", "policies", "credential_ref"]);
 const ALLOWED_RUN_UPDATE_FIELDS = new Set(["status", "output", "error", "completed_at"]);
 
 const newId = (): string => crypto.randomUUID();
@@ -268,9 +270,9 @@ export const lanes = {
   ): Promise<LaneRow> {
     const id = data.id ?? newId();
     const { rows } = await pool.query<LaneRow>(
-      `INSERT INTO lanes (id, project_id, provider_id, endpoint, base_url, egress, policies, credential_ref)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [id, data.project_id, data.provider_id, data.endpoint, data.base_url, data.egress, data.policies, data.credential_ref],
+      `INSERT INTO lanes (id, project_id, provider_id, endpoint, base_url, egress, proxy_url, policies, credential_ref)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [id, data.project_id, data.provider_id, data.endpoint, data.base_url, data.egress, data.proxy_url ?? null, data.policies, data.credential_ref],
     );
     return rows[0]!;
   },
@@ -278,7 +280,7 @@ export const lanes = {
   async update(
     pool: Pool,
     id: string,
-    data: Partial<Pick<LaneRow, "endpoint" | "base_url" | "egress" | "policies" | "provider_id" | "credential_ref">>,
+    data: Partial<Pick<LaneRow, "endpoint" | "base_url" | "egress" | "proxy_url" | "policies" | "provider_id" | "credential_ref">>,
   ): Promise<LaneRow | null> {
     const fields: string[] = [];
     const values: unknown[] = [id];

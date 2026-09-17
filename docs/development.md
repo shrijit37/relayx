@@ -43,7 +43,9 @@
 │       ├── hot-path-auditor.md
 │       └── protocol-fidelity-reviewer.md
 ├── .githooks/pre-commit        # Rust policy + docs-truth gate
+├── .githooks/pre-push          # Full CI battery gate (runs locally before every push)
 ├── scripts/verify-docs.sh      # Documentation truth verifier
+├── scripts/sweep-build.sh      # Safe build-artifact GC (cargo-sweep + web caches)
 ├── .github/
 │   ├── workflows/ci.yml        # CI: rust, msrv, web, control-plane, docs
 │   └── dependabot.yml          # weekly grouped dependency updates
@@ -68,7 +70,7 @@ bun test          # Serializer + run-state reducer + WorkflowBuilder interaction
 cd apps/control-plane
 bun install
 bun run dev       # Fastify API on :9091 (needs Postgres on 127.0.0.1:5433)
-bun test          # Integration tests (real Postgres + in-process mock gateway)
+bun run test      # Integration tests (real Postgres + in-process mock gateway)
 ```
 
 ## Local development
@@ -190,6 +192,63 @@ cargo clippy --all-targets --all-features --workspace -- -D warnings
 ./.claude/hooks/check-rust-policy.sh --all
 ```
 
+### Build artifacts and storage
+
+`target/` accumulates stale incremental dirs and dep artifacts from old
+compiler/feature combos; the dev/release profiles are already performance-tuned
+(see [Profiles](#build)), so the bloat is accumulation, not configuration.
+`sweep-build.sh` prunes it safely — it uses `cargo-sweep`, which keeps the
+artifacts used recently (rebuilds stay fast) and removes the rest — and
+optionally clears regenerable web caches:
+
+```bash
+scripts/sweep-build.sh              # maximal safe prune (keep today's warm cache)
+scripts/sweep-build.sh --days 7     # keep the last week, prune older artifacts
+scripts/sweep-build.sh --web        # also rm -rf .output + node_modules/.vite
+scripts/sweep-build.sh --dry-run    # show what would be removed, remove nothing
+```
+
+Unlike `cargo clean`, today's warm cache survives, so the next build stays as
+fast as before the sweep.
+
+## Push gate
+
+Git's `core.hooksPath` is `.githooks/` (see `docs/state.md` Hooks). The
+pre-push hook runs the **full CI battery locally** before every push (except
+deletions and tags) and blocks the push on any failure. It mirrors
+`.github/workflows/ci.yml` job-for-job — rust policy → fmt → docs → clippy →
+test → msrv → web → control-plane — and auto-starts the `relayx-pg` Postgres
+container (like `scripts/dev.sh`) when the control-plane tests need it. The
+pre-existing behind-main protection for `pr/*`, `feat/*`, `fix/*` branches is
+still enforced first.
+
+```bash
+# Print what the battery would run without running it:
+PRE_PUSH_DRY_RUN=1 git push
+
+# Deliberately bypass the gate (use only when you know why):
+git push --no-verify
+```
+
+The PR review workflow (`.github/workflows/code-review.yml`) runs on the
+server and is deliberately not replayed by the local gate. It uses the
+SHA-pinned `alibaba/open-code-review` action (the `ocr` CLI) and wraps it
+with a **liveness comment** so reviewers can see progress on the PR during a
+long review run:
+
+- `scripts/review-liveness.sh start` posts a hidden `<!-- ocr-liveness -->`
+  comment on the PR (delete any stale comments from prior runs first).
+- `scripts/review-liveness.sh watch` polls the OCR stderr log every ~15s and
+  PATCHes the comment in place with the last 5 files reviewed plus a heartbeat.
+- `scripts/review-liveness.sh finish` deletes the comment on success or
+  rewrites it into a red "review stopped" banner on failure.
+- `scripts/review-liveness.sh finish-pr` is called by the independent
+  `review-cleanup.yml` workflow (triggered by `workflow_run`) as a safety net
+  for runner death: it finds the comment by run tag and deletes or banners it.
+
+The tests are in `scripts/test-review-liveness.sh` (runs against a mocked
+`gh` in a temp sandbox).
+
 ## CI pipeline
 
 `.github/workflows/ci.yml` runs on push to `master`/`main` and all PRs:
@@ -227,7 +286,9 @@ which overrides whatever toolchain `rustup default` points at.
 
 1. **Install** — `bun install --frozen-lockfile`
 2. **Typecheck** — `tsc --noEmit`
-3. **Test** — `bun test` against a real Postgres 16 service container
+3. **Test** — `bun run test` against a real Postgres 16 service container
+   (the script carries `--timeout 20000`, so per-suite DB provisioning in
+   `beforeAll` cannot trip bun's default 5s hook timeout)
 
 The `postgres:16-alpine` service is published on host port **5433**, matching the
 `RELAYX_PG_PORT` default the app and test helpers read

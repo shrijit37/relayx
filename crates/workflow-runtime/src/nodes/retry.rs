@@ -61,14 +61,19 @@ pub async fn execute(
 
 /// Whether an error should trigger another attempt under the config policy.
 ///
-/// `ProtocolEngineError` has no dedicated Timeout variant, so timeouts are
-/// detected heuristically from provider-error messages ("timeout"). Retries
-/// trigger when `on_provider_error` is set for any provider-side failure, or
-/// when `on_timeout` is set for a timeout-classified one. Client-side/internal
-/// errors are never retried.
+/// `ProtocolEngineError` carries `status: Option<u16>` on `ProviderError`
+/// for real upstream responses.  429 (and any code in `config.retry_on`) is
+/// retried unconditionally — it is a transient rate-limit signal, not a
+/// sign that the lane itself is unhealthy.
 fn should_retry(config: &RetryConfig, e: &NodeError) -> bool {
     match e {
         NodeError::Provider(pe) => {
+            // Explicit status-code policy: 429 and any code in retry_on.
+            if let Some(status) = pe.status()
+                && config.retry_on.contains(&status)
+            {
+                return true;
+            }
             if config.on_provider_error {
                 return true;
             }
@@ -85,7 +90,7 @@ fn should_retry(config: &RetryConfig, e: &NodeError) -> bool {
 /// `ProviderError` with a message containing "timeout" or "timed out".
 fn is_timeout_error(pe: &protocol_core::error::ProtocolEngineError) -> bool {
     match pe {
-        protocol_core::error::ProtocolEngineError::ProviderError { message } => {
+        protocol_core::error::ProtocolEngineError::ProviderError { message, .. } => {
             let msg = message.to_lowercase();
             msg.contains("timeout") || msg.contains("timed out")
         }
@@ -105,6 +110,7 @@ mod tests {
             delay_ms: 0,
             on_timeout: true,
             on_provider_error: on_provider,
+            retry_on: vec![429],
             target: LlmConfig {
                 protocol: None,
                 model: None,
@@ -121,6 +127,7 @@ mod tests {
         let config = cfg(true);
         let err = NodeError::Provider(ProtocolEngineError::ProviderError {
             message: "upstream 500".into(),
+            status: None,
         });
         assert!(should_retry(&config, &err));
     }
@@ -130,6 +137,7 @@ mod tests {
         let config = cfg(false);
         let err = NodeError::Provider(ProtocolEngineError::ProviderError {
             message: "upstream 500".into(),
+            status: None,
         });
         assert!(!should_retry(&config, &err));
     }
@@ -146,6 +154,7 @@ mod tests {
         let config = cfg(false); // on_timeout = true, on_provider_error = false
         let err = NodeError::Provider(ProtocolEngineError::ProviderError {
             message: "upstream request failed: request timed out".into(),
+            status: None,
         });
         assert!(should_retry(&config, &err));
     }
@@ -158,6 +167,7 @@ mod tests {
         };
         let err = NodeError::Provider(ProtocolEngineError::ProviderError {
             message: "upstream request failed: request timed out".into(),
+            status: None,
         });
         assert!(!should_retry(&config, &err));
     }
@@ -171,8 +181,39 @@ mod tests {
         };
         let err = NodeError::Provider(ProtocolEngineError::ProviderError {
             message: "upstream request failed: request timed out".into(),
+            status: None,
         });
         assert!(should_retry(&config, &err));
+    }
+
+    #[test]
+    fn retry_on_status_triggers_retry_even_when_policy_denies() {
+        // retry_on=[429] retries a 429 even when on_provider_error=false and
+        // on_timeout=false — a 429 is transient, not lane-health.
+        let config = RetryConfig {
+            on_timeout: false,
+            on_provider_error: false,
+            ..cfg(false)
+        };
+        let err = NodeError::Provider(ProtocolEngineError::ProviderError {
+            message: "upstream 429".into(),
+            status: Some(429),
+        });
+        assert!(should_retry(&config, &err));
+    }
+
+    #[test]
+    fn non_retryable_status_not_retried() {
+        let config = RetryConfig {
+            on_timeout: false,
+            on_provider_error: false,
+            ..cfg(false)
+        };
+        let err = NodeError::Provider(ProtocolEngineError::ProviderError {
+            message: "upstream 403".into(),
+            status: Some(403),
+        });
+        assert!(!should_retry(&config, &err));
     }
 
     #[test]

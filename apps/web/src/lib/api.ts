@@ -20,6 +20,10 @@ const API_BASE: string =
 
 const jsonHeaders = { "content-type": "application/json" };
 
+/** Default project scope until a UI switcher lands (A8). Single source —
+ *  no scattered "proj_default" literals. */
+export const DEFAULT_PROJECT = "proj_default";
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -108,6 +112,19 @@ export async function publishWorkflow(
   };
 }
 
+/** Load a single workflow row (A3 — real row, not versions[0] hack). */
+export async function fetchWorkflow(workflowId: string): Promise<WorkflowRow> {
+  return req<WorkflowRow>(`/workflows/${encodeURIComponent(workflowId)}`);
+}
+
+/** Rename a workflow row (PUT /workflows/:id). */
+export async function renameWorkflow(workflowId: string, name: string): Promise<WorkflowRow> {
+  return req<WorkflowRow>(`/workflows/${encodeURIComponent(workflowId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+}
+
 /** Load workflow versions for the versions page (backend-derived). */
 export async function fetchWorkflowVersions(workflowId: string): Promise<VersionRow[]> {
   return req<VersionRow[]>(`/workflows/${workflowId}/versions`);
@@ -154,12 +171,14 @@ export type LaneRow = {
   endpoint: string;
   base_url: string;
   egress: string;
+  /** Proxy URL for masked egress (http://… or socks5://…); null for direct. */
+  proxy_url: string | null;
   policies: string[];
   credential_ref: { ref: string; provider: string } | null;
   created_at: string;
 };
 
-export async function fetchLanes(projectId = "proj_default"): Promise<LaneRow[]> {
+export async function fetchLanes(projectId = DEFAULT_PROJECT): Promise<LaneRow[]> {
   return req(`/lanes?project_id=${projectId}`);
 }
 
@@ -168,10 +187,13 @@ export async function createLane(input: {
   id?: string;
   name: string;
   project_id: string;
-  endpoint: string;
+  endpoint?: string;
   base_url: string;
-  egress?: string;
+  egress?: "direct" | "masked";
+  proxy_url?: string | null;
   policies?: string[];
+  provider_id?: string | null;
+  credential_ref?: { ref: string; provider: string } | null;
 }): Promise<LaneRow> {
   return req(`/lanes`, { method: "POST", body: JSON.stringify(input) });
 }
@@ -182,9 +204,11 @@ export async function updateLane(
   input: {
     endpoint?: string;
     base_url?: string;
-    egress?: string;
+    egress?: "direct" | "masked";
+    proxy_url?: string | null;
     policies?: string[];
     provider_id?: string | null;
+    credential_ref?: { ref: string; provider: string } | null;
   },
 ): Promise<LaneRow> {
   return req(`/lanes/${encodeURIComponent(id)}`, {
@@ -214,7 +238,7 @@ export async function saveWorkflowVersion(workflowId: string, workflow: Workflow
 }
 
 /** Create a new workflow row in the control plane. */
-export async function createWorkflow(name: string, projectId = "proj_default"): Promise<WorkflowRow> {
+export async function createWorkflow(name: string, projectId = DEFAULT_PROJECT): Promise<WorkflowRow> {
   return req<WorkflowRow>("/workflows", {
     method: "POST",
     body: JSON.stringify({ name, project_id: projectId }),
@@ -227,6 +251,22 @@ export async function validateWorkflow(
 ): Promise<{ plan_hash: string; status: string }> {
   const row = await ensureWorkflow(workflow);
   return req(`/workflows/${row.id}/validate`, {
+    method: "POST",
+    body: JSON.stringify({ workflow_json: workflow }),
+  });
+}
+
+/**
+ * Compile-only alias of validate (POST /workflows/:id/compile shares the
+ * backend `validateCompile` handler — routes/workflows.ts:140-141). Same
+ * request/response shape, no behavior difference; exposed so callers can
+ * name the compile intent explicitly.
+ */
+export async function compileWorkflow(
+  workflow: WorkflowJson,
+): Promise<{ plan_hash: string; status: string }> {
+  const row = await ensureWorkflow(workflow);
+  return req(`/workflows/${row.id}/compile`, {
     method: "POST",
     body: JSON.stringify({ workflow_json: workflow }),
   });
@@ -335,6 +375,30 @@ function parseSseEvent(part: string): { eventType: string; data: string } | null
   return { eventType, data: dataLines.join("\n") };
 }
 
+/** Non-stream run result (mirrors gateway/client.ts RunResponse + ACTIVE version). */
+export type RunResult = {
+  status: string;
+  request_id: string;
+  workflow_id: string;
+  workflow_version: number;
+  snapshot_version: number;
+  plan_hash: string;
+  output: unknown;
+};
+
+/**
+ * Execute the published ACTIVE version without streaming
+ * (POST /workflows/:id/run, no ?stream). Used as the fallback when the SSE
+ * body arrives empty (proxy stripping); the ACTIVE-only gate and durable run
+ * record stay backend-side (routes/workflows.ts:444-524).
+ */
+export async function runWorkflow(workflowId: string, body: unknown): Promise<RunResult> {
+  return req<RunResult>(`/workflows/${encodeURIComponent(workflowId)}/run`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
 /** Real control-plane + gateway health probe (both /healthz and /ready). */
 export type SystemHealth = {
   control_plane: { status: string; service?: string };
@@ -364,10 +428,13 @@ export type RunRow = {
   completed_at: string | null;
 };
 
-/** List run records, optionally filtered by workflow. */
-export async function fetchRuns(workflowId?: string): Promise<RunRow[]> {
-  const q = workflowId ? `?workflow_id=${encodeURIComponent(workflowId)}` : "";
-  return req(`/runs${q}`);
+/** List run records, optionally filtered by workflow and/or project. */
+export async function fetchRuns(workflowId?: string, projectId?: string): Promise<RunRow[]> {
+  const qs = new URLSearchParams();
+  if (workflowId) qs.set("workflow_id", workflowId);
+  if (projectId) qs.set("project_id", projectId);
+  const q = qs.toString();
+  return req(`/runs${q ? `?${q}` : ""}`);
 }
 
 /** Get a single run record. */
@@ -385,8 +452,9 @@ export type ProviderRow = {
   created_at: string;
 };
 
-export async function fetchProviders(): Promise<ProviderRow[]> {
-  return req(`/providers`);
+export async function fetchProviders(projectId?: string): Promise<ProviderRow[]> {
+  const q = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return req(`/providers${q}`);
 }
 
 /** Create a provider via the control plane (real persisted row). */
@@ -452,6 +520,31 @@ export async function fetchCatalogModels(params?: {
   return req<CatalogModel[]>(`/catalog/models${q ? `?${q}` : ""}`);
 }
 
+/** Catalog sync metadata (GET /catalog/status — mirrors models-dev/routes.ts). */
+export type CatalogStatus = {
+  version: string;
+  last_sync: string;
+  source: string;
+  model_count: number;
+  provider_count: number;
+};
+
+export async function fetchCatalogStatus(): Promise<CatalogStatus> {
+  return req<CatalogStatus>(`/catalog/status`);
+}
+
+/** Catalog provider rows (GET /catalog/providers — mirrors models-dev/routes.ts). */
+export type CatalogProvider = {
+  id: string;
+  display_name: string;
+  logo_path: string | null;
+  updated_at: string;
+};
+
+export async function fetchCatalogProviders(): Promise<CatalogProvider[]> {
+  return req<CatalogProvider[]>(`/catalog/providers`);
+}
+
 // ── Shared helpers ──────────────────────────────────────────────────────
 
 /**
@@ -472,7 +565,7 @@ async function ensureWorkflow(workflow: WorkflowJson): Promise<WorkflowRow> {
     body: JSON.stringify({
       id: workflow.id,
       name: typeof workflow.name === "string" ? workflow.name : workflow.id,
-      project_id: "proj_default",
+      project_id: DEFAULT_PROJECT,
     }),
   });
   return created;

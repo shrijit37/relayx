@@ -44,9 +44,9 @@ Client → Gateway (Rust) → Providers (Anthropic, OpenAI, …)
 |--------|--------|--------|
 | Simple proxy p50 overhead | < 1 ms | ~0.105 ms |
 | SSE streaming overhead | low-ms | ~0.022 ms |
-| Rust tests | — | 311 passing |
-| Frontend tests | — | 38 passing |
-| Control-plane integration tests | — | 51 passing |
+| Rust tests | — | 353 passing |
+| Frontend tests | — | 48 passing |
+| Control-plane integration tests | — | 56 passing |
 | Gateway `/run` integration test | — | included (publication_hot_swap) |
 
 ## Quick start
@@ -85,6 +85,11 @@ docs/                   Architecture, ADRs, specs (docs/README.md is the index)
 ## Development
 
 See [docs/development.md](docs/development.md) for local dev setup, CI pipeline, and coding standards.
+
+Pushes are gated locally: the pre-push hook runs the full CI battery (rust
+policy/fmt/docs/clippy/test, MSRV, web, control-plane) and blocks the push on
+any failure. Keep build disk usage bounded with `scripts/sweep-build.sh`
+(see the docs for details).
 
 ## License
 

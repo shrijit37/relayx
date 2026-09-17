@@ -29,6 +29,9 @@ export type SchemaNodeKind =
 export type LlmSchemaConfig = {
   kind: "llm";
   protocol?: string;
+  /** Editor metadata — the Rust `LlmConfig` has no `provider` field, so the
+   *  backend ignores it (serde drops unknown non-provider keys silently).
+   *  The runtime derives the provider entirely from `lane_id` + `protocol`. */
   provider?: string;
   model?: string;
   temperature?: number;
@@ -46,8 +49,8 @@ export type SchemaNodeConfig =
   | { kind: "condition"; condition: string; field: string; operator: string; value: unknown }
   | { kind: "mcp"; server_ref: string; tool_name: string; deferred: boolean }
   | { kind: "skill"; skill_ref: string; progressive: boolean }
-  | { kind: "fallback"; providers: { lane_id: string; model?: string; protocol?: string }[]; rounds: number }
-  | { kind: "retry"; max_attempts: number; delay_ms: number; on_timeout: boolean; on_provider_error: boolean; target: LlmSchemaConfig }
+  | { kind: "fallback"; providers: { lane_id: string; model?: string; protocol?: string }[]; rounds: number; strategy?: "sequential" | "round_robin"; retry_on?: number[] }
+  | { kind: "retry"; max_attempts: number; delay_ms: number; on_timeout: boolean; on_provider_error: boolean; retry_on?: number[]; target: LlmSchemaConfig }
   | { kind: "custom"; payload: unknown }
   | { kind: "unsupported"; editor_kind: string; reason: string };
 
@@ -220,18 +223,34 @@ function configFor(n: CanonicalNode, issues: Issue[]): SchemaNodeConfig | null {
     case "fallback": {
       if (c.fallback.providers.length === 0) issues.push({ nodeId: n.id, severity: "error", message: "Fallback needs at least one provider lane." });
       const providers = c.fallback.providers.map((p) => {
+        // A7: capabilityRef is deprecated/future — never silently dropped.
+        // Setting it blocks publish (fail-closed) instead of vanishing.
+        if (p.capabilityRef) {
+          issues.push({ nodeId: n.id, field: `provider.${p.lane}.capabilityRef`, severity: "error", message: `Fallback lane '${p.lane}' has a capabilityRef (future MCP/tool support) — it is not on the wire and blocks publish; remove it.` });
+        }
         const e: { lane_id: string; model: string; protocol?: string } = { lane_id: p.lane, model: p.model ?? "" };
         if (p.model === undefined || p.model === "") {
           issues.push({ nodeId: n.id, field: `provider.${p.lane}.model`, severity: "error", message: `Fallback lane '${p.lane}' requires a model override (Rust FallbackProvider.model is required).` });
         }
+        if (p.protocol !== undefined) e.protocol = p.protocol;
         return e;
       });
-      return { kind: "fallback", providers, rounds: c.fallback.rounds };
+      const out: Extract<SchemaNodeConfig, { kind: "fallback" }> = {
+        kind: "fallback",
+        providers,
+        rounds: c.fallback.rounds,
+      };
+      if (c.fallback.strategy !== undefined) out.strategy = c.fallback.strategy;
+      // Emit retry_on whenever it is defined — INCLUDING an empty list. An
+      // omitted key deserializes to the Rust serde default ([429]), silently
+      // re-enabling rate-limit rotation; an explicit [] disables it.
+      if (c.fallback.retryOn !== undefined) out.retry_on = c.fallback.retryOn;
+      return out;
     }
     case "retry": {
       if (c.policy.maxAttempts < 1) issues.push({ nodeId: n.id, field: "maxAttempts", severity: "error", message: "Max attempts must be ≥ 1." });
       if (c.target.lane === undefined) issues.push({ nodeId: n.id, field: "target.lane", severity: "error", message: "Retry target requires a lane." });
-      return {
+      const out: Extract<SchemaNodeConfig, { kind: "retry" }> = {
         kind: "retry",
         max_attempts: c.policy.maxAttempts,
         delay_ms: c.policy.delayMs,
@@ -239,6 +258,10 @@ function configFor(n: CanonicalNode, issues: Issue[]): SchemaNodeConfig | null {
         on_provider_error: c.policy.onProviderError,
         target: llmToSchema(c.target),
       };
+      // Emit retry_on whenever it is defined — INCLUDING an empty list
+      // (same silent-429-default hazard as fallback above).
+      if (c.policy.retryOn !== undefined) out.retry_on = c.policy.retryOn;
+      return out;
     }
   }
 }
@@ -310,8 +333,33 @@ function configFromSchema(sn: SchemaNode, issues: Issue[]): CanonicalConfig | nu
       tool: { capabilityRef: c.server_ref ? `mcp://${[c.server_ref, c.tool_name].filter(Boolean).join("/")}` : "", serverRef: c.server_ref, toolName: c.tool_name, deferred: c.deferred },
     };
     case "skill": return { kind: "skill", skill: { skillRef: c.skill_ref, progressive: c.progressive } };
-    case "fallback": return { kind: "fallback", fallback: { providers: c.providers.map((p) => ({ lane: p.lane_id, ...(p.model ? { model: p.model } : {}) })), rounds: c.rounds } };
-    case "retry": return { kind: "retry", policy: { maxAttempts: c.max_attempts, delayMs: c.delay_ms, onTimeout: c.on_timeout, onProviderError: c.on_provider_error }, target: llmFromSchema(c.target) };
+    case "fallback": return {
+      kind: "fallback",
+      fallback: {
+        providers: c.providers.map((p) => {
+          const e: { lane: string; model?: string; protocol?: string } = { lane: p.lane_id };
+          if (p.model) e.model = p.model;
+          if (p.protocol !== undefined) e.protocol = p.protocol;
+          return e;
+        }),
+        rounds: c.rounds,
+        ...(c.strategy ? { strategy: c.strategy } : {}),
+        // Round-trip the empty list too — an absent key means the Rust
+        // default ([429]) applies on the backend, which must stay visible.
+        ...(c.retry_on !== undefined ? { retryOn: c.retry_on } : {}),
+      },
+    };
+    case "retry": return {
+      kind: "retry",
+      policy: {
+        maxAttempts: c.max_attempts,
+        delayMs: c.delay_ms,
+        onTimeout: c.on_timeout,
+        onProviderError: c.on_provider_error,
+        ...(c.retry_on !== undefined ? { retryOn: c.retry_on } : {}),
+      },
+      target: llmFromSchema(c.target),
+    };
     case "custom": {
       issues.push({ nodeId: sn.id, severity: "error", message: `Node '${sn.id}' is a custom runtime node; the editor cannot edit it.` });
       return null;

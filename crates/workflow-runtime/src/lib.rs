@@ -24,7 +24,8 @@ pub mod snapshot;
 pub use capability::Capabilities;
 pub use compiler::{CompileContext, CompileError, compile_workflow};
 pub use context::{
-    AsLaneClient, ExecutionContext, ExecutionMetadata, GatewayHttpClient, gateway_client,
+    AsLaneClient, ExecutionContext, ExecutionMetadata, GatewayHttpClient, LaneClient,
+    gateway_client,
 };
 pub use error::{ExtensionError, NodeError, WorkflowError};
 pub use execution::{

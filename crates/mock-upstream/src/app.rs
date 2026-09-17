@@ -113,15 +113,37 @@ async fn chat_completions(
 
     match app.config.mode {
         crate::MockMode::Json => {
-            let json_body = app.config.json_body.clone();
-            let content_length = json_body.len().to_string();
+            let status_code = app
+                .config
+                .json_status
+                .and_then(|s| axum::http::StatusCode::from_u16(s).ok())
+                .unwrap_or(axum::http::StatusCode::OK);
+            // The rate-limit body is specifically the 429 contract — a 5xx
+            // upstream outage must not masquerade as a rate limit. For any
+            // other error status (4xx/5xx) emit a generic per-status body so
+            // tests simulating upstream failures get honest, distinguishable
+            // responses instead of a hard-coded rate-limit payload.
+            let is_rate_limit = status_code == axum::http::StatusCode::TOO_MANY_REQUESTS;
+            let is_error = status_code.is_server_error() || status_code.is_client_error();
+            let body = if is_rate_limit {
+                r#"{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}"#
+                    .to_owned()
+            } else if is_error {
+                format!(
+                    r#"{{"error":{{"message":"upstream error","type":"upstream_error","status":{}}}}}"#,
+                    status_code.as_u16()
+                )
+            } else {
+                app.config.json_body.clone()
+            };
+            let content_length = body.len().to_string();
             (
-                StatusCode::OK,
+                status_code,
                 [
                     (axum::http::header::CONTENT_TYPE, "application/json"),
                     (axum::http::header::CONTENT_LENGTH, content_length.as_str()),
                 ],
-                json_body,
+                body,
             )
                 .into_response()
         }

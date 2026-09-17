@@ -3,43 +3,72 @@
  * an in-process mock gateway (fastify) acting as `/validate` + `/publish`.
  *
  * The real DB (127.0.0.1:5433) is used; tests never touch a production
- * database. Each test creates its own schema-namespace via a dedicated DB.
+ * database. Each test creates its own schema-namespace via a dedicated DB
+ * (created once, migrations run once, then dropped) — per-test, because
+ * tests assert empty-state and hard-coded row counts.
+ *
+ * Migration files are resolved from this file (never cwd), so the suite
+ * runs from any working directory.
  */
 
 import { createPool, dbConfigFromEnv, migrate } from "../src/db/db";
 import { listActiveWorkflows, nextSnapshotVersion } from "../src/domain/publish";
 import Fastify from "fastify";
 
+/** The migrations dir resolved from this file, independent of cwd. */
+const MIGRATIONS_DIR = new URL("../src/db/", import.meta.url).pathname;
+
+/**
+ * Create one throwaway database, run all migrations once, and hand back a
+ * pool. `close()` ends the pool AND drops the database so repeated runs
+ * don't pile up throwaway `test_*` databases (each CREATE DATABASE is
+ * O(catalog), so the leak also slowed the suite over time). `WITH (FORCE)`
+ * terminates straggler connections and drops immediately, so concurrent
+ * suites don't serialize on lingering locks.
+ */
 export async function freshDb(name: string) {
   const admin = createPool({ ...dbConfigFromEnv(), database: "postgres" });
   const dbName = `test_${name}_${Date.now().toString(36)}`;
-  await admin.query(`CREATE DATABASE "${dbName}"`);
-  await admin.end();
-
+  try {
+    await admin.query(`CREATE DATABASE "${dbName}"`);
+  } catch (err) {
+    await admin.end();
+    throw err;
+  }
+  // Don't end `admin` here: the returned `close()` needs a live admin pool
+  // to DROP the database. Ending it in a finally would make every drop
+  // fail with "Cannot use a pool after calling end on the pool".
   const pool = createPool({ ...dbConfigFromEnv(), database: dbName });
-  await migrate(pool, "./src/db");
+  try {
+    await migrate(pool, MIGRATIONS_DIR);
+  } catch (err) {
+    // A migration failure mid-setup must not leak the DB. End the pool
+    // (releases its connections) then drop the half-migrated DB.
+    await pool.end();
+    await dropTestDb(admin, dbName);
+    await admin.end();
+    throw err;
+  }
   return {
     pool,
     dbName,
-    /** End the app pool AND drop the database so repeated runs don't pile up
-     *  throwaway `test_*` databases (each CREATE DATABASE is O(catalog), so
-     *  the leak also slowed the suite over time). `WITH (FORCE)` terminates
-     *  straggler connections and drops immediately, so concurrent suites
-     *  don't serialize on lingering locks. */
     async close() {
       await pool.end();
-      const admin = createPool({ ...dbConfigFromEnv(), database: "postgres" });
-      try {
-        await admin.query(
-          `DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`,
-        );
-      } catch {
-        // Last-resort best-effort cleanup must not fail the test run.
-      } finally {
-        await admin.end();
-      }
+      await dropTestDb(admin, dbName);
+      await admin.end();
     },
   };
+}
+
+/** Best-effort drop of a throwaway `test_*` db; never fails the test run. */
+async function dropTestDb(admin: import("pg").Pool, dbName: string) {
+  try {
+    // `WITH (FORCE)` terminates straggler connections and drops
+    // immediately, so concurrent suites don't serialize on locks.
+    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+  } catch {
+    // Last-resort best-effort cleanup must not fail the test run.
+  }
 }
 
 /** Standard publish-service deps wired to the pool (routes use these too). */

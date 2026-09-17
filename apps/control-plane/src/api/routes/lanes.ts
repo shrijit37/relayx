@@ -19,6 +19,11 @@ export function registerLaneRoutes(
   app.post("/lanes", async (req, reply) => {
     const parsed = laneDtoSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    if (parsed.data.egress === "masked" && !parsed.data.proxy_url) {
+      return reply
+        .code(400)
+        .send({ error: "egress=masked requires a proxy_url (http://… or socks5://…)" });
+    }
     const laneData: {
       id?: string;
       project_id: string;
@@ -26,14 +31,18 @@ export function registerLaneRoutes(
       endpoint: string;
       base_url: string;
       egress: string;
+      proxy_url: string | null;
       policies: string[];
       credential_ref: CredentialRef | null;
     } = {
       project_id: parsed.data.project_id,
       provider_id: parsed.data.provider_id ?? null,
-      endpoint: parsed.data.endpoint,
+      // The DB column is NOT NULL; the runtime ignores `endpoint`, so derive
+      // a display value from the base URL when the client omits it.
+      endpoint: parsed.data.endpoint ?? parsed.data.base_url,
       base_url: parsed.data.base_url,
       egress: parsed.data.egress,
+      proxy_url: parsed.data.proxy_url ?? null,
       policies: parsed.data.policies,
       credential_ref: parsed.data.credential_ref ?? null,
     };
@@ -45,12 +54,23 @@ export function registerLaneRoutes(
   app.put("/lanes/:id", async (req, reply) => {
     const parsed = laneDtoSchema.partial().safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.message });
+    // Masked without a proxy is invalid whether created or updated; the
+    // effective egress after a PATCH considers the existing lane row too.
+    const existing = await repo.lanes.get(pool, (req.params as { id: string }).id);
+    const effectiveEgress = parsed.data.egress ?? existing?.egress;
+    const effectiveProxy = parsed.data.proxy_url !== undefined ? parsed.data.proxy_url : (existing?.proxy_url ?? null);
+    if (effectiveEgress === "masked" && !effectiveProxy) {
+      return reply
+        .code(400)
+        .send({ error: "egress=masked requires a proxy_url (http://… or socks5://…)" });
+    }
     const data = parsed.data;
     const patch: {
       provider_id?: string | null;
       endpoint?: string;
       base_url?: string;
       egress?: string;
+      proxy_url?: string | null;
       policies?: string[];
       credential_ref?: CredentialRef | null;
     } = {};
@@ -58,6 +78,7 @@ export function registerLaneRoutes(
     if (data.endpoint !== undefined) patch.endpoint = data.endpoint;
     if (data.base_url !== undefined) patch.base_url = data.base_url;
     if (data.egress !== undefined) patch.egress = data.egress;
+    if (data.proxy_url !== undefined) patch.proxy_url = data.proxy_url;
     if (data.policies !== undefined) patch.policies = data.policies;
     if (data.credential_ref !== undefined) patch.credential_ref = data.credential_ref;
     const updated = await repo.lanes.update(pool, (req.params as { id: string }).id, patch);

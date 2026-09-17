@@ -73,12 +73,19 @@ impl PublicationState {
     ///
     /// The swap replaces snapshot + pools in ONE atomic store, so request
     /// workers can never observe (v1 snapshot, v2 pools) or the reverse.
-    pub fn publish(&self, snapshot: Arc<RuntimeSnapshot>) {
-        let pools = Arc::new(LanePools::build(&snapshot, &*self.pool_builder));
+    ///
+    /// Returns an error (without publishing) when a lane's egress
+    /// configuration cannot produce a usable pool — masked without a proxy
+    /// URL, invalid proxy URL, or an unknown egress value. Pool build
+    /// failure must fail closed: the runtime never serves a lane whose
+    /// egress silently degraded to direct.
+    pub fn publish(&self, snapshot: Arc<RuntimeSnapshot>) -> Result<(), String> {
+        let pools = Arc::new(LanePools::build(&snapshot, &*self.pool_builder)?);
         self.bundle.store(Arc::new(PublishedBundle {
             snapshot: Some(snapshot),
             pools,
         }));
+        Ok(())
     }
 
     /// Capture the current (snapshot, pools) pair in one atomic load.
@@ -93,6 +100,16 @@ impl PublicationState {
 
     /// Current lane pools (lock-free `Arc` clone).
     pub fn pools(&self) -> Arc<LanePools> {
+        self.bundle.load_full().pools.clone()
+    }
+
+    /// Current lane pools as a lane-aware client resolver.
+    ///
+    /// Lets callers hand the pools to an execution context the same way the
+    /// proxy path does (`AppState` implements `AsLaneClient` over `pools()`),
+    /// so every execution — including admin `/run` — resolves each lane's
+    /// dedicated pool and never falls back to a shared direct client.
+    pub fn pools_arc(&self) -> Arc<dyn workflow_runtime::AsLaneClient> {
         self.bundle.load_full().pools.clone()
     }
 }
@@ -289,6 +306,21 @@ pub struct WireLane {
     /// Resolved `Authorization` header value, if the lane has credentials.
     #[serde(default)]
     pub authorization: Option<String>,
+    /// Egress mode: `"direct"` (default, gateway IP) or `"masked"`
+    /// (via the lane's `proxy_url`). Unknown values are rejected at
+    /// publish/pool-build time — they never silently degrade to `direct`.
+    #[serde(default = "default_lane_egress")]
+    pub egress: String,
+    /// Proxy URL for masked egress: `http://host:port` (HTTP CONNECT) or
+    /// `socks5://host:port` (SOCKS5). Ignored unless `egress == "masked"`.
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+}
+
+/// Serde default for `WireLane::egress`: a lane without an explicit egress
+/// value is direct (gateway IP, no proxy).
+fn default_lane_egress() -> String {
+    "direct".into()
 }
 
 /// Modified `WireWorkflow`: `lanes` is now a map of lane name → `WireLane`
@@ -325,6 +357,22 @@ impl PublicationState {
         for wf in &wire.workflows {
             for (name, lane_cfg) in &wf.lanes {
                 if lane_registry.get(name).is_none() {
+                    // Fail closed on unknown egress values: an operator who
+                    // expects `masked` traffic must not silently leak the
+                    // gateway IP because of a typo. `masked` also requires
+                    // a `proxy_url` — without it the connector cannot tunnel.
+                    if lane_cfg.egress != "direct" && lane_cfg.egress != "masked" {
+                        return Err(format!(
+                            "workflow '{}': lane '{name}' has unknown egress '{}' (expected 'direct' or 'masked')",
+                            wf.id, lane_cfg.egress
+                        ));
+                    }
+                    if lane_cfg.egress == "masked" && lane_cfg.proxy_url.is_none() {
+                        return Err(format!(
+                            "workflow '{}': lane '{name}' egress=masked requires a proxy_url",
+                            wf.id
+                        ));
+                    }
                     let base_url = url::Url::parse(&lane_cfg.base_url).map_err(|e| {
                         format!(
                             "workflow '{}': lane '{name}' has invalid base_url: {e}",
@@ -335,6 +383,8 @@ impl PublicationState {
                         id: name.clone(),
                         base_url,
                         authorization: lane_cfg.authorization.clone(),
+                        egress: lane_cfg.egress.clone(),
+                        proxy_url: lane_cfg.proxy_url.clone(),
                     });
                 }
             }
@@ -375,12 +425,15 @@ impl PublicationState {
     /// Compile + publish a set of workflows atomically.
     ///
     /// Returns per-workflow compile failures WITHOUT publishing anything
-    /// (atomicity: a bad plan never sees traffic). Lanes referenced by any
-    /// workflow are registered in the snapshot's lane registry (union across
-    /// workflows), so LLM/Fallback/Retry nodes resolve them at run time.
+    /// (atomicity: a bad plan never sees traffic). Pool build failure
+    /// (masked lane without a usable tunnel) is also a publish failure — the
+    /// swap never happens, so the runtime keeps the previous coherent
+    /// snapshot + pools. Lanes referenced by any workflow are registered in
+    /// the snapshot's lane registry (union across workflows), so
+    /// LLM/Fallback/Retry nodes resolve them at run time.
     pub fn publish_workflows(&self, wire: WireSnapshot) -> Result<Arc<RuntimeSnapshot>, String> {
         let snapshot = self.compile_snapshot(&wire)?;
-        self.publish(snapshot.clone());
+        self.publish(snapshot.clone())?;
         Ok(snapshot)
     }
 }
@@ -603,11 +656,14 @@ pub fn admin_router_with_publication(
             }
         };
 
-        // ponytail: per-run Hyper client (human-paced UI runs). The shared
-        // proxy client lives on AppState and isn't reachable from the admin
-        // router's state type; thread it through if run throughput ever needs
-        // connection reuse.
-        let client = workflow_runtime::gateway_client(std::time::Duration::from_secs(90), 64);
+        // Lane pools: admin /run resolves each lane's dedicated pool the
+        // same way proxy workflow routes do. LLM/fallback nodes only ever
+        // send traffic through a lane's dedicated pool — never a shared
+        // direct client — so a masked lane cannot leak its egress IP. The
+        // pools are captured once from the same PublicationState that
+        // produced `snapshot`, so run and proxy traffic observe one coherent
+        // (snapshot, pools) pair.
+        let lane_clients = publication.pools_arc();
 
         // 120s hard deadline for admin-triggered runs — prevents orphaned
         // workflow executions from running indefinitely.
@@ -644,8 +700,7 @@ pub fn admin_router_with_publication(
                         bb,
                         &wf_id,
                         &rid,
-                        client,
-                        None,
+                        Some(lane_clients.clone()),
                         deadline,
                         Some(tx.clone()),
                         cancel_run,
@@ -730,7 +785,8 @@ pub fn admin_router_with_publication(
             });
         }
 
-        // Buffered (non-streaming) path — unchanged.
+        // Buffered (non-streaming) path — lane pools threaded the same way as
+        // the streaming path above.
         let extension_registry = publication.current_extensions();
         let response = crate::execution::execute_workflow(
             &snapshot,
@@ -738,8 +794,7 @@ pub fn admin_router_with_publication(
             body_bytes,
             &req.workflow_id,
             &request_id,
-            client,
-            None,
+            Some(lane_clients),
             deadline,
             None,
             tokio_util::sync::CancellationToken::new(),
@@ -806,4 +861,51 @@ pub fn admin_router_with_publication(
             publication,
             api_key,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WireLane;
+
+    fn parse(json: serde_json::Value) -> WireLane {
+        match serde_json::from_value(json) {
+            Ok(lane) => lane,
+            Err(e) => panic!("wire lane deserialize failed: {e}"),
+        }
+    }
+
+    #[test]
+    fn wire_lane_serde_roundtrip_preserves_egress_and_proxy_url() {
+        let lane = WireLane {
+            base_url: "https://api.example.com/v1".into(),
+            authorization: Some("Bearer token".into()),
+            egress: "masked".into(),
+            proxy_url: Some("socks5://proxy.example.com:1080".into()),
+        };
+        let json = match serde_json::to_value(&lane) {
+            Ok(v) => v,
+            Err(e) => panic!("wire lane serialize failed: {e}"),
+        };
+        assert_eq!(json["egress"], "masked");
+        assert_eq!(json["proxy_url"], "socks5://proxy.example.com:1080");
+        let back = parse(json);
+        assert_eq!(back.base_url, "https://api.example.com/v1");
+        assert_eq!(back.authorization.as_deref(), Some("Bearer token"));
+        assert_eq!(back.egress, "masked");
+        assert_eq!(
+            back.proxy_url.as_deref(),
+            Some("socks5://proxy.example.com:1080")
+        );
+    }
+
+    #[test]
+    fn wire_lane_serde_defaults_for_direct() {
+        // A lane without egress/proxy_url deserializes as direct with no proxy.
+        let lane = parse(serde_json::json!({
+            "base_url": "https://api.example.com/v1",
+        }));
+        assert_eq!(lane.egress, "direct");
+        assert_eq!(lane.proxy_url, None);
+        assert_eq!(lane.authorization, None);
+    }
 }

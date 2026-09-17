@@ -72,6 +72,7 @@ describe("lane update field whitelist", () => {
       endpoint: "/chat",
       base_url: "http://localhost",
       egress: "direct",
+      proxy_url: null,
       policies: [],
       credential_ref: null,
     });
@@ -96,6 +97,7 @@ describe("lane update field whitelist", () => {
       endpoint: "/chat",
       base_url: "http://localhost",
       egress: "direct",
+      proxy_url: null,
       policies: [],
       credential_ref: null,
     });

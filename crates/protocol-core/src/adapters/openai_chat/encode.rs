@@ -367,6 +367,7 @@ pub fn encode_stream_event(
         }
         CanonicalStreamEvent::Error { message, .. } => Err(ProtocolEngineError::ProviderError {
             message: message.clone(),
+            status: None,
         }),
         CanonicalStreamEvent::Ping => Ok(None),
     }

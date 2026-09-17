@@ -26,10 +26,12 @@ tokio-util = { version = "0.7", features = ["rt"] }
 hyper = { version = "1.11", features = ["http1", "server", "client", "http2"] }
 # `client-legacy` + `tokio` + `http1` cover every use in this workspace
 # (`client::legacy::Client`, `client::legacy::connect::HttpConnector`,
-# `rt::TokioExecutor`). `full` additionally enabled client-pool, client-proxy,
-# client-proxy-system, server-graceful and service, none of which are referenced;
-# axum declares the server-side features it needs on its own edge.
-hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1"] }
+# `rt::TokioExecutor`). `client-proxy` adds the `Tunnel` (HTTP CONNECT) and
+# `SocksV5` connectors used for masked-egress lanes. `full` additionally
+# enables client-pool, client-proxy-system, server-graceful and service,
+# none of which are referenced; axum declares the server-side features it
+# needs on its own edge.
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1", "client-proxy"] }
 http = "1"
 http-body-util = "0.1"
 axum = { version = "0.8", features = ["tokio", "http1", "json"] }
@@ -37,6 +39,9 @@ axum = { version = "0.8", features = ["tokio", "http1", "json"] }
 # timeout/limit/load-shed/buffer features were declared but never referenced;
 # axum enables the features it needs on its own `tower` edge.
 tower = { version = "0.5", features = ["util"] }
+# `tower::Service` (tower_service) is implemented by `LaneClient` in
+# workflow-runtime so hyper-util's `Client<S, B>` accepts it as a connector.
+tower-service = "0.3"
 bytes = "1"
 
 # Serialization / config

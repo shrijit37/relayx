@@ -442,6 +442,8 @@ pub struct NodeRuntime {
     plan: ExecutionPlan,
     /// Per-router round-robin counters (independent per node id).
     router_counters: HashMap<NodeId, AtomicUsize>,
+    /// Per-fallback round-robin counters (independent per node id).
+    fallback_counters: HashMap<NodeId, AtomicUsize>,
 }
 
 impl NodeRuntime {
@@ -453,9 +455,16 @@ impl NodeRuntime {
             .filter(|n| matches!(n.config, NodeConfig::Router(_)))
             .map(|n| (n.id.clone(), AtomicUsize::new(0)))
             .collect();
+        let fallback_counters = plan
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.config, NodeConfig::Fallback(_)))
+            .map(|n| (n.id.clone(), AtomicUsize::new(0)))
+            .collect();
         Self {
             plan,
             router_counters,
+            fallback_counters,
         }
     }
 
@@ -517,8 +526,14 @@ impl NodeRuntime {
             );
 
             let start = std::time::Instant::now();
-            let result =
-                execute_node(exec_node, &node_ctx, node_input, &self.router_counters).await;
+            let result = execute_node(
+                exec_node,
+                &node_ctx,
+                node_input,
+                &self.router_counters,
+                &self.fallback_counters,
+            )
+            .await;
             let duration = start.elapsed();
 
             match result {
@@ -649,6 +664,7 @@ async fn execute_node(
     ctx: &ExecutionContext,
     input: NodeInput,
     router_counters: &HashMap<NodeId, AtomicUsize>,
+    fallback_counters: &HashMap<NodeId, AtomicUsize>,
 ) -> Result<NodeOutput, NodeError> {
     match &node.config {
         NodeConfig::Input(_) => Ok(NodeOutput::message(input.value)),
@@ -664,7 +680,12 @@ async fn execute_node(
         }
         NodeConfig::Mcp(config) => crate::nodes::mcp::execute(config, ctx, input).await,
         NodeConfig::Skill(config) => crate::nodes::skill::execute(config, ctx, input).await,
-        NodeConfig::Fallback(config) => crate::nodes::fallback::execute(config, ctx, input).await,
+        NodeConfig::Fallback(config) => {
+            let counter = fallback_counters.get(&node.id).ok_or_else(|| {
+                NodeError::Internal("fallback node missing round-robin counter".into())
+            })?;
+            crate::nodes::fallback::execute(config, ctx, input, counter).await
+        }
         NodeConfig::Retry(config) => crate::nodes::retry::execute(config, ctx, input).await,
         NodeConfig::Custom(cfg) => {
             let registry = ctx.extension_registry.as_ref().ok_or_else(|| {

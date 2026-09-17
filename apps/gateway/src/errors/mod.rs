@@ -84,7 +84,7 @@ impl From<ProtocolEngineError> for GatewayError {
                     "translation rejected for '{feature}' (policy: {policy:?}): {reason}"
                 ),
             },
-            ProtocolEngineError::ProviderError { message } => GatewayError::UpstreamProtocol {
+            ProtocolEngineError::ProviderError { message, .. } => GatewayError::UpstreamProtocol {
                 upstream: "upstream".into(),
                 message,
             },

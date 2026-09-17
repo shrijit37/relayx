@@ -17,18 +17,9 @@ use mock_upstream::{MockConfig, MockMode, spawn_mock};
 use relay_gateway::lanes::HyperPoolBuilder;
 use relay_gateway::observability::{PublicationState, WireSnapshot, WireWorkflow};
 use relay_gateway::server::GatewayServer;
-use test_harness::post_hyper;
+use test_harness::{post_hyper, reserved_listeners};
 use workflow_runtime::InMemoryPublisher;
 use workflow_schema::*;
-
-fn free_port() -> u16 {
-    use std::net::TcpListener;
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind")
-        .local_addr()
-        .expect("local addr")
-        .port()
-}
 
 fn input_node() -> Node {
     Node {
@@ -106,6 +97,32 @@ fn llm_workflow(model: &str, lane_id: &str, stream: bool) -> Workflow {
 
 /// A workflow with a Fallback node between two providers.
 fn fallback_workflow(primary: &str, backup: &str) -> Workflow {
+    fallback_workflow_with(
+        primary,
+        backup,
+        FallbackConfig {
+            providers: vec![],
+            rounds: 1,
+            strategy: Default::default(),
+            retry_on: vec![],
+        },
+    )
+}
+
+/// A workflow with a Fallback node carrying an explicit strategy/retry_on.
+fn fallback_workflow_with(primary: &str, backup: &str, mut fallback: FallbackConfig) -> Workflow {
+    fallback.providers = vec![
+        FallbackProvider {
+            lane_id: primary.into(),
+            model: "primary-model".into(),
+            protocol: None,
+        },
+        FallbackProvider {
+            lane_id: backup.into(),
+            model: "backup-model".into(),
+            protocol: None,
+        },
+    ];
     Workflow {
         id: "fallback-wf".into(),
         name: "fallback".into(),
@@ -115,21 +132,7 @@ fn fallback_workflow(primary: &str, backup: &str) -> Workflow {
             Node {
                 id: "fb".into(),
                 kind: NodeKind::Fallback,
-                config: NodeConfig::Fallback(FallbackConfig {
-                    providers: vec![
-                        FallbackProvider {
-                            lane_id: primary.into(),
-                            model: "primary-model".into(),
-                            protocol: None,
-                        },
-                        FallbackProvider {
-                            lane_id: backup.into(),
-                            model: "backup-model".into(),
-                            protocol: None,
-                        },
-                    ],
-                    rounds: 1,
-                }),
+                config: NodeConfig::Fallback(fallback),
                 inputs: vec![PortDef {
                     name: "in".into(),
                     port_type: PortType::Message,
@@ -152,8 +155,10 @@ async fn spawn_workflow_gateway(
     workflow: Workflow,
     lanes: &[(String, String)],
 ) -> (u16, Arc<InMemoryPublisher>, Arc<PublicationState>, String) {
-    let proxy_port = free_port();
-    let admin_port = free_port();
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
     let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
         r#"
 snapshot_version = 1
@@ -177,7 +182,11 @@ workflow_id = "{workflow_id}"
     let publication = Arc::new(PublicationState::new(
         publisher.clone(),
         Default::default(),
-        Box::new(HyperPoolBuilder::new(Duration::from_secs(90), 16)),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
     ));
 
     // Publish the workflow + its lanes.
@@ -196,6 +205,8 @@ workflow_id = "{workflow_id}"
                         relay_gateway::observability::WireLane {
                             base_url: v.clone(),
                             authorization: None,
+                            egress: "direct".into(),
+                            proxy_url: None,
                         },
                     )
                 })
@@ -212,7 +223,9 @@ workflow_id = "{workflow_id}"
         Err(e) => panic!("server build failed: {e}"),
     };
     tokio::spawn(async move {
-        let _ = server.run().await;
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
     });
 
     // Wait for readiness.
@@ -338,7 +351,7 @@ async fn fallback_workflow_fails_over_to_backup_provider() {
     };
 
     // Use a never-listening port as the dead primary.
-    let dead_port = free_port();
+    let dead_port = test_harness::free_port();
     let dead_lane = format!("http://127.0.0.1:{dead_port}");
 
     let (proxy_port, _p, _pub, url) = spawn_workflow_gateway(
@@ -384,6 +397,106 @@ async fn fallback_workflow_fails_over_to_backup_provider() {
     assert!(
         rendered.contains("served by backup"),
         "expected backup text, got {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn fallback_429_rotates_to_next_lane() {
+    // Primary returns a 429 (rate limit). With retry_on:[429] the fallback
+    // must fail over to the backup *in the same round* — not exhaust rounds.
+    let primary_mock = match spawn_mock(MockConfig {
+        mode: MockMode::Json,
+        json_status: Some(429),
+        json_body: "{}".into(),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => panic!("primary mock spawn failed: {e}"),
+    };
+    let backup_body = r#"{
+        "id": "chatcmpl-backup",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "backup-model",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "served by backup"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    }"#;
+    let backup_mock = match spawn_mock(MockConfig {
+        mode: MockMode::Json,
+        json_body: backup_body.into(),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => panic!("backup mock spawn failed: {e}"),
+    };
+
+    let wf = fallback_workflow_with(
+        "primary",
+        "backup",
+        FallbackConfig {
+            providers: vec![],
+            rounds: 1,
+            strategy: FallbackStrategy::Sequential,
+            retry_on: vec![429],
+        },
+    );
+
+    let (proxy_port, _p, _pub, url) = spawn_workflow_gateway(
+        "fallback-wf",
+        wf,
+        &[
+            ("primary".into(), format!("http://{}", primary_mock.addr)),
+            ("backup".into(), format!("http://{}", backup_mock.addr)),
+        ],
+    )
+    .await;
+    let _ = proxy_port;
+
+    let (status, body) = match post_hyper(
+        &url,
+        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("429-rotation post failed: {e}"),
+    };
+    assert_eq!(
+        status,
+        http::StatusCode::OK,
+        "fallback with retry_on 429 must succeed via backup"
+    );
+
+    assert_eq!(
+        primary_mock
+            .state
+            .requests_served
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "primary should be hit exactly once (one 429)"
+    );
+    assert_eq!(
+        backup_mock
+            .state
+            .requests_served
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "backup should serve the request after the 429 failover"
+    );
+
+    let json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => panic!("fallback 429 response not JSON: {e}"),
+    };
+    let rendered = serde_json::to_string(&json).unwrap_or_default();
+    assert!(
+        rendered.contains("served by backup"),
+        "expected backup text after 429 rotation, got {rendered}"
     );
 }
 
@@ -439,5 +552,256 @@ async fn streaming_llm_workflow_runs_e2e() {
     assert!(
         rendered.contains("Hello"),
         "expected streamed text 'Hello' in the response, got {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn fallback_429_rotates_with_default_retry_on() {
+    // Claim 3 fix: a fresh fallback (no explicit retry_on) must STILL fail
+    // over on 429 — the serde default is [429], not [].
+    let primary_mock = match spawn_mock(MockConfig {
+        mode: MockMode::Json,
+        json_status: Some(429),
+        json_body: "{}".into(),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => panic!("primary mock spawn failed: {e}"),
+    };
+    let backup_body = r#"{
+        "id": "chatcmpl-backup",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "backup-model",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "served by backup"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    }"#;
+    let backup_mock = match spawn_mock(MockConfig {
+        mode: MockMode::Json,
+        json_body: backup_body.into(),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => panic!("backup mock spawn failed: {e}"),
+    };
+
+    // No explicit retry_on — the {serde} default [429] must apply, so the
+    // fallback rotates on the primary's 429 within the same round.
+    let wf = fallback_workflow_with(
+        "primary",
+        "backup",
+        FallbackConfig {
+            providers: vec![],
+            rounds: 1,
+            strategy: FallbackStrategy::Sequential,
+            retry_on: vec![],
+        },
+    );
+
+    let (proxy_port, _p, _pub, url) = spawn_workflow_gateway(
+        "fallback-wf",
+        wf,
+        &[
+            ("primary".into(), format!("http://{}", primary_mock.addr)),
+            ("backup".into(), format!("http://{}", backup_mock.addr)),
+        ],
+    )
+    .await;
+    let _ = proxy_port;
+
+    let (status, body) = match post_hyper(
+        &url,
+        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("429-rotation default post failed: {e}"),
+    };
+    assert_eq!(
+        status,
+        http::StatusCode::OK,
+        "fallback with default retry_on must succeed via backup"
+    );
+    let rendered = String::from_utf8_lossy(&body);
+    assert!(
+        rendered.contains("served by backup"),
+        "expected backup text after default-429 rotation, got {rendered}"
+    );
+    assert_eq!(
+        primary_mock
+            .state
+            .requests_served
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "primary should be hit exactly once (one 429)"
+    );
+}
+
+#[tokio::test]
+async fn fallback_requires_lane_pools_no_shared_fallback() {
+    // Fail-closed egress regression: a fallback/LLM node must NEVER fall back
+    // to a shared direct client when a lane's per-lane pool is absent.
+    // Publishing the workflow DOES build the lane pools (the snapshot's
+    // lanes), so the runtime contract is: provide pools or fail.
+    let body = r#"{
+        "id": "chatcmpl-backup",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "backup-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "served by backup"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    }"#;
+    let mock = match spawn_mock(MockConfig {
+        mode: MockMode::Json,
+        json_body: body.into(),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => panic!("mock spawn failed: {e}"),
+    };
+
+    let dead_port = test_harness::free_port();
+    let dead_lane = format!("http://127.0.0.1:{dead_port}");
+
+    let wf = fallback_workflow("dead", "backup");
+
+    // Publish the workflow WITH its lane pools (the gateway builds pools from
+    // the snapshot's lanes at publish time).
+    let reserved = reserved_listeners().expect("reserve ports");
+    let proxy_port = reserved.proxy_addr().port();
+    let admin_port = reserved.admin_addr().port();
+    let (proxy_listener, admin_listener) = reserved.into_tokio().expect("tokio listeners");
+    let config = relay_gateway::config::GatewayConfig::from_toml_str(&format!(
+        r#"
+snapshot_version = 1
+
+[server]
+listen = "127.0.0.1:{proxy_port}"
+admin_listen = "127.0.0.1:{admin_port}"
+total_timeout_ms = 15000
+graceful_shutdown_ms = 500
+
+[[routes]]
+id = "workflow"
+path_prefix = "/v1/workflow"
+methods = ["POST"]
+workflow_id = "fallback-wf"
+"#
+    ))
+    .expect("valid workflow config");
+
+    let publisher = Arc::new(InMemoryPublisher::new());
+    let publication = Arc::new(PublicationState::new(
+        publisher.clone(),
+        Default::default(),
+        Box::new(HyperPoolBuilder::new(
+            Duration::from_secs(5),
+            Duration::from_secs(90),
+            16,
+        )),
+    ));
+    let wire = WireSnapshot {
+        snapshot_version: 1,
+        extensions: vec![],
+        workflows: vec![WireWorkflow {
+            id: "fallback-wf".into(),
+            workflow: wf,
+            version: 1,
+            lanes: [
+                (
+                    "dead".to_string(),
+                    relay_gateway::observability::WireLane {
+                        base_url: dead_lane,
+                        authorization: None,
+                        egress: "direct".into(),
+                        proxy_url: None,
+                    },
+                ),
+                (
+                    "backup".to_string(),
+                    relay_gateway::observability::WireLane {
+                        base_url: format!("http://{}", mock.addr),
+                        authorization: None,
+                        egress: "direct".into(),
+                        proxy_url: None,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        }],
+    };
+    publication
+        .publish_workflows(wire)
+        .map_err(|e| panic!("publish failed: {e}"))
+        .expect("publish");
+
+    let server = match GatewayServer::with_publication(config, Some(publication.clone())) {
+        Ok(s) => s,
+        Err(e) => panic!("server build failed: {e}"),
+    };
+    tokio::spawn(async move {
+        let _ = server
+            .run_with_listeners(proxy_listener, admin_listener)
+            .await;
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let up = tokio::net::TcpStream::connect(("127.0.0.1", proxy_port))
+            .await
+            .is_ok();
+        if up {
+            break;
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("gateway did not become ready");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let url = format!("http://127.0.0.1:{proxy_port}/v1/workflow");
+    let (status, response_body) = match post_hyper(
+        &url,
+        r#"{"messages":[{"role":"user","content":"hi"}]}"#,
+        &[],
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => panic!("fallback post failed: {e}"),
+    };
+    assert_eq!(
+        status,
+        http::StatusCode::OK,
+        "fallback with per-lane pools serves via the backup pool"
+    );
+    let json: serde_json::Value = match serde_json::from_slice(&response_body) {
+        Ok(v) => v,
+        Err(e) => panic!("fallback response not JSON: {e}"),
+    };
+    let rendered = serde_json::to_string(&json).unwrap_or_default();
+    assert!(
+        rendered.contains("served by backup"),
+        "expected backup text via the lane pool, got {rendered}"
+    );
+    assert_eq!(
+        mock.state
+            .requests_served
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "backup should serve exactly one request via the lane pool"
     );
 }

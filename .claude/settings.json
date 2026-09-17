@@ -32,17 +32,22 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/ts-guard.sh",
-            "timeout": 60
+            "timeout": 120
           },
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/shell-guard.sh",
-            "timeout": 15
+            "timeout": 30
           },
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/check-docs.sh",
-            "timeout": 30
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/check-lsp.sh",
+            "timeout": 60
           }
         ]
       }
@@ -53,17 +58,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=$(jq -r '.tool_input.file_path // empty' 2>/dev/null); case \"${f##*/}\" in Cargo.lock|bun.lock|bun.lockb|pnpm-lock.yaml|pnpm-lock.yml|package-lock.json|yarn.lock) echo '⚠️  Blocked: lock files are managed by the package manager — do not hand-edit.' >&2; exit 2;; esac",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "f=$(jq -r '.tool_input.file_path // empty' 2>/dev/null); b=${f##*/}; case \"$b\" in .env.example|.env.sample|.env.template) exit 0;; .env|.env.*) echo '🔒 Blocked: .env holds secrets and must be edited manually, not by Claude.' >&2; exit 2;; esac",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "f=$(jq -r '.tool_input.file_path // empty' 2>/dev/null); case \"$f\" in */docs/archive/*|docs/archive/*) echo ' Blocked: docs/archive/ holds immutable historical snapshots — write a living doc in docs/ instead.' >&2; exit 2;; esac",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/pre-tool-guard.sh",
             "timeout": 10
           }
         ]

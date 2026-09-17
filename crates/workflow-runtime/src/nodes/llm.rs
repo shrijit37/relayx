@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use crate::context::{ExecutionContext, GatewayHttpClient};
+use crate::context::{ExecutionContext, LaneClient};
 use crate::error::NodeError;
 use crate::nodes::{NodeInput, NodeOutput, RuntimeValue};
 use protocol_core::adapters::openai_chat;
@@ -152,22 +152,20 @@ fn resolve_lane_id(config: &LlmConfig, ctx: &ExecutionContext) -> Result<String,
 }
 
 /// Resolve the HTTP client for a given lane.
-fn resolve_client(
-    ctx: &ExecutionContext,
-    lane_id: &str,
-) -> Result<Arc<GatewayHttpClient>, NodeError> {
-    // Prefer the lane-bound connection pool (per-lane isolation); fall back to
-    // the shared client (Phase-1 single-pool deployments).
+fn resolve_client(ctx: &ExecutionContext, lane_id: &str) -> Result<Arc<LaneClient>, NodeError> {
+    // Only the lane-bound connection pool is a valid client. The shared
+    // `upstream_client` is NOT a fallback: wrapping it as a direct lane
+    // client would send a masked lane's traffic from the gateway IP
+    // (fail-closed egress). A missing pool is a hard error.
     match ctx
         .lane_clients
         .as_ref()
         .and_then(|lc| lc.client_for_lane(lane_id))
     {
         Some(c) => Ok(c),
-        None => ctx
-            .upstream_client
-            .clone()
-            .ok_or_else(|| NodeError::Internal("no upstream client configured".into())),
+        None => Err(NodeError::Internal(format!(
+            "no connection pool for lane '{lane_id}' (masked egress requires a lane pool)"
+        ))),
     }
 }
 
@@ -212,7 +210,7 @@ fn build_http_request(
 /// applies. Cancellation (the browser aborts the run, or a node times out)
 /// preempts both.
 async fn send_request_with_timeout(
-    client: &GatewayHttpClient,
+    client: &LaneClient,
     req: hyper::Request<axum::body::Body>,
     deadline: Option<tokio::time::Instant>,
     default_timeout: std::time::Duration,
@@ -225,10 +223,13 @@ async fn send_request_with_timeout(
                 Ok(r) => r.map_err(|e| {
                     NodeError::Provider(protocol_core::error::ProtocolEngineError::ProviderError {
                         message: format!("upstream request failed: {e}"),
+                        // Transport failure — no upstream HTTP status.
+                        status: None,
                     })
                 }),
                 Err(_) => Err(NodeError::Provider(protocol_core::error::ProtocolEngineError::ProviderError {
                     message: "upstream request timed out".into(),
+                    status: None,
                 })),
             }
         }
@@ -250,6 +251,8 @@ async fn handle_error_response(response: hyper::Response<hyper::body::Incoming>)
     let body_text = String::from_utf8_lossy(&body).into_owned();
     NodeError::Provider(protocol_core::error::ProtocolEngineError::ProviderError {
         message: format!("provider returned {status}: {body_text}"),
+        // Real upstream HTTP status (e.g. 429) — drives retry/rotation policy.
+        status: Some(status.as_u16()),
     })
 }
 
@@ -306,6 +309,8 @@ async fn decode_response_body(
             return Err(NodeError::Provider(
                 protocol_core::error::ProtocolEngineError::ProviderError {
                     message: format!("provider returned error at 2xx: {json}"),
+                    // 2xx transport — no rate-limit status to act on.
+                    status: None,
                 },
             ));
         }

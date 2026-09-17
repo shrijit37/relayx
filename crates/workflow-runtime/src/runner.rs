@@ -34,6 +34,8 @@ pub fn compile_workflow_with_lanes(
             id: id.clone(),
             base_url,
             authorization: None,
+            egress: "direct".into(),
+            proxy_url: None,
         });
     }
 
@@ -61,6 +63,8 @@ pub fn build_snapshot(
                 id: id.clone(),
                 base_url,
                 authorization: None,
+                egress: "direct".into(),
+                proxy_url: None,
             });
         }
     }

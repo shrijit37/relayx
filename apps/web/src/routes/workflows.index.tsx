@@ -4,7 +4,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/relay/AppShell";
 import { EmptyState, PageHeader, Panel, StatusText, TableShell, Td } from "@/components/relay/primitives";
-import { useDeleteWorkflowMutation, useDeactivateWorkflowMutation, useWorkflows } from "@/lib/use-workflow-publication";
+import { useDeleteWorkflowMutation, useDeactivateWorkflowMutation, useRenameWorkflowMutation, useWorkflows } from "@/lib/use-workflow-publication";
 
 export const Route = createFileRoute("/workflows/")({
   head: () => ({
@@ -24,7 +24,10 @@ function WorkflowsPage() {
   const { data: live, isPending, isError, error } = useWorkflows();
   const deleteWorkflow = useDeleteWorkflowMutation();
   const deactivateWorkflow = useDeactivateWorkflowMutation();
+  const renameWorkflow = useRenameWorkflowMutation();
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
 
   const rows = live ?? [];
 
@@ -36,6 +39,21 @@ function WorkflowsPage() {
       },
       onError: (err) => toast.error(`Delete failed — ${err.message}`),
     });
+  };
+
+  const submitRename = (id: string) => {
+    const name = renameDraft.trim();
+    if (!name) return;
+    renameWorkflow.mutate(
+      { id, name },
+      {
+        onSuccess: () => {
+          toast.success(`Workflow renamed`);
+          setRenamingId(null);
+        },
+        onError: (err) => toast.error(`Rename failed — ${err.message}`),
+      },
+    );
   };
 
   return (
@@ -68,9 +86,49 @@ function WorkflowsPage() {
               {rows.map((w) => (
                 <tr key={w.id} className="hover:bg-panel-raised/50">
                   <Td>
-                    <Link to="/workflows/$workflowId" params={{ workflowId: w.id }} className="font-medium hover:text-primary">
-                      {w.name}
-                    </Link>
+                    {renamingId === w.id ? (
+                      <span className="flex items-center gap-1">
+                        <input
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") submitRename(w.id);
+                            if (e.key === "Escape") setRenamingId(null);
+                          }}
+                          autoFocus
+                          className="focus-ring h-6 w-40 rounded-sm border border-border bg-canvas px-1.5 text-xs outline-none focus:border-primary"
+                        />
+                        <button
+                          onClick={() => submitRename(w.id)}
+                          disabled={renameWorkflow.isPending || !renameDraft.trim()}
+                          className="focus-ring rounded-sm border border-border px-1.5 py-0.5 text-[10px] hover:border-border-strong disabled:opacity-40"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setRenamingId(null)}
+                          className="focus-ring rounded-sm border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:border-border-strong"
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      <>
+                        <Link to="/workflows/$workflowId" params={{ workflowId: w.id }} className="font-medium hover:text-primary">
+                          {w.name}
+                        </Link>
+                        <button
+                          onClick={() => {
+                            setRenameDraft(w.name);
+                            setRenamingId(w.id);
+                          }}
+                          className="focus-ring ml-1.5 rounded-sm px-1 text-[10px] text-muted-foreground hover:text-foreground"
+                          title="Rename workflow"
+                        >
+                          Rename
+                        </button>
+                      </>
+                    )}
                     <span className="num ml-2 text-[10px] text-muted-foreground">{w.id}</span>
                   </Td>
                   <Td>

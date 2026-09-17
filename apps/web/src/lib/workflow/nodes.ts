@@ -51,6 +51,9 @@ export interface RetryPolicy {
   delayMs: number;
   onTimeout: boolean;
   onProviderError: boolean;
+  /** HTTP status codes that trigger an unconditional retry regardless of
+   *  `onTimeout`/`onProviderError` (e.g. [429] for rate limits). */
+  retryOn?: number[];
 }
 
 export interface FallbackEntryConfig {
@@ -59,13 +62,26 @@ export interface FallbackEntryConfig {
    *  required on the wire — a blank value is a publish-time validation error,
    *  never fabricated. */
   model?: string;
-  /** Capability reference (future MCP/tool support). Never fabricated. */
+  /** Optional protocol override per entry (mirrors Rust FallbackProvider.protocol).
+   *  Omitted = lane default. */
+  protocol?: string;
+  /**
+   * @deprecated future MCP/tool support — NOT on the wire. Setting it is a
+   * publish-blocking validation error (never silently dropped).
+   */
   capabilityRef?: string;
 }
 
 export interface FallbackConfig {
   providers: FallbackEntryConfig[];
   rounds: number;
+  /** How providers are selected across requests: "sequential" (always
+   *  start at index 0) or "round_robin" (each request starts at the next
+   *  provider, spreading traffic across egress IPs). */
+  strategy?: "sequential" | "round_robin";
+  /** HTTP status codes that trigger immediate failover to the next provider
+   *  in the current round (e.g. [429] for rate-limit rotation). */
+  retryOn?: number[];
 }
 
 export interface McpToolRef {

@@ -192,6 +192,8 @@ mod tests {
             id: "test-lane".into(),
             base_url,
             authorization: None,
+            egress: "direct".into(),
+            proxy_url: None,
         });
         Arc::new(registry)
     }
@@ -369,11 +371,15 @@ mod tests {
             id: "a".into(),
             base_url: a,
             authorization: None,
+            egress: "direct".into(),
+            proxy_url: None,
         });
         two_lanes.register(LaneEntry {
             id: "b".into(),
             base_url: b,
             authorization: None,
+            egress: "direct".into(),
+            proxy_url: None,
         });
 
         let wf = Workflow {

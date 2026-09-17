@@ -15,19 +15,17 @@ use workflow_runtime::extension::ExtensionRegistry;
 use workflow_runtime::nodes::{NodeInput, RuntimeValue};
 use workflow_runtime::{ExecutionContext, RuntimeSnapshot};
 
-/// Type alias for the gateway's shared HTTP client.
-pub type GatewayClient =
-    hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, Body>;
-
 /// Execute a workflow plan in-process and return the result as an HTTP response.
 ///
 /// The snapshot supplies the lane registry, the pre-compiled plan, and the
 /// execution metadata (snapshot version + plan hash). The request body is
-/// decoded as JSON and wrapped in a `RuntimeValue::Json`. The provided HTTP
-/// client is injected so LLM nodes can reach their upstream providers;
-/// `lane_clients` (when present) resolves a per-lane pool for each lane.
-// ponytail: 9 params is at the ceiling; group into a RequestSpec struct if another is added.
-// NOTE: This function now has 11 params (ceiling was 9). The next parameter
+/// decoded as JSON and wrapped in a `RuntimeValue::Json`. `lane_clients`
+/// (when present) resolves a per-lane pool for each lane — LLM/fallback
+/// nodes only ever send traffic through a lane's dedicated pool, never a
+/// shared direct client.
+// ponytail: 9 params is at the ceiling; group into a RequestSpec struct if
+// another is added.
+// NOTE: This function now has 10 params (ceiling was 9). The next parameter
 // addition should introduce a RequestSpec/ExecutionParams struct.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_workflow(
@@ -36,7 +34,6 @@ pub async fn execute_workflow(
     request_body: Bytes,
     workflow_id: &str,
     request_id: &str,
-    client: Arc<GatewayClient>,
     lane_clients: Option<Arc<dyn workflow_runtime::AsLaneClient>>,
     deadline: Option<tokio::time::Instant>,
     token_sender: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
@@ -58,7 +55,6 @@ pub async fn execute_workflow(
         request_id.to_string(),
         snapshot.lanes_arc(),
     );
-    ctx.upstream_client = Some(client);
     ctx.lane_clients = lane_clients;
     ctx.snapshot = Some(snapshot.clone());
     ctx.deadline = deadline; // NEW: propagate execution deadline
