@@ -42,7 +42,7 @@ MARKER="<!-- ocr-liveness -->"
 POLL_SECONDS="${REVIEW_LIVENESS_POLL_SECONDS:-15}"
 IDLE_EXIT_SECONDS="${REVIEW_LIVENESS_IDLE_EXIT:-90}"
 GH="${GH_BIN:-gh}"
-GH_OPTS=(--repo "${GITHUB_REPOSITORY:-${GITHUB_REPO:-}}")
+REPO="${GITHUB_REPOSITORY:-${GITHUB_REPO:-}}"
 
 die() {
   printf 'review-liveness: %s\n' "$*" >&2
@@ -70,23 +70,23 @@ start() {
 
   # Remove liveness comments from prior runs (a stale comment from a dead
   # runner would otherwise accumulate next to the new one).
-  "$GH" api "${GH_OPTS[@]}" "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments?per_page=100&sort=created&direction=desc" \
+  "$GH" api "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments?per_page=100&sort=created&direction=desc" \
     | jq -r --arg marker "$MARKER" '.[] | select(.body | contains($marker)) | .id' \
     | while read -r id; do
-      "$GH" api "${GH_OPTS[@]}" -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" || true
+      "$GH" api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" || true
     done
 
   local body
   body="$(printf '%s\n%s\n🔄 **AI review in progress** — watching run \`%s\` …' \
     "$MARKER" "$(run_tag "$run_id")" "$run_id")"
-  "$GH" api "${GH_OPTS[@]}" "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments" \
+  "$GH" api "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments" \
     -f "body=${body}" | jq -r '.id'
 }
 
 # PATCH the comment with the given body.
 patch_comment() {
   local id="$1" body="$2"
-  "$GH" api "${GH_OPTS[@]}" -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" \
+  "$GH" api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" \
     -f "body=${body}" >/dev/null
 }
 
@@ -206,7 +206,7 @@ finish() {
   local pr="$1" comment_id="$2" outcome="$3"
   [ -n "$comment_id" ] || return 0
   if [ "$outcome" = "success" ]; then
-    "$GH" api "${GH_OPTS[@]}" -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" >/dev/null || true
+    "$GH" api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" >/dev/null || true
   else
     fail_banner "$comment_id" "outcome: ${outcome}" "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" ""
   fi
@@ -222,7 +222,7 @@ finish_pr() {
   [ -n "$pr" ] && [ -n "$run_id" ] || die "finish-pr requires <pr> <outcome> <run-id>"
 
   local comment_id
-  comment_id="$("$GH" api "${GH_OPTS[@]}" \
+  comment_id="$("$GH" api \
     "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments?per_page=100&sort=created&direction=desc" \
     | jq -r --arg marker "$MARKER" --arg run "run=${run_id}" \
       '.[] | select(.body | contains($marker) and contains($run)) | .id' \
@@ -231,7 +231,7 @@ finish_pr() {
   [ -n "$comment_id" ] || return 0
 
   if [ "$outcome" = "success" ]; then
-    "$GH" api "${GH_OPTS[@]}" -X DELETE \
+    "$GH" api -X DELETE \
       "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" >/dev/null || true
   else
     fail_banner "$comment_id" "outcome: ${outcome} (runner-level)" \

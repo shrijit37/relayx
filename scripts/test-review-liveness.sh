@@ -96,7 +96,7 @@ test_start() {
   [ "$out" = "42" ] || fail "start printed '$out', want 42"
 
   # The create call must carry the marker + run tag and the right PR.
-  grep -q -- "--repo acme/relayx repos/acme/relayx/issues/123/comments" "$log" \
+  grep -q -- "repos/acme/relayx/issues/123/comments" "$log" \
     || fail "start did not POST to the PR comments endpoint"
   grep -q -- "body=<!-- ocr-liveness -->" "$log" \
     || fail "start comment body missing the liveness marker"
