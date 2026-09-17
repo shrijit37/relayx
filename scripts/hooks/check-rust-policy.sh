@@ -23,23 +23,28 @@
 #   dead_code. No alternate escape hatches. Never weaken lint config instead.
 set -euo pipefail
 
+# Forbidden-pattern regexes come from the single shared source used by the
+# PreToolUse blockers too — a policy change lives in exactly one place.
+# shellcheck source=scripts/hooks/rust-policy-patterns.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rust-policy-patterns.sh"
+
 usage() {
   echo "Usage: $0 [--all] [file.rs ...]" >&2
 }
 
 list_changed_rust_files() {
   {
-    git diff --name-only
-    git diff --cached --name-only
-    git ls-files --others --exclude-standard
-  } | sort -u | grep -E '\.rs$' || true
+    git diff --name-only -z
+    git diff --cached --name-only -z
+    git ls-files --others --exclude-standard -z
+  } | sort -z -u | grep -z -E '\.rs$' || true
 }
 
 list_all_rust_files() {
   {
-    git ls-files -z -- '*.rs' | tr '\0' '\n'
-    git ls-files --others --exclude-standard | grep -E '\.rs$' || true
-  } | sort -u
+    git ls-files -z -- '*.rs'
+    git ls-files --others --exclude-standard -z | grep -z -E '\.rs$' || true
+  } | sort -z -u
 }
 
 # ── Hook mode ────────────────────────────────────────────────────────────
@@ -50,17 +55,28 @@ if [[ ! -t 0 ]]; then
 fi
 
 files=""
-if [[ -n "$INPUT" ]] && echo "$INPUT" | jq -e '.tool_input' &>/dev/null 2>&1; then
-  # Claude Code / Factory Droid / OpenCode hook payload.
-  FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // .tool_args.filePath // empty' 2>/dev/null || true)
-  [[ -n "$FILE_PATH" ]] || exit 0
-  case "$FILE_PATH" in *.rs) ;; *) exit 0 ;; esac
-  [[ -f "$FILE_PATH" ]] || exit 0
-  files="$FILE_PATH"
-elif [[ -n "$INPUT" ]]; then
-  # Neither a hook payload nor a tty — ambiguous. Do not silently scan the
-  # whole tree on garbage stdin; drop through to CLI mode with an empty set.
-  :
+if [[ -n "$INPUT" ]]; then
+  # Non-tty stdin. CLI mode is only valid when stdin is a terminal (or a
+  # pipe feeding explicit file args). In every ambiguous case — unreadable
+  # payload, missing jq — fail OPEN (exit 0) instead of falling through to
+  # a whole-tree scan that could fail an unrelated edit/stop on a
+  # pre-existing violation anywhere in the working tree.
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'check-rust-policy: jq not found — cannot parse hook payload, skipping (fail-open)\n' >&2
+    exit 0
+  fi
+  if echo "$INPUT" | jq -e '.tool_input' >/dev/null 2>&1; then
+    # Claude Code / Factory Droid / OpenCode hook payload.
+    FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.filePath // .tool_args.filePath // empty' 2>/dev/null || true)
+    [[ -n "$FILE_PATH" ]] || exit 0
+    case "$FILE_PATH" in *.rs) ;; *) exit 0 ;; esac
+    [[ -f "$FILE_PATH" ]] || exit 0
+    files="$FILE_PATH"
+  else
+    # Neither a hook payload nor explicit file args on stdin — ambiguous.
+    # Do not silently scan the whole tree on garbage stdin.
+    exit 0
+  fi
 fi
 
 # ── CLI mode (pre-commit, pre-push, CI, manual) ─────────────────────────
@@ -71,28 +87,33 @@ fi
 
 if [[ -z "$files" ]]; then
   if [[ "${1:-}" == "--all" ]]; then
-    files="$(list_all_rust_files)"
+    mapfile -d '' -t rust_files < <(list_all_rust_files)
   elif [[ $# -gt 0 ]]; then
-    files="$(printf '%s\n' "$@")"
+    rust_files=("$@")
   else
-    files="$(list_changed_rust_files)"
+    mapfile -d '' -t rust_files < <(list_changed_rust_files)
   fi
+else
+  mapfile -d '' -t rust_files <<< "$files"
 fi
-
-rust_files=()
-while IFS= read -r file; do
-  [[ -z "$file" ]] && continue
-  rust_files+=("$file")
-done <<< "$files"
 
 if [[ ${#rust_files[@]} -eq 0 ]]; then
   exit 0
 fi
 
 # Test files are exempt from the .unwrap() / .expect() checks: a panicking
-# test only fails that test — no production risk.
+# test only fails that test — no production risk. Match the BASENAME with
+# explicit suffixes only, never free substring matching over the whole path
+# (contest.rs, attest.rs, or crates/test-harness/src/*.rs are NOT tests).
 is_test_file() {
-  grep -qE '(test|tests|_test\.rs|test_)' <<< "$1" && return 0
+  local base
+  base="$(basename "$1")"
+  case "$base" in
+    *_test.rs) return 0 ;;
+  esac
+  case "$1" in
+    */tests/*) return 0 ;;
+  esac
   return 1
 }
 
@@ -111,7 +132,7 @@ check_pattern() {
       continue
     fi
 
-    if grep -nE "$pattern" "$file"; then
+    if grep -nE -- "$pattern" "$file"; then
       echo >&2
       echo "ERROR: Forbidden Rust pattern detected: $description" >&2
       echo "File: $file" >&2
@@ -126,22 +147,22 @@ check_pattern() {
 # ─────────────────────────────────────────────────────────────────────────
 check_pattern \
   "#[allow(dead_code)] / #![allow(dead_code)]" \
-  '#!?\[allow\s*\([^]]*dead_code'
+  "$RUST_PATTERN_ALLOW_DEAD_CODE"
 
 check_pattern \
   "#[expect(dead_code)] / #![expect(dead_code)]" \
-  '#!?\[expect\s*\([^]]*dead_code'
+  "$RUST_PATTERN_EXPECT_DEAD_CODE"
 
 # ─────────────────────────────────────────────────────────────────────────
 # TEMPORARY / ESCAPE-HATCH MACROS
 # ─────────────────────────────────────────────────────────────────────────
 check_pattern \
   "todo!()" \
-  '\btodo!\s*\('
+  "$RUST_PATTERN_TODO"
 
 check_pattern \
   "unimplemented!()" \
-  '\bunimplemented!\s*\('
+  "$RUST_PATTERN_UNIMPLEMENTED"
 
 # ─────────────────────────────────────────────────────────────────────────
 # PANIC-PRONE SHORTCUTS
@@ -149,12 +170,12 @@ check_pattern \
 # ─────────────────────────────────────────────────────────────────────────
 check_pattern \
   ".unwrap()" \
-  '\.unwrap\s*\(\s*\)' \
+  "$RUST_PATTERN_UNWRAP" \
   true
 
 check_pattern \
   ".expect(...)" \
-  '\.expect\s*\(' \
+  "$RUST_PATTERN_EXPECT" \
   true
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -8,6 +8,16 @@
 # cargo never wedges the stop, and scopes clippy to `--all-features` to match
 # the repo's canonical command.
 #
+# Timeout choice: a full workspace suite legitimately exceeds 10 minutes on a
+# cold build (the first `cargo test` after many crates change). 1800s is
+# session-scale: it only fires on a genuinely hung cargo, not a slow one.
+# `timeout` is GNU coreutils and absent on stock macOS — fall back to a plain
+# run there (no bound is better than a hard false-positive block).
+#
+# Output discipline: gate output is streamed to stderr and fed back to the
+# agent, which can flood its context (clippy/test produce thousands of lines).
+# Only print the tail of the log on failure.
+#
 # Exit 2 blocks stopping and feeds stderr back to Droid.
 set -euo pipefail
 
@@ -32,17 +42,22 @@ FAILED=0
 run_gate() {
   local label="$1"; shift
   echo "Running: $*" >&2
+  local log
+  log="$(mktemp)"
   if command -v timeout >/dev/null 2>&1; then
-    if ! timeout 600 "$@" >&2; then
-      echo "$label failed" >&2
+    if ! timeout 1800 "$@" >"$log" 2>&1; then
+      echo "$label failed (tail):" >&2
+      tail -n 40 "$log" >&2
       FAILED=1
     fi
   else
-    if ! "$@" >&2; then
-      echo "$label failed" >&2
+    if ! "$@" >"$log" 2>&1; then
+      echo "$label failed (tail):" >&2
+      tail -n 40 "$log" >&2
       FAILED=1
     fi
   fi
+  rm -f "$log"
 }
 
 run_gate "cargo clippy" cargo clippy --all-features --all-targets --workspace -- -D warnings

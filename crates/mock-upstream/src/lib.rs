@@ -47,7 +47,10 @@ pub struct MockConfig {
     pub json_body: String,
     /// HTTP status code to return for JSON mode. Defaults to 200.
     /// When `Some(429)`, the mock returns a rate-limit error body — useful
-    /// for testing fallback rotation and retry-on-429 logic.
+    /// for testing fallback rotation and retry-on-429 logic. Any other
+    /// non-2xx status returns a generic per-status error body (so an
+    /// upstream-outage simulation gets an honest 502/503 body, not a
+    /// rate-limit one). `json_body` is only used for 2xx responses.
     pub json_status: Option<u16>,
     /// Raw SSE wire body for streaming mode (takes precedence over `chunks`).
     /// Each entry is one SSE data line (e.g. `{"type":"..."}`); the mock emits

@@ -26,8 +26,9 @@ dry_suffix=""
 
 # The gate's Postgres bootstrap is a throwaway db used only by the
 # control-plane tests, which create/drop their own test_* databases and
-# never touch the dev `relayx` database. It runs with trust auth on a
-# loopback-only port, so there is no secret to store or match.
+# never touch the dev `relayx` database. Credentials match scripts/dev.sh
+# and CI (.github/workflows/ci.yml) so the container can be shared between
+# the dev stack and the gate without auth drift.
 
 status() { printf '\n\033[1;36m==> %s%s\033[0m\n' "$*" "$dry_suffix"; }
 step() { printf '    %s\n' "$*"; }
@@ -132,6 +133,37 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Diff-aware fast path
+# ---------------------------------------------------------------------------
+# The gate mirrors CI job-for-job, but stepping the full battery for a
+# push that cannot affect a job is wasted time. Compute the pushed scope
+# once and skip whole families of steps when their inputs are untouched:
+#   rust_scope  — any of: *.rs, Cargo.toml, Cargo.lock, rust-toolchain.toml,
+#                 rustfmt.toml, scripts/hooks/check-rust-policy.sh,
+#                 .claude/hooks/check-rust-policy.sh, .factory/hooks/...
+#   web_scope   — apps/web/** or any content under it
+#   cp_scope    — apps/control-plane/**
+#   docs_scope  — docs/**, scripts/verify-docs.sh, AGENTS.md, CLAUDE.md
+# The Postgres bootstrap is still gated on cp_scope and the behind-main
+# protection runs unconditionally (it is cheap).
+git_scope() {
+  local base="$1"; shift
+  git diff --name-only "$base"...HEAD -- "$@" 2>/dev/null || true
+}
+if [ "$dry_run" != "1" ]; then
+  scope_base="$(git merge-base HEAD origin/main 2>/dev/null || echo HEAD~1)"
+  rust_scope="$(git_scope "$scope_base" '*.rs' 'Cargo.toml' 'Cargo.lock' 'rust-toolchain.toml' 'rustfmt.toml' 'scripts/hooks/check-rust-policy.sh' '.claude/hooks/check-rust-policy.sh' '.factory/hooks/check-rust-policy.sh')"
+  web_scope="$(git_scope "$scope_base" 'apps/web')"
+  cp_scope="$(git_scope "$scope_base" 'apps/control-plane')"
+  docs_scope="$(git_scope "$scope_base" 'docs' 'scripts/verify-docs.sh' 'AGENTS.md' 'CLAUDE.md')"
+  [ -n "$rust_scope" ] && step "scope: rust files changed — running Rust battery"
+  [ -n "$web_scope" ] && step "scope: web changed — running web battery"
+  [ -n "$cp_scope" ] && step "scope: control-plane changed — running control-plane battery"
+  [ -n "$docs_scope" ] && step "scope: docs changed — running docs truth check"
+  [ -z "$rust_scope$web_scope$cp_scope$docs_scope" ] && step "scope: no tracked inputs changed — skipping battery"
+fi
+
+# ---------------------------------------------------------------------------
 # The battery
 # ---------------------------------------------------------------------------
 # Runs are bounded; a hung step (e.g. network fetch for a missing toolchain)
@@ -151,19 +183,19 @@ if [ "$dry_run" = "1" ]; then
 fi
 
 # --- 9. PostgreSQL (started early; the control-plane tests need it) ---------
-if ! pg_isready -h 127.0.0.1 -p 5433 -q 2>/dev/null; then
+if [ -n "$cp_scope" ] && ! pg_isready -h 127.0.0.1 -p 5433 -q 2>/dev/null; then
   status "Postgres 127.0.0.1:5433 not reachable — starting relayx-pg"
   if ! command -v docker >/dev/null 2>&1; then
-    fail "Postgres (steps 8) — docker not found and Postgres is not running on 127.0.0.1:5433"
+    record_failure "Postgres (steps 8) — docker not found and Postgres is not running on 127.0.0.1:5433"
     exit 1
   fi
   if docker ps -a --format '{{.Names}}' | grep -qx relayx-pg; then
     docker start relayx-pg >/dev/null
   else
-    step "creating relayx-pg (postgres:16-alpine, user relayx / db relayx, trust auth)"
+    step "creating relayx-pg (postgres:16-alpine, user relayx / db relayx)"
     docker run -d --name relayx-pg \
       -p 127.0.0.1:5433:5432 \
-      -e POSTGRES_HOST_AUTH_METHOD=trust \
+      -e POSTGRES_PASSWORD=relayx-dev \
       -e POSTGRES_USER=relayx \
       -e POSTGRES_DB=relayx \
       postgres:16-alpine >/dev/null
@@ -175,46 +207,48 @@ if ! pg_isready -h 127.0.0.1 -p 5433 -q 2>/dev/null; then
     sleep 0.5
   done
   if [ "$ready" -ne 1 ]; then
-    fail "Postgres (steps 8) — relayx-pg did not become ready on 127.0.0.1:5433"
+    record_failure "Postgres (steps 8) — relayx-pg did not become ready on 127.0.0.1:5433"
     exit 1
   fi
 fi
 
 # --- 1. Rust policy ----------------------------------------------------------
-if ! "$root/.claude/hooks/check-rust-policy.sh" --all; then
+if [ -n "$rust_scope" ] && ! "$root/.claude/hooks/check-rust-policy.sh" --all; then
   record_failure "Rust policy"
   exit 1
 fi
 
 # --- 2. Format --------------------------------------------------------------
-if ! (cd "$root" && cargo fmt --check); then
+if [ -n "$rust_scope" ] && ! (cd "$root" && cargo fmt --check); then
   record_failure "cargo fmt --check"
   exit 1
 fi
 
 # --- 3. Docs truth ----------------------------------------------------------
-if ! (cd "$root" && scripts/verify-docs.sh); then
+if [ -n "$docs_scope" ] && ! (cd "$root" && scripts/verify-docs.sh); then
   record_failure "scripts/verify-docs.sh"
   exit 1
 fi
 
 # --- 4. Clippy --------------------------------------------------------------
-if ! (cd "$root" && cargo clippy --locked --all-targets --all-features --workspace -- -D warnings); then
+if [ -n "$rust_scope" ] && ! (cd "$root" && cargo clippy --locked --all-targets --all-features --workspace -- -D warnings); then
   record_failure "cargo clippy"
   exit 1
 fi
 
 # --- 5. Rust tests ----------------------------------------------------------
-if ! (cd "$root" && cargo test --locked --all-features --workspace); then
+if [ -n "$rust_scope" ] && ! (cd "$root" && cargo test --locked --all-features --workspace); then
   record_failure "cargo test"
   exit 1
 fi
 
 # --- 6. MSRV -----------------------------------------------------------------
 if ! rustup toolchain list 2>/dev/null | grep -q '^1\.88\.0'; then
-  status "MSRV toolchain 1.88.0 is not installed — install it with: rustup toolchain install 1.88.0"
+  printf '\n\033[1;31mMSRV toolchain 1.88.0 is not installed — run: rustup toolchain install 1.88.0\033[0m\n' >&2
+  record_failure "MSRV toolchain 1.88.0 not installed (run: rustup toolchain install 1.88.0)"
+  exit 1
 fi
-if ! (cd "$root" && cargo +1.88.0 check --locked --all-features --workspace); then
+if [ -n "$rust_scope" ] && ! (cd "$root" && cargo +1.88.0 check --locked --all-features --workspace); then
   record_failure "MSRV check (cargo +1.88.0 check)"
   exit 1
 fi
@@ -244,9 +278,10 @@ lint_web() {
   lint_rc=$?
   set -e
   # Pre-existing toolchain incompatibility (typescript-eslint vs the pinned
-  # typescript 7.0) — warn, don't block. A genuine lint violation still
-  # fails the gate.
-  if printf '%s' "$lint_out" | rg -q "typescript-eslint does not support TS 7|does not support TS"; then
+  # typescript 7.0) — warn, don't block. Match the exact loader error so an
+  # unrelated rule failure can never skip the gate; a genuine lint
+  # violation still fails it.
+  if printf '%s' "$lint_out" | rg -q "You appear to be using TypeScript [0-9]+\..*typescript-eslint|typescript-eslint does not support TS 7"; then
     step "note: web lint skipped — typescript-eslint is incompatible with the pinned typescript 7.0 (pre-existing; see node_modules/typescript-eslint)"
     return 0
   fi
@@ -255,7 +290,7 @@ lint_web() {
   fi
   return "$lint_rc"
 }
-if ! (cd "$root/apps/web" && bun install --frozen-lockfile \
+if [ -n "$web_scope" ] && ! (cd "$root/apps/web" && bun install --frozen-lockfile \
   && bun run typecheck \
   && lint_web \
   && bun test \
@@ -268,7 +303,7 @@ fi
 # `bun run test` (NOT bare `bun test`): package.json carries the flags the
 # suite needs — `--timeout 20000` so DB provisioning in beforeAll cannot
 # trip bun's default 5000ms hook timeout (root cause of flaky pushes).
-if ! (cd "$root/apps/control-plane" && bun install --frozen-lockfile \
+if [ -n "$cp_scope" ] && ! (cd "$root/apps/control-plane" && bun install --frozen-lockfile \
   && bun run typecheck \
   && bun run test); then
   record_failure "control-plane (typecheck/test)"

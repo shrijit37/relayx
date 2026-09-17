@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wrapper: delegate to the single-source shared hook.
+# Wrapper: delegate to the single-source shared hook (fail-open).
 # Canonical implementation: scripts/hooks/check-lsp.sh
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-exec "$root/scripts/hooks/check-lsp.sh" "$@"
+# Shared logic (exec guard, fail-open): scripts/hooks/wrapper-common.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/hooks/wrapper-common.sh"
