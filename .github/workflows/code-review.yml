@@ -40,6 +40,12 @@ jobs:
       # step on success, kept as a red banner on failure). The
       # review-cleanup workflow removes stale comments when this job cannot
       # run its final step (runner death).
+      #
+      # The OCR composite action does its own deep checkout internally; this
+      # shallow checkout is only needed so the workflow steps can reach the
+      # liveness scripts before the action runs.
+      - uses: actions/checkout@v7
+
       - name: Post liveness comment
         id: liveness
         env:
