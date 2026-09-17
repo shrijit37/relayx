@@ -58,6 +58,8 @@ import {
     useLanes,
     useProviders,
     useCatalogModels,
+    useCatalogProviders,
+    useCatalogStatus,
 } from "@/lib/use-workflow-publication";
 import { createWorkflow, saveWorkflowVersion } from "@/lib/api";
 import {
@@ -68,6 +70,7 @@ import {
 } from "@/lib/workflow";
 import type { WorkflowJson } from "@/lib/workflow/serializer";
 import type { CanonicalConfig, CanonicalNode, CanonicalWorkflow } from "@/lib/workflow/nodes";
+import { KNOWN_PROVIDERS } from "@/lib/workflow/node-definitions";
 import { validateWorkflow } from "@/lib/workflow/validation";
 import { runReducer, type RunAction, type RunState } from "@/lib/run-state";
 
@@ -463,7 +466,10 @@ function Canvas({ workflowId }: { workflowId: string }) {
     );
 
     const { data: providers = [] } = useProviders();
-    const providerOptions = providers.map((p) => ({ value: p.name, label: p.name }));
+    // C14: LLM provider is a plain anthropic|openai enum (KNOWN_PROVIDERS) —
+    // never provider-row display names (arbitrary strings warn-then-drop in
+    // validation/serializer). The lane provider_id select stays in lanes page.
+    const providerOptions = KNOWN_PROVIDERS.map((p) => ({ value: p, label: p }));
     const canonicalNode = useMemo(
         () => inspectorCanonical(inspectorNode),
         [inspectorNode],
@@ -487,7 +493,12 @@ function Canvas({ workflowId }: { workflowId: string }) {
         if (!canonicalNode) return [];
         const cfg = canonicalNode.config;
         if (cfg.kind !== "llm" || !cfg.config.provider) return [];
-        const match = providers.find((p) => p.name === cfg.config.provider);
+        // Provider-row fallback: match by protocol prefix (provider rows use
+        // arbitrary display names; the enum is anthropic|openai). Only used
+        // when the catalog has no rows for this provider.
+        const match = providers.find((p) =>
+            p.protocol.toLowerCase().startsWith(cfg.config.provider!.toLowerCase()),
+        );
         const opts: { value: string; label: string }[] = [];
         // Catalog ids are "provider/model" keys (models.dev shape). The
         // picker stores the bare provider-native id ("gpt-4o") — the wire
@@ -514,6 +525,10 @@ function Canvas({ workflowId }: { workflowId: string }) {
             opts.push({ value: match.model, label: match.model });
         return opts;
     }, [catalogModels, providers, canonicalNode]);
+    // A1: catalog sync age + provider list (status/providers endpoints).
+    // Display-only metadata for the model picker — picker behavior unchanged.
+    const { data: catalogStatus } = useCatalogStatus();
+    const { data: catalogProviders = [] } = useCatalogProviders();
 
     const navigate = useNavigate();
 
@@ -732,10 +747,35 @@ function Canvas({ workflowId }: { workflowId: string }) {
         } catch (err: unknown) {
             if (err instanceof DOMException && err.name === "AbortError") {
                 runDispatch({ type: "cancel" });
-            } else {
-                runDispatch({ type: "failed", error: String(err) });
-                toast.error(`Run failed — ${String(err)}`);
+                return;
             }
+            // A2: SSE body empty (proxy stripping) → non-stream fallback.
+            // Only the typed empty-body error falls back; every other error
+            // (HTTP, gateway, abort) keeps its existing behavior.
+            if (err instanceof Error && err.message === "empty response body") {
+                try {
+                    const { runWorkflow } = await import("@/lib/api");
+                    const result = await runWorkflow(workflowId, body);
+                    runDispatch({
+                        type: "completed",
+                        result: {
+                            requestId: result.request_id,
+                            workflowId: result.workflow_id,
+                            workflowVersion: result.workflow_version,
+                            snapshotVersion: result.snapshot_version,
+                            planHash: result.plan_hash,
+                            output: result.output,
+                        },
+                    });
+                    return;
+                } catch (fallbackErr: unknown) {
+                    runDispatch({ type: "failed", error: String(fallbackErr) });
+                    toast.error(`Run failed — ${String(fallbackErr)}`);
+                    return;
+                }
+            }
+            runDispatch({ type: "failed", error: String(err) });
+            toast.error(`Run failed — ${String(err)}`);
         }
     }, [workflowId, dirty, runBody, runDispatch]);
 
@@ -1086,6 +1126,14 @@ function Canvas({ workflowId }: { workflowId: string }) {
                 <span className="num hidden text-muted-foreground sm:inline">
                     {nodes.length} nodes · {edges.length} edges
                 </span>
+                {catalogStatus ? (
+                    <span
+                        className="num hidden text-muted-foreground md:inline"
+                        title={`${catalogStatus.model_count} models · ${catalogStatus.provider_count} providers · source ${catalogStatus.source}`}
+                    >
+                        catalog {catalogStatus.last_sync} · {catalogProviders.length} providers
+                    </span>
+                ) : null}
                 <span className="ml-auto flex items-center gap-3">
                     <span className="num flex items-center gap-1.5">
                         {dirty ? (

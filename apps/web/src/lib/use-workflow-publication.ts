@@ -9,6 +9,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  compileWorkflow,
   createLane,
   createProvider,
   deactivateWorkflow,
@@ -16,25 +17,33 @@ import {
   deleteProvider,
   deleteWorkflow,
   fetchCatalogModels,
+  fetchCatalogProviders,
+  fetchCatalogStatus,
   fetchLanes,
   fetchProviders,
   fetchRun,
   fetchRuns,
   fetchSystemHealth,
+  fetchWorkflow,
   fetchWorkflowLatestVersion,
   fetchWorkflowVersions,
   fetchWorkflows,
   publishWorkflow,
+  renameWorkflow,
   rollbackWorkflow,
+  runWorkflow,
   saveWorkflowVersion,
   updateLane,
   updateProvider,
   validateWorkflow,
   type CatalogModel,
+  type CatalogProvider,
+  type CatalogStatus,
   type ProviderRow,
   type RunRow,
   type VersionInfo,
   type VersionRow,
+  type WorkflowRow,
 } from "@/lib/api";
 import type { WorkflowJson } from "@/lib/workflow";
 
@@ -110,11 +119,34 @@ export function useValidateMutation() {
   });
 }
 
+/** Compile-only alias of validate (POST /workflows/:id/compile — same
+ *  backend handler, same shape; see api.compileWorkflow). */
+export function useCompileMutation() {
+  return useMutation<{ plan_hash: string | null; status: string }, Error, WorkflowJson>({
+    mutationFn: (workflow) => compileWorkflow(workflow),
+  });
+}
+
+/** Non-stream run of the published ACTIVE version (SSE-empty fallback). */
+export function useRunWorkflowMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    Awaited<ReturnType<typeof runWorkflow>>,
+    Error,
+    { workflowId: string; body: unknown }
+  >({
+    mutationFn: ({ workflowId, body }) => runWorkflow(workflowId, body),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
+  });
+}
+
 /** Real persisted provider rows (config only — no fabricated health). */
-export function useProviders() {
+export function useProviders(projectId?: string) {
   return useQuery({
-    queryKey: ["providers"],
-    queryFn: fetchProviders,
+    queryKey: ["providers", projectId ?? "all"],
+    queryFn: () => fetchProviders(projectId),
   });
 }
 
@@ -156,10 +188,10 @@ export function useDeleteProviderMutation() {
 }
 
 /** Real persisted lane rows. */
-export function useLanes() {
+export function useLanes(projectId?: string) {
   return useQuery({
-    queryKey: ["lanes"],
-    queryFn: () => fetchLanes(),
+    queryKey: ["lanes", projectId ?? "all"],
+    queryFn: () => fetchLanes(projectId),
   });
 }
 
@@ -249,11 +281,23 @@ export function useDeleteWorkflowMutation() {
   });
 }
 
-/** Run-history rows (optionally filtered by workflow). */
-export function useRuns(workflowId?: string) {
+/** Rename a workflow row. */
+export function useRenameWorkflowMutation() {
+  const queryClient = useQueryClient();
+  return useMutation<WorkflowRow, Error, { id: string; name: string }>({
+    mutationFn: ({ id, name }) => renameWorkflow(id, name),
+    onSuccess: (_row, vars) => {
+      queryClient.invalidateQueries({ queryKey: publicationKeys.workflows });
+      queryClient.invalidateQueries({ queryKey: ["workflow-row", vars.id] });
+    },
+  });
+}
+
+/** Run-history rows (optionally filtered by workflow and/or project). */
+export function useRuns(workflowId?: string, projectId?: string) {
   return useQuery<RunRow[]>({
-    queryKey: ["runs", workflowId ?? "all"],
-    queryFn: () => fetchRuns(workflowId),
+    queryKey: ["runs", workflowId ?? "all", projectId ?? "all"],
+    queryFn: () => fetchRuns(workflowId, projectId),
     refetchInterval: (query) =>
       (query.state.data ?? []).some((r) => r.status === "running") ? 10_000 : false,
   });
@@ -280,15 +324,30 @@ export function useSystemHealth() {
   });
 }
 
-/** Latest persisted version row for the editor's workflow (durable truth). */
+/** Durable workflow row (A3 — real GET /workflows/:id, not versions[0]). */
 export function useWorkflowRow(workflowId: string) {
   return useQuery({
     queryKey: ["workflow-row", workflowId],
-    queryFn: async () => {
-      const rows = await fetchWorkflowVersions(workflowId);
-      return rows.length > 0 ? rows[0] : null;
-    },
+    queryFn: () => fetchWorkflow(workflowId),
     enabled: workflowId !== "new",
+  });
+}
+
+/** Catalog sync metadata (GET /catalog/status). */
+export function useCatalogStatus() {
+  return useQuery<CatalogStatus>({
+    queryKey: ["catalog-status"],
+    queryFn: fetchCatalogStatus,
+    staleTime: 60_000,
+  });
+}
+
+/** Catalog provider list (GET /catalog/providers). */
+export function useCatalogProviders() {
+  return useQuery<CatalogProvider[]>({
+    queryKey: ["catalog-providers"],
+    queryFn: fetchCatalogProviders,
+    staleTime: 60_000,
   });
 }
 

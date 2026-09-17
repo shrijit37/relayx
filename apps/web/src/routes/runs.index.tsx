@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { AppShell } from "@/components/relay/AppShell";
 import { EmptyState, PageHeader, StatusText, TableShell, Td } from "@/components/relay/primitives";
@@ -19,7 +20,12 @@ export const Route = createFileRoute("/runs/")({
 });
 
 function RunsPage() {
-  const { data: runs, isPending, isError, error } = useRuns();
+  // A4: workflow filter (default unfiltered). Backend ?workflow_id= support
+  // already exists — this only threads the selector into useRuns.
+  const [filterWorkflowId, setFilterWorkflowId] = useState<string>("all");
+  const { data: runs, isPending, isError, error } = useRuns(
+    filterWorkflowId === "all" ? undefined : filterWorkflowId,
+  );
   const { data: workflows } = useWorkflows();
 
   const workflowName = (id: string) =>
@@ -28,6 +34,23 @@ function RunsPage() {
   return (
     <AppShell>
       <PageHeader title="Runs" subtitle="Execution history from durable run records (populated by real workflow executions)." />
+      <div className="px-4 pt-3">
+        <label className="flex max-w-xs items-center gap-2 text-xs text-muted-foreground">
+          <span className="label-xs">Workflow</span>
+          <select
+            value={filterWorkflowId}
+            onChange={(e) => setFilterWorkflowId(e.target.value)}
+            className="focus-ring h-7 flex-1 rounded-sm border border-border bg-canvas px-2 text-xs outline-none focus:border-primary"
+          >
+            <option value="all">all workflows</option>
+            {(workflows ?? []).map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
       <div className="p-4">
         {isPending ? (
           <div className="text-xs text-muted-foreground">loading runs…</div>

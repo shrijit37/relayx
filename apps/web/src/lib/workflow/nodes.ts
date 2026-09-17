@@ -62,7 +62,13 @@ export interface FallbackEntryConfig {
    *  required on the wire — a blank value is a publish-time validation error,
    *  never fabricated. */
   model?: string;
-  /** Capability reference (future MCP/tool support). Never fabricated. */
+  /** Optional protocol override per entry (mirrors Rust FallbackProvider.protocol).
+   *  Omitted = lane default. */
+  protocol?: string;
+  /**
+   * @deprecated future MCP/tool support — NOT on the wire. Setting it is a
+   * publish-blocking validation error (never silently dropped).
+   */
   capabilityRef?: string;
 }
 

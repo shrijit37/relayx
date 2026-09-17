@@ -13,7 +13,8 @@ import { cn } from "@/lib/utils";
 import { KV, SectionLabel } from "../primitives";
 import { nodeMeta } from "./nodes";
 import type { CanonicalConfig, CanonicalNode, InputVariable } from "@/lib/workflow/nodes";
-import { getNodeDefinition, parseStatusList, formatStatusList, VARIABLE_TYPES, type FieldDef } from "@/lib/workflow/node-definitions";
+import { getNodeDefinition, parseStatusList, formatStatusList, STREAM_PROTOCOLS, VARIABLE_TYPES, type FieldDef } from "@/lib/workflow/node-definitions";
+import type { FallbackEntryConfig } from "@/lib/workflow/nodes";
 import type { Issue } from "@/lib/workflow/validation";
 
 function Group({ label, children }: { label: string; children: React.ReactNode }) {
@@ -27,6 +28,105 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
 
 const inputCls =
     "focus-ring h-7 w-full rounded-sm border border-border bg-canvas px-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary";
+
+/**
+ * Fallback provider chain editor (A6 — same list pattern as InputVariables).
+ * Per-row: lane select (reuses laneOptions) + model input (required on the
+ * wire) + optional protocol select (empty = lane default). capabilityRef is
+ * NOT editable (deprecated, future MCP/tool support — see nodes.ts).
+ */
+function FallbackProviders({
+    providers,
+    onChange,
+    laneOptions,
+    issue,
+}: {
+    providers: FallbackEntryConfig[];
+    onChange: (v: unknown) => void;
+    laneOptions: { value: string; label: string }[];
+    issue?: Issue | undefined;
+}) {
+    const update = (next: FallbackEntryConfig[]) => onChange(next);
+    return (
+        <div className="mt-1">
+            {providers.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">
+                    No failover lanes — add at least one (publish requires ≥ 1).
+                </p>
+            ) : (
+                <div className="space-y-2">
+                    {providers.map((p, i) => (
+                        <div key={i} className="rounded-sm border border-border bg-canvas/60 p-2">
+                            <div className="flex items-center gap-1.5">
+                                <select
+                                    value={p.lane}
+                                    onChange={(e) => {
+                                        const next = [...providers];
+                                        next[i] = { ...p, lane: e.target.value };
+                                        update(next);
+                                    }}
+                                    className={cn(inputCls, "flex-1 appearance-none")}
+                                    aria-label={`Fallback ${i + 1} lane`}
+                                >
+                                    {!p.lane ? <option value="">lane…</option> : null}
+                                    {laneOptions.map((o) => (
+                                        <option key={o.value} value={o.value}>{o.label}</option>
+                                    ))}
+                                </select>
+                                <button
+                                    onClick={() => update(providers.filter((_, j) => j !== i))}
+                                    className="focus-ring rounded-sm p-1 text-muted-foreground hover:text-fail"
+                                    aria-label={`Remove fallback ${i + 1}`}
+                                >
+                                    <Trash2 className="size-3.5" />
+                                </button>
+                            </div>
+                            <input
+                                value={p.model ?? ""}
+                                placeholder="model override (required)"
+                                onChange={(e) => {
+                                    const next = [...providers];
+                                    next[i] = { ...p, model: e.target.value };
+                                    update(next);
+                                }}
+                                className={cn(inputCls, "mt-1.5")}
+                                aria-label={`Fallback ${i + 1} model`}
+                            />
+                            <select
+                                value={p.protocol ?? ""}
+                                onChange={(e) => {
+                                    const next = [...providers];
+                                    const v = e.target.value;
+                                    if (v) {
+                                        next[i] = { ...p, protocol: v };
+                                    } else {
+                                        const { protocol: _dropped, ...rest } = p;
+                                        next[i] = rest;
+                                    }
+                                    update(next);
+                                }}
+                                className={cn(inputCls, "mt-1.5 appearance-none")}
+                                aria-label={`Fallback ${i + 1} protocol`}
+                            >
+                                <option value="">protocol: lane default</option>
+                                {STREAM_PROTOCOLS.map((o) => (
+                                    <option key={o.value} value={o.value}>{o.label}</option>
+                                ))}
+                            </select>
+                        </div>
+                    ))}
+                </div>
+            )}
+            {issue ? <p className="mt-1 text-[10px] text-fail">{issue.message}</p> : null}
+            <button
+                onClick={() => update([...providers, { lane: "", model: "" }])}
+                className="focus-ring mt-2 flex items-center gap-1.5 rounded-sm border border-border px-2 py-1 text-[11px] text-muted-foreground hover:border-border-strong hover:text-foreground"
+            >
+                <Plus className="size-3" /> Add fallback lane
+            </button>
+        </div>
+    );
+}
 
 function Field({
     def,
@@ -69,7 +169,14 @@ function Field({
                 </span>
                 {issue ? <span className="text-[10px] text-fail">{issue.message}</span> : null}
             </div>
-            {def.type === "boolean" ? (
+            {def.type === "fallbackProviders" ? (
+                <FallbackProviders
+                    providers={Array.isArray(value) ? (value as FallbackEntryConfig[]) : []}
+                    onChange={onChange}
+                    laneOptions={laneOptions}
+                    issue={issue}
+                />
+            ) : def.type === "boolean" ? (
                 <div className="mt-1 flex items-center gap-2">
                     <input
                         type="checkbox"
@@ -475,6 +582,10 @@ function applyField(config: CanonicalConfig, name: string, value: unknown): void
                 config.fallback.strategy = value as "sequential" | "round_robin";
             else if (name === "retryOn")
                 config.fallback.retryOn = Array.isArray(value) ? (value as number[]) : [];
+            else if (name === "providers")
+                config.fallback.providers = Array.isArray(value)
+                    ? (value as FallbackEntryConfig[])
+                    : [];
             break;
         case "retry":
             if (name.startsWith("target."))

@@ -223,10 +223,16 @@ function configFor(n: CanonicalNode, issues: Issue[]): SchemaNodeConfig | null {
     case "fallback": {
       if (c.fallback.providers.length === 0) issues.push({ nodeId: n.id, severity: "error", message: "Fallback needs at least one provider lane." });
       const providers = c.fallback.providers.map((p) => {
+        // A7: capabilityRef is deprecated/future — never silently dropped.
+        // Setting it blocks publish (fail-closed) instead of vanishing.
+        if (p.capabilityRef) {
+          issues.push({ nodeId: n.id, field: `provider.${p.lane}.capabilityRef`, severity: "error", message: `Fallback lane '${p.lane}' has a capabilityRef (future MCP/tool support) — it is not on the wire and blocks publish; remove it.` });
+        }
         const e: { lane_id: string; model: string; protocol?: string } = { lane_id: p.lane, model: p.model ?? "" };
         if (p.model === undefined || p.model === "") {
           issues.push({ nodeId: n.id, field: `provider.${p.lane}.model`, severity: "error", message: `Fallback lane '${p.lane}' requires a model override (Rust FallbackProvider.model is required).` });
         }
+        if (p.protocol !== undefined) e.protocol = p.protocol;
         return e;
       });
       const out: Extract<SchemaNodeConfig, { kind: "fallback" }> = {
@@ -330,7 +336,12 @@ function configFromSchema(sn: SchemaNode, issues: Issue[]): CanonicalConfig | nu
     case "fallback": return {
       kind: "fallback",
       fallback: {
-        providers: c.providers.map((p) => ({ lane: p.lane_id, ...(p.model ? { model: p.model } : {}) })),
+        providers: c.providers.map((p) => {
+          const e: { lane: string; model?: string; protocol?: string } = { lane: p.lane_id };
+          if (p.model) e.model = p.model;
+          if (p.protocol !== undefined) e.protocol = p.protocol;
+          return e;
+        }),
         rounds: c.rounds,
         ...(c.strategy ? { strategy: c.strategy } : {}),
         // Round-trip the empty list too — an absent key means the Rust

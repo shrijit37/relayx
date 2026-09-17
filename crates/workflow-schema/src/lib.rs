@@ -92,6 +92,31 @@ pub struct InputConfig {
     /// Expected input port type.
     #[serde(default)]
     pub input_type: PortType,
+    /// Editor metadata persisted on the wire (display/hydration only — the
+    /// runtime ignores value/description/variables for execution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    /// Human-readable description of the accepted input (display only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Declared input variables (display only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<Vec<InputVariable>>,
+}
+
+/// Declared expected input variable (editor metadata, not executed).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InputVariable {
+    /// Variable name.
+    pub name: String,
+    /// Value type (string | number | boolean | object | array).
+    pub r#type: String,
+    /// Optional description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Whether the variable is required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
 }
 
 /// Configuration for an Output node.
@@ -100,6 +125,10 @@ pub struct OutputConfig {
     /// Output port type.
     #[serde(default)]
     pub output_type: PortType,
+    /// Editor metadata persisted on the wire (display/hydration only — the
+    /// runtime ignores `value` for execution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
 }
 
 /// Configuration for an LLM node.

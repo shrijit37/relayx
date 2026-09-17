@@ -4,7 +4,7 @@
 //! Guard rails: if the web serializer changes a config shape, this test
 //! fails — keeping the "one canonical workflow" contract honest on the wire.
 
-use workflow_schema::{FallbackStrategy, Node, NodeConfig, NodeKind, Workflow};
+use workflow_schema::{FallbackStrategy, Node, NodeConfig, NodeKind, PortType, Workflow};
 
 fn llm_fixture() -> serde_json::Value {
     serde_json::json!({
@@ -49,6 +49,25 @@ fn fallback_fixture() -> serde_json::Value {
     })
 }
 
+/// A7: the web serializer now emits optional per-entry `protocol` (mirroring
+/// the frontend FallbackEntryConfig — serializer.ts providers branch).
+fn fallback_with_protocol_fixture() -> serde_json::Value {
+    serde_json::json!({
+        "id": "fb2", "kind": "fallback",
+        "config": {
+            "kind": "fallback",
+            "providers": [
+                {"lane_id": "anthropic-primary", "model": "claude-sonnet", "protocol": "anthropic"},
+                {"lane_id": "openai-direct", "model": "gpt-4o", "protocol": "openai_chat"}
+            ],
+            "rounds": 2,
+            "strategy": "round_robin",
+            "retry_on": []
+        },
+        "inputs": [], "outputs": []
+    })
+}
+
 #[test]
 fn web_llm_shape_parses() {
     let v: Node = serde_json::from_value(llm_fixture()).expect("llm node must deserialize");
@@ -70,6 +89,157 @@ fn web_fallback_shape_parses() {
         serde_json::from_value(fallback_fixture()).expect("fallback node must deserialize");
     assert_eq!(v.kind, NodeKind::Fallback);
     assert!(matches!(v.config, NodeConfig::Fallback(_)));
+}
+
+#[test]
+fn web_fallback_protocol_and_explicit_empty_retry_on_round_trip() {
+    // Every entry carries lane_id + model + optional protocol; strategy and
+    // an EXPLICIT [] retry_on must survive the wire (231170e semantics:
+    // absent key → Rust default [429]; explicit [] → rotation disabled).
+    let v: Node = serde_json::from_value(fallback_with_protocol_fixture())
+        .expect("fallback with protocol must deserialize");
+    let config = match &v.config {
+        NodeConfig::Fallback(c) => c,
+        _ => panic!("expected fallback config"),
+    };
+    assert_eq!(config.providers.len(), 2);
+    assert_eq!(config.providers[0].protocol.as_deref(), Some("anthropic"));
+    assert_eq!(config.providers[1].protocol.as_deref(), Some("openai_chat"));
+    assert_eq!(config.providers[1].model, "gpt-4o");
+    assert_eq!(config.strategy, FallbackStrategy::RoundRobin);
+    assert!(
+        config.retry_on.is_empty(),
+        "explicit [] must disable rotation"
+    );
+    // The values survive serialization (the web → gateway wire path).
+    let json = serde_json::to_value(&v).expect("fallback node must serialize");
+    assert_eq!(
+        json["config"]["providers"][0]["protocol"],
+        serde_json::json!("anthropic")
+    );
+    assert_eq!(
+        json["config"]["providers"][1]["protocol"],
+        serde_json::json!("openai_chat")
+    );
+    assert_eq!(json["config"]["retry_on"], serde_json::json!([]));
+    // An omitted protocol stays omitted (skip_serializing_if) — mixed chains
+    // (some entries with, some without) are valid.
+    let mixed: Node = serde_json::from_value(serde_json::json!({
+        "id": "fb3", "kind": "fallback",
+        "config": {
+            "kind": "fallback",
+            "providers": [
+                {"lane_id": "anthropic-primary", "model": "claude-sonnet"},
+                {"lane_id": "openai-direct", "model": "gpt-4o", "protocol": "openai_responses"}
+            ],
+            "rounds": 1
+        },
+        "inputs": [], "outputs": []
+    }))
+    .expect("mixed fallback must deserialize");
+    let mixed_config = match &mixed.config {
+        NodeConfig::Fallback(c) => c,
+        _ => panic!("expected fallback config"),
+    };
+    assert!(mixed_config.providers[0].protocol.is_none());
+    assert_eq!(
+        mixed_config.providers[1].protocol.as_deref(),
+        Some("openai_responses")
+    );
+}
+
+#[test]
+fn web_input_output_editor_metadata_round_trips() {
+    // C15: the web serializer emits value/variables/description on input and
+    // value on output (serializer.ts input/output branches). Before the Rust
+    // struct extension these keys silently vanished on the wire; they must
+    // round-trip losslessly now.
+    let input_json = serde_json::json!({
+        "id": "in1", "kind": "input",
+        "config": {
+            "kind": "input",
+            "input_type": "json",
+            "value": { "hello": "world" },
+            "description": "Accepts arbitrary JSON payloads",
+            "variables": [
+                { "name": "user_id", "type": "string", "required": true },
+                { "name": "count", "type": "number", "description": "batch size" },
+            ]
+        },
+        "inputs": [], "outputs": []
+    });
+    let v: Node =
+        serde_json::from_value(input_json).expect("input node with metadata must deserialize");
+    let cfg = match &v.config {
+        NodeConfig::Input(c) => c,
+        _ => panic!("expected input config"),
+    };
+    assert_eq!(cfg.input_type, PortType::Json);
+    assert_eq!(cfg.value, Some(serde_json::json!({ "hello": "world" })));
+    assert_eq!(
+        cfg.description.as_deref(),
+        Some("Accepts arbitrary JSON payloads")
+    );
+    let vars = cfg
+        .variables
+        .as_ref()
+        .expect("input variables must be present");
+    assert_eq!(vars.len(), 2);
+    assert_eq!(vars[0].name, "user_id");
+    assert_eq!(vars[0].r#type, "string");
+    assert_eq!(vars[0].required, Some(true));
+    assert_eq!(vars[1].description.as_deref(), Some("batch size"));
+
+    // Re-serialize and compare value-equality (serde may reorder keys).
+    let json = serde_json::to_value(&v).expect("input node must serialize");
+    assert_eq!(
+        json["config"]["value"],
+        serde_json::json!({ "hello": "world" })
+    );
+    assert_eq!(
+        json["config"]["description"],
+        serde_json::json!("Accepts arbitrary JSON payloads")
+    );
+    assert_eq!(
+        json["config"]["variables"][0]["required"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        json["config"]["variables"][1]["description"],
+        serde_json::json!("batch size")
+    );
+
+    // Output node with a `value` key (editor metadata) must not be dropped.
+    let output_json = serde_json::json!({
+        "id": "out1", "kind": "output",
+        "config": { "kind": "output", "output_type": "message", "value": "final transcript" },
+        "inputs": [], "outputs": []
+    });
+    let ov: Node =
+        serde_json::from_value(output_json).expect("output node with metadata must deserialize");
+    let oc = match &ov.config {
+        NodeConfig::Output(c) => c,
+        _ => panic!("expected output config"),
+    };
+    assert_eq!(oc.value, Some(serde_json::json!("final transcript")));
+    let ojson = serde_json::to_value(&ov).expect("output node must serialize");
+    assert_eq!(
+        ojson["config"]["value"],
+        serde_json::json!("final transcript")
+    );
+
+    // Empty editor metadata must serialize WITHOUT the optional keys
+    // (skip_serializing_if) — compact wire, stable plan hashes.
+    let plain: Node = serde_json::from_value(serde_json::json!({
+        "id": "in2", "kind": "input",
+        "config": { "kind": "input", "input_type": "message" },
+        "inputs": [], "outputs": []
+    }))
+    .expect("plain input must deserialize");
+    let plain_json = serde_json::to_value(&plain).expect("plain input must serialize");
+    assert!(plain_json["config"].get("value").is_none());
+    assert!(plain_json["config"].get("description").is_none());
+    assert!(plain_json["config"].get("variables").is_none());
 }
 
 #[test]

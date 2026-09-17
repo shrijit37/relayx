@@ -17,7 +17,7 @@ import type {
 
 export type FieldType =
   | "string" | "number" | "integer" | "boolean" | "enum" | "list"
-  | "reference" | "provider" | "model" | "lane";
+  | "reference" | "provider" | "model" | "lane" | "fallbackProviders";
 
 /** Parse a comma-separated status list ("429,503") into a `number[]`,
  *  preserving order and dropping blanks/non-numeric tokens. Used by the
@@ -108,8 +108,13 @@ export const STREAM_PROTOCOLS = [
 export const KNOWN_PROVIDERS = ["anthropic", "openai"] as const;
 
 const LLM_FIELDS: FieldDef[] = [
-  { name: "provider", label: "Provider", type: "provider", reference: "providers", placeholder: "e.g. anthropic",
-    help: "Display reference — the runtime routes by lane + protocol; the backend has no provider field." },
+  { name: "provider", label: "Provider", type: "enum",
+    options: [
+      { value: "anthropic", label: "anthropic" },
+      { value: "openai", label: "openai" },
+    ],
+    placeholder: "e.g. anthropic",
+    help: "Plain enum (C14) — the runtime routes by lane + protocol; the backend has no provider field." },
   { name: "model", label: "Model", type: "model", reference: "models", placeholder: "e.g. claude-sonnet" },
   { name: "lane", label: "Lane", type: "lane", reference: "lanes", required: true, placeholder: "lane id" },
   { name: "protocol", label: "Protocol", type: "enum", options: STREAM_PROTOCOLS, placeholder: "lane default",
@@ -274,6 +279,8 @@ const defs: Record<EditorKind, NodeDefinition> = {
     inputs: [{ name: "in", direction: "input", portType: "message", required: true }],
     outputs: [{ name: "out", direction: "output", portType: "message", required: true }],
     fields: [
+      { name: "providers", label: "Providers", type: "fallbackProviders",
+        help: "Ordered lane + model (+ optional protocol) failover chain. Model is required per lane (Rust FallbackProvider.model)." },
       { name: "rounds", label: "Rounds", type: "integer", min: 0, default: 1 },
       { name: "strategy", label: "Strategy", type: "enum", required: true, default: "sequential",
         options: [

@@ -11,7 +11,7 @@ import {
   useProviders,
   useUpdateLaneMutation,
 } from "@/lib/use-workflow-publication";
-import type { LaneRow } from "@/lib/api";
+import { DEFAULT_PROJECT, type LaneRow } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/lanes")({
@@ -96,7 +96,7 @@ function LanesPage() {
       credential_ref?: { ref: string; provider: string } | null;
     } = {
       name: formId.trim() || (endpoint.trim() || baseUrl.trim()),
-      project_id: "proj_default",
+      project_id: DEFAULT_PROJECT,
       base_url: baseUrl.trim(),
       egress: egress === "masked" ? "masked" : "direct",
     };
