@@ -82,18 +82,22 @@ jobs:
           head_sha: ${{ inputs.head_sha || '' }}
           pr_number: ${{ inputs.pr_number || '' }}
 
-      # Live-update the liveness comment while the review runs. Background
-      # processes persist on the same runner, so the whole loop survives the
-      # step.
+      # Live-update the liveness comment while the review runs. `background:
+      # true` keeps this step alive for the entire job; a plain `&` background
+      # process is killed when its step's shell exits, so the watcher would
+      # never survive to the OCR step.
       - name: Watch review progress
+        background: true
         env:
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
           COMMENT_ID: ${{ steps.liveness.outputs.comment-id }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Watcher failure must never fail the review itself; the always()
+          # finalize step and the review-cleanup workflow are the nets that
+          # surface a broken watcher.
           bash scripts/review-liveness.sh watch "${PR_NUMBER}" "${COMMENT_ID}" "${GITHUB_RUN_ID}" \
-            /tmp/ocr-stderr.log &
-          echo $! > "$RUNNER_TEMP/liveness-watch-pid.txt"
+            /tmp/ocr-stderr.log || true
 
       # Delete the liveness comment on success (the sticky summary stays as
       # the only visible output); keep it as a red "stopped" banner otherwise,
@@ -105,11 +109,8 @@ jobs:
           COMMENT_ID: ${{ steps.liveness.outputs.comment-id }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -f "$RUNNER_TEMP/liveness-watch-pid.txt" ]; then
-            kill "$(cat "$RUNNER_TEMP/liveness-watch-pid.txt")" 2>/dev/null || true
-          fi
           if [ "${{ steps.review.outcome }}" = "success" ]; then
-            bash scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" success
+            bash scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" success || true
           else
-            bash scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" "review ${{ steps.review.outcome }}"
+            bash scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" "review ${{ steps.review.outcome }}" || true
           fi
