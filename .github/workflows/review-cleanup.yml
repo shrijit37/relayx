@@ -61,9 +61,9 @@ jobs:
           # deleted by the next review run's start step anyway.
           if [ "$conclusion" = "success" ]; then
             # Find and delete liveness comments for THIS run.
-            "${{ github.workspace }}/scripts/review-liveness.sh" \
+            bash "${{ github.workspace }}/scripts/review-liveness.sh" \
               finish-pr "$pr" "$conclusion" "${{ steps.resolve.outputs.run-id }}"
           else
-            "${{ github.workspace }}/scripts/review-liveness.sh" \
+            bash "${{ github.workspace }}/scripts/review-liveness.sh" \
               finish-pr "$pr" "$conclusion" "${{ steps.resolve.outputs.run-id }}"
           fi

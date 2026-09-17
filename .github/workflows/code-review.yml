@@ -54,7 +54,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number || github.event.issue.number }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/review-liveness.sh start "${PR_NUMBER}" "${GITHUB_RUN_ID}" \
+          bash scripts/review-liveness.sh start "${PR_NUMBER}" "${GITHUB_RUN_ID}" \
             > "$RUNNER_TEMP/liveness-comment-id.txt"
           echo "comment-id=$(cat "$RUNNER_TEMP/liveness-comment-id.txt")" >> "$GITHUB_OUTPUT"
 
@@ -91,7 +91,7 @@ jobs:
           COMMENT_ID: ${{ steps.liveness.outputs.comment-id }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          scripts/review-liveness.sh watch "${PR_NUMBER}" "${COMMENT_ID}" "${GITHUB_RUN_ID}" \
+          bash scripts/review-liveness.sh watch "${PR_NUMBER}" "${COMMENT_ID}" "${GITHUB_RUN_ID}" \
             /tmp/ocr-stderr.log &
           echo $! > "$RUNNER_TEMP/liveness-watch-pid.txt"
 
@@ -109,7 +109,7 @@ jobs:
             kill "$(cat "$RUNNER_TEMP/liveness-watch-pid.txt")" 2>/dev/null || true
           fi
           if [ "${{ steps.review.outcome }}" = "success" ]; then
-            scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" success
+            bash scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" success
           else
-            scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" "review ${{ steps.review.outcome }}"
+            bash scripts/review-liveness.sh finish "${PR_NUMBER}" "${COMMENT_ID}" "review ${{ steps.review.outcome }}"
           fi
