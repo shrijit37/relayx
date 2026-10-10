@@ -54,7 +54,7 @@ export async function buildApp(opts: {
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
 
-  registerHealthRoutes(app, gateway);
+  registerHealthRoutes(app, gateway, pool);
   registerWorkflowRoutes(app, { pool, gateway, publish });
   registerProviderRoutes(app, pool, defaultProjectId);
   registerLaneRoutes(app, pool, defaultProjectId);
