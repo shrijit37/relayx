@@ -15,7 +15,7 @@ Machine-checked counts — the single source of truth for numbers quoted anywher
 | rust_tests_workflow_runtime | 81 |
 | rust_tests_mock_upstream | 4 |
 | web_tests | 38 |
-| control_plane_tests | 51 |
+| control_plane_tests | 53 |
 | page_routes | 15 |
 <!-- END CANONICAL FACTS -->
 ## Status
