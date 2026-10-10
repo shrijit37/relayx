@@ -46,7 +46,7 @@ Client → Gateway (Rust) → Providers (Anthropic, OpenAI, …)
 | SSE streaming overhead | low-ms | ~0.022 ms |
 | Rust tests | — | 311 passing |
 | Frontend tests | — | 38 passing |
-| Control-plane integration tests | — | 51 passing |
+| Control-plane integration tests | — | 53 passing |
 | Gateway `/run` integration test | — | included (publication_hot_swap) |
 
 ## Quick start
