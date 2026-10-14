@@ -35,7 +35,7 @@ jobs:
     steps:
       - name: Open Code Review
         # Pin to a full commit SHA (supply-chain hardening).
-        uses: alibaba/open-code-review@f1101fd7f51304c82e4a4f292bbee88aea0823cf
+        uses: alibaba/open-code-review@fabbdb296b0d97e2140ada8d54ca7d6d6d1d7ad4
         with:
           review_concurrency: '1'
           llm_url: https://gateway.shrijit.tech/v1
